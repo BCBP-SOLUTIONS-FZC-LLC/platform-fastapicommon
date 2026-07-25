@@ -40,17 +40,18 @@ jobs:
         with:
           ref: ${{ github.event.inputs.tag || github.ref }}
 
-      - name: Set up Python
-        uses: actions/setup-python@v7
+      - name: Install uv
+        uses: astral-sh/setup-uv@v9.0.0
         with:
           python-version: ${{ matrix.python-version }}
-          cache: pip
 
-      - name: Install dependencies
-        run: pip install -e ".[dev,grpc,examples]"
+      - name: Install dependencies (uv sync from uv.lock)
+        run: uv sync --extra grpc
 
+      # Scoped to unit + integration: tests/e2e builds and runs the real Docker image,
+      # which is exercised separately by ci.yml's "Smoke tests" job before this ever merges.
       - name: Test with coverage (>=90% required)
-        run: pytest
+        run: uv run pytest tests/unit tests/integration
 
   build:
     name: Build
@@ -62,19 +63,19 @@ jobs:
         with:
           ref: ${{ github.event.inputs.tag || github.ref }}
 
-      - name: Set up Python
-        uses: actions/setup-python@v7
+      - name: Install uv
+        uses: astral-sh/setup-uv@v9.0.0
         with:
           python-version: '3.12'
-          cache: pip
 
       - name: Build wheel + sdist
-        run: |
-          pip install build twine
-          python -m build
+        run: uv build
 
+      # Build + verify only — no publish step here (pypi-publish below handles the
+      # actual PyPI upload via Trusted Publishing). This job never runs `uv sync`, so
+      # `--with twine` installs it into an ephemeral environment just for this command.
       - name: Verify build artifacts (twine check)
-        run: twine check dist/*
+        run: uv run --with twine twine check dist/*
 
       - name: Upload build artifacts
         uses: actions/upload-artifact@v7

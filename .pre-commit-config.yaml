@@ -10,22 +10,23 @@ repos:
     hooks:
       - id: black
 
-  # Run against the project venv (not mirrors-mypy's isolated environment) so mypy
-  # resolves fastapi/starlette/structlog/httpx/opentelemetry/etc. the same way `make
-  # lint` does — mirrors-mypy only installs what's listed in `additional_dependencies`,
-  # which drifts out of sync with pyproject.toml's actual dependencies over time.
+  # Run via `uv run` against the project's own uv-managed environment (not
+  # mirrors-mypy's isolated environment) so mypy resolves
+  # fastapi/starlette/structlog/httpx/opentelemetry/etc. the same way `make lint` does —
+  # mirrors-mypy only installs what's listed in `additional_dependencies`, which drifts
+  # out of sync with pyproject.toml's actual dependencies over time.
   - repo: local
     hooks:
       - id: mypy
         name: mypy
-        entry: .venv/bin/python -m mypy
+        entry: uv run mypy
         language: system
         pass_filenames: false
         types: [python]
 
       - id: pytest
         name: pytest
-        entry: .venv/bin/python -m pytest
+        entry: uv run pytest
         language: system
         pass_filenames: false
         types: [python]

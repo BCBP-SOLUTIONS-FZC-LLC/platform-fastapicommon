@@ -40,7 +40,7 @@ graph TD
     subgraph http["HTTP integration"]
         middleware["fastapicommon.middleware\nContextMiddleware · TimeoutMiddleware"]
         metrics["fastapicommon.metrics\nPrometheusMiddleware · metrics_router\nHTTP_REQUESTS_TOTAL · HTTP_REQUEST_DURATION_SECONDS\nGRPC_REQUESTS_TOTAL · GRPC_REQUEST_DURATION_SECONDS\nrecord_grpc_request"]
-        health["fastapicommon.health\nhealth_router · create_health_router"]
+        health["fastapicommon.health\nhealth_router · create_health_router · ReadinessCheck"]
         telemetry["fastapicommon.telemetry\nsetup_tracing · instrument_grpc_server\ninstrument_grpc_client"]
     end
 
@@ -88,7 +88,6 @@ graph TD
     grpc --> auth
     grpc --> logging
     grpc --> metrics
-    health --> config
 
     classDef core fill:#2b6cb0,color:#fff,stroke:#1a4971
     class context,exceptions,config core
@@ -179,6 +178,7 @@ dependency.
 |--------|-------------|
 | `health_router` | Pre-built router: `/health`, `/live` always 200; `/ready` runs no checks (always 200) |
 | `create_health_router(readiness_checks=None)` | Build a router whose `/ready` runs the given sync-or-async checks, returning 503 if any fail |
+| `ReadinessCheck` | Type alias for a readiness check: `Callable[[], Awaitable[bool] \| bool]` — the element type of `create_health_router`'s `readiness_checks` list |
 
 ### fastapicommon.config
 

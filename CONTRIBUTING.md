@@ -7,8 +7,11 @@ cut a release.
 ## Prerequisites
 
 - Python 3.11+ (matches `requires-python` in `pyproject.toml`)
-- Docker (for the local observability stack — see the README's "Local testing with the
-  observability stack")
+- [`uv`](https://docs.astral.sh/uv/) — manages the venv, dependency resolution, and
+  `uv.lock` (matches `platform-pgcommon-py`'s convention). Install via `brew install uv`
+  or see uv's install docs; `make install` does not install `uv` itself.
+- Docker (for `tests/e2e`, and for the local observability stack — see the README's
+  "Local testing with the observability stack")
 - `pre-commit` is installed as part of `make install` — no separate install needed
 
 ## Development setup
@@ -17,9 +20,10 @@ cut a release.
 git clone https://github.com/BCBP-SOLUTIONS-FZC-LLC/platform-fastapicommon
 cd platform-fastapicommon
 make setup     # copies .env-example -> .env, creates logs/
-make install   # create venv, install dev + grpc + examples extras, install pre-commit hooks
-make lint      # verify ruff + mypy pass
-make test      # run all tests with the coverage gate
+make install   # uv sync (dev group + grpc extra, from uv.lock) + install pre-commit hooks
+make lint      # verify ruff passes
+make typecheck # verify mypy --strict passes
+make test-all  # run all tests with the coverage gate
 ```
 
 ## Project layout
@@ -39,7 +43,10 @@ src/fastapicommon/
   propagation/  <- create_platform_http_client (outbound header propagation)
   grpc/         <- server/client interceptors (requires the grpc extra)
   bootstrap/    <- create_platform_app() — the single entry point
-tests/          <- mirrors src/fastapicommon/ one-to-one, plus a top-level test_package.py
+tests/
+  unit/         <- mirrors src/fastapicommon/ one-to-one, plus a top-level test_package.py
+  integration/  <- multi-module tests (create_platform_app() end-to-end); pytest.mark.integration
+  e2e/          <- builds + runs the real Docker image, real HTTP calls; pytest.mark.e2e, requires Docker
 examples/       <- fastapi_service and grpc_service demo services (not part of the library)
 docs/adr/       <- ADRs for cross-cutting standards (logging, tracing, metrics, context)
 docs/architecture/mermaid/ <- Mermaid diagram sources embedded in ARCHITECTURE.md
@@ -53,7 +60,7 @@ this library. Everything else may depend on them, never the reverse — see
 
 1. Implement in `src/fastapicommon/middleware/your_middleware.py`.
 2. Export it from `src/fastapicommon/middleware/__init__.py`'s `__all__`.
-3. Add unit tests in `tests/middleware/`.
+3. Add unit tests in `tests/unit/middleware/`.
 4. If it changes the middleware add-order in `create_platform_app`, update the
    [Execution model](./ARCHITECTURE.md#execution-model) section of `ARCHITECTURE.md` and
    `docs/architecture/mermaid/request-flow.mmd` / `bootstrap-flow.mmd` to match.
@@ -65,7 +72,7 @@ this library. Everything else may depend on them, never the reverse — see
    `PrometheusMiddleware` or `record_grpc_request`).
 3. Add it to the [Registered Prometheus metrics](./ARCHITECTURE.md#registered-prometheus-metrics)
    table in `ARCHITECTURE.md`.
-4. Add a test asserting the metric is recorded (see `tests/metrics/test_metrics.py`).
+4. Add a test asserting the metric is recorded (see `tests/unit/metrics/test_metrics.py`).
 
 ## Extending RBAC or logging
 
@@ -78,27 +85,48 @@ role membership, build it on top of `fastapicommon.context.get_roles()` /
 
 ## Testing requirements
 
+Mirrors `platform-pgcommon-py`'s `tests/unit` / `tests/integration` / `tests/e2e` tiering.
+Unlike `pgcommon-py`'s Postgres-backed integration tier, `tests/integration` here needs no
+Docker or external service — only `tests/e2e` does, since it's the one tier that builds
+and runs the real packaged Docker image and calls it over a real socket (`tests/integration`'s
+`TestClient` runs the ASGI app in-process via `ASGITransport` and structurally can't verify
+that).
+
 | Layer | Location | Notes |
 |-------|----------|-------|
-| Unit | `tests/<module>/` | Mirrors `src/fastapicommon/<module>/`; no live server or Docker required |
-| Bootstrap / integration | `tests/bootstrap/` | Exercises `create_platform_app()` end-to-end via `fastapi.testclient.TestClient` |
+| Unit | `tests/unit/<module>/` | Mirrors `src/fastapicommon/<module>/`; no live server or Docker required |
+| Integration | `tests/integration/` | Exercises multiple modules wired together (e.g. `create_platform_app()` end-to-end via `fastapi.testclient.TestClient`); tagged `pytest.mark.integration`; no Docker/external services required |
+| E2E | `tests/e2e/` | Builds + runs the real Docker image, makes real HTTP calls against it; tagged `pytest.mark.e2e`; **requires Docker** — skipped automatically if the `docker` CLI isn't on `PATH` |
 
-All tests must pass without a running server or Docker stack — the observability stack in
-`docker-compose.yml` is for manual/local verification (see the README), not part of the
-automated test suite.
+| Command | Runs |
+|---------|------|
+| `make test-unit` | `tests/unit` only |
+| `make test-int` | `tests/integration` only (`-m integration`) |
+| `make test-e2e` | `tests/e2e` only (`-m e2e`, `--no-cov` — see below) |
+| `make test-all` | All three tiers together — what `make ci` runs |
+| `make cover` | `test-all` + opens an HTML coverage report |
+
+Aside from `tests/e2e`, all tests must pass without a running server or Docker stack — the
+observability stack in `docker-compose.yml` is for manual/local verification (see the
+README), not part of the automated test suite.
 
 Coverage must stay at or above 90% (`[tool.coverage.report].fail_under` in
-`pyproject.toml`) — `pytest` enforces this automatically, no separate flag needed.
+`pyproject.toml`) — enforced automatically on `test-all`/`cover`/`ci`. Running `test-unit`
+or `test-int` alone will report below 90%, since each only exercises part of the codebase
+— that's expected, not a regression; only the combined run needs to clear the gate.
+`test-e2e` alone passes `--no-cov` instead: it runs the app inside a separate Docker
+container process, so coverage.py (instrumenting the pytest process) has nothing to
+measure — the combined `test-all` run still gets valid coverage from the unit/integration
+tests present in that same invocation.
 
 ## Linting
 
 ```bash
-make lint
+make lint       # ruff — formatting/import/lint rules ([tool.ruff] in pyproject.toml)
+make typecheck  # mypy --strict over src/fastapicommon
 ```
 
-Ruff (`[tool.ruff]` in `pyproject.toml`) enforces formatting/import/lint rules; mypy runs
-in `--strict` mode over `src/fastapicommon`. New public functions and classes must be
-fully typed — this is enforced, not optional.
+New public functions and classes must be fully typed — this is enforced, not optional.
 
 ## Branching strategy (GitFlow)
 
@@ -113,8 +141,8 @@ fully typed — this is enforced, not optional.
 
 ## Pull request checklist
 
-- [ ] `make lint` passes (ruff + mypy)
-- [ ] `make test` passes (coverage gate included)
+- [ ] `make lint` and `make typecheck` pass
+- [ ] `make test-all` passes (coverage gate included)
 - [ ] New/changed public API is fully typed and documented in `ARCHITECTURE.md`'s
       [Public API](./ARCHITECTURE.md#public-api) tables
 - [ ] `CHANGELOG.md` `[Unreleased]` section updated

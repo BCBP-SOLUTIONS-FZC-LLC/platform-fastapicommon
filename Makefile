@@ -25,12 +25,10 @@ PROMETHEUS_SCRAPE_TARGET ?= host.docker.internal:$(APP_PORT)
 # as real environment variables (its PlatformSettings() call reads os.environ), so they're
 # set inline on that recipe only.
 
-VENV := .venv
-PY := $(VENV)/bin/python
-
 LINT_PATHS := src tests examples
 
-.PHONY: install lint format format-check vulncheck test coverage build clean \
+.PHONY: install lint typecheck format format-check vulncheck build clean \
+        test-unit test-int test-e2e test-all cover \
         setup help run \
         prometheus-config docker-build docker-up docker-down docker-logs \
         lint-docker scan smoke-test \
@@ -48,14 +46,18 @@ setup:
 help:
 	@echo "Available commands:"
 	@echo " make setup         - copy .env-example to .env if missing, create logs/"
-	@echo " make install       - create venv and install dev + grpc + examples extras"
-	@echo " make lint          - ruff check + mypy --strict"
+	@echo " make install       - uv sync (dev group + grpc extra) + install pre-commit hooks"
+	@echo " make lint          - ruff check"
+	@echo " make typecheck     - mypy --strict"
 	@echo " make format        - ruff format + black (rewrites files)"
 	@echo " make format-check  - ruff format --check + black --check (no changes; used in CI)"
-	@echo " make vulncheck     - pip-audit against installed dependencies"
-	@echo " make test          - run pytest with coverage (>=90% gate enforced by pyproject.toml)"
-	@echo " make coverage      - run tests and open an HTML coverage report"
-	@echo " make build         - build the wheel + sdist into dist/"
+	@echo " make vulncheck     - pip-audit against locked dependencies"
+	@echo " make test-unit     - unit tests only (tests/unit — no Docker, no wired-up app)"
+	@echo " make test-int      - integration tests (tests/integration — create_platform_app() end-to-end)"
+	@echo " make test-e2e      - e2e tests (tests/e2e — builds + runs the real Docker image, requires Docker)"
+	@echo " make test-all      - unit + integration + e2e in one pytest run (requires Docker)"
+	@echo " make cover         - test-all + open an HTML coverage report (>=90% gate enforced by pyproject.toml)"
+	@echo " make build         - build the wheel + sdist into dist/ (uv build)"
 	@echo " make run           - run the example FastAPI service locally (uvicorn --reload)"
 	@echo " make docker-build  - build the example service Docker image locally"
 	@echo " make docker-up     - start the local observability stack (otel-collector, tempo, loki, prometheus, grafana)"
@@ -63,41 +65,60 @@ help:
 	@echo " make docker-logs   - tail logs from the observability stack containers"
 	@echo " make lint-docker   - hadolint against Dockerfile (matches CI's 'Lint Dockerfile' check)"
 	@echo " make scan          - build + Trivy CVE scan (matches CI's 'Trivy CVE scan' check)"
-	@echo " make smoke-test    - build, run, and curl-check the example service (matches CI's 'Smoke tests')"
-	@echo " make ci            - full local pipeline (format-check + lint + test + build)"
+	@echo " make smoke-test    - alias for test-e2e (matches CI's 'Smoke tests' check)"
+	@echo " make ci            - full local pipeline (format-check + lint + typecheck + test-all + build)"
 	@echo " make clean         - remove venv, caches, build artifacts, and local logs"
 
 # -----------------------------
-# PYTHON BASICS
+# PYTHON BASICS (uv-managed: .venv + uv.lock)
 # -----------------------------
 
 install:
-	python3 -m venv $(VENV)
-	$(PY) -m pip install --upgrade pip
-	$(PY) -m pip install -e ".[dev,grpc,examples]"
-	$(PY) -m pre_commit install
+	uv sync --extra grpc
+	uv run pre-commit install
 
 lint:
-	$(PY) -m ruff check $(LINT_PATHS)
-	$(PY) -m mypy
+	uv run ruff check $(LINT_PATHS)
+
+typecheck:
+	uv run mypy
 
 format:
-	$(PY) -m ruff format $(LINT_PATHS)
-	$(PY) -m black $(LINT_PATHS)
+	uv run ruff format $(LINT_PATHS)
+	uv run black $(LINT_PATHS)
 
 format-check:
-	$(PY) -m ruff format --check $(LINT_PATHS)
-	$(PY) -m black --check $(LINT_PATHS)
+	uv run ruff format --check $(LINT_PATHS)
+	uv run black --check $(LINT_PATHS)
 
 vulncheck:
-	$(PY) -m pip install -q pip-audit
-	$(PY) -m pip_audit
+	uv run pip-audit
 
-test:
-	$(PY) -m pytest
+# -----------------------------
+# TESTS
+# -----------------------------
 
-coverage: test
-	$(PY) -m coverage html
+test-unit:
+	uv run pytest tests/unit -v
+
+test-int:
+	uv run pytest tests/integration -v -m integration
+
+# --no-cov: this tier runs the app inside a real Docker container, not in-process, so
+# coverage.py (instrumenting this pytest process) has nothing to measure — running it
+# alone would otherwise fail pyproject.toml's 90% coverage gate at 0%.
+test-e2e:
+	uv run pytest tests/e2e -v -m e2e --no-cov
+
+test-all:
+	uv run pytest tests/unit tests/integration tests/e2e -v
+
+# Coverage gate (>=90%) is enforced by pyproject.toml's [tool.coverage.report] fail_under,
+# applied automatically via pytest's default addopts — this target just also opens an
+# HTML report.
+cover: test-all
+	uv run coverage html
+	@echo "HTML coverage report: htmlcov/index.html"
 
 # -----------------------------
 # BUILD
@@ -105,8 +126,7 @@ coverage: test
 
 build:
 	@echo "Building wheel + sdist..."
-	$(PY) -m pip install -q build
-	$(PY) -m build
+	uv build
 
 # -----------------------------
 # RUN (example usage)
@@ -123,7 +143,7 @@ run: export APP_ENV := $(APP_ENV)
 run: export OTLP_ENDPOINT := $(OTLP_ENDPOINT)
 run: setup
 	@echo "Running example FastAPI service on :$(APP_PORT) (logs -> $(LOG_FILE))..."
-	$(PY) -m uvicorn examples.fastapi_service.main:app --host 0.0.0.0 --port $(APP_PORT) --reload 2>&1 | tee -a $(LOG_FILE)
+	uv run uvicorn examples.fastapi_service.main:app --host 0.0.0.0 --port $(APP_PORT) --reload 2>&1 | tee -a $(LOG_FILE)
 
 # -----------------------------
 # DOCKER (EXAMPLE SERVICE IMAGE)
@@ -143,20 +163,9 @@ scan:
 	docker build -t $(APP_NAME):scan .
 	trivy image --severity HIGH,CRITICAL --ignore-unfixed --exit-code 1 --scanners vuln $(APP_NAME):scan
 
-# Builds, runs, and curl-checks the example service — matches CI's "Smoke tests" job.
-smoke-test:
-	docker build -t $(APP_NAME):smoke .
-	docker run -d --name fastapicommon-smoke-test -p $(APP_PORT):8080 $(APP_NAME):smoke
-	@for i in $$(seq 1 30); do \
-		if curl -fsS http://localhost:$(APP_PORT)/health >/dev/null 2>&1; then echo "healthy after $${i}s"; break; fi; \
-		sleep 1; \
-	done
-	curl -fsS http://localhost:$(APP_PORT)/health | grep -q '"status":"ok"'
-	curl -fsS http://localhost:$(APP_PORT)/ready | grep -q '"status":"ok"'
-	curl -fsS http://localhost:$(APP_PORT)/metrics | grep -q 'http_requests_total'
-	curl -fsS http://localhost:$(APP_PORT)/widgets/me | grep -q '"user_id":null'
-	@echo "All smoke checks passed"
-	docker rm -f fastapicommon-smoke-test
+# Alias — tests/e2e/test_smoke.py builds + runs the real image and asserts against it
+# over real HTTP, superseding what used to be a separate raw docker run/curl recipe here.
+smoke-test: test-e2e
 
 # -----------------------------
 # DOCKER (LOCAL OBSERVABILITY STACK)
@@ -184,12 +193,12 @@ docker-logs:
 # is a separate CI job, not part of the default local loop)
 # -----------------------------
 
-ci: format-check lint test build
+ci: format-check lint typecheck test-all build
 
 # -----------------------------
 # CLEAN
 # -----------------------------
 
 clean:
-	rm -rf $(VENV) .pytest_cache .mypy_cache .ruff_cache htmlcov .coverage coverage.xml dist build *.egg-info
+	rm -rf .venv .pytest_cache .mypy_cache .ruff_cache htmlcov .coverage coverage.xml dist build *.egg-info
 	rm -rf logs/*.log
