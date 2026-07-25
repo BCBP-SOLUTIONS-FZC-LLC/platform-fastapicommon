@@ -40,7 +40,7 @@ jobs:
         run: pytest
 
       - name: Upload coverage report
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v7
         if: always()
         with:
           name: coverage-report-py${{ matrix.python-version }}
@@ -70,7 +70,7 @@ jobs:
         run: ls dist/*.whl dist/*.tar.gz
 
       - name: Upload build artifacts
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v7
         with:
           name: fastapicommon-dist
           path: dist/
