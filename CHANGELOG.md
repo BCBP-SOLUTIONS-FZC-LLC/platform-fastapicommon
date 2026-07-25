@@ -7,6 +7,10 @@ pre-1.0 caveat on what SemVer guarantees currently apply.
 
 ## [Unreleased]
 
+## [0.1.0] - 2026-07-25
+
+First release of `fastapicommon`.
+
 ### Added
 
 - Authentication context (`x-user-id`, `x-tenant-id`, `x-tenant-roles`, `x-request-id`,
@@ -107,5 +111,10 @@ pre-1.0 caveat on what SemVer guarantees currently apply.
   (and its embedded copy) said "10 x .mmd source diagrams" when there are 11; and the
   README's CI section implied `pypi-publish` and `docker` run strictly sequentially in
   `release.yml` when they actually run in parallel (both depend only on `build`).
+- `docker/setup-buildx-action` occasionally fails to boot with `context deadline exceeded`
+  pulling `moby/buildkit` from Docker Hub (a transient network/rate-limit blip on the
+  shared GitHub-hosted runner IP). All 5 places it's used across `ci.yml`/`release.yml`
+  now retry once with the same action before failing the job.
 
-[Unreleased]: https://github.com/BCBP-SOLUTIONS-FZC-LLC/platform-fastapicommon/commits/main
+[Unreleased]: https://github.com/BCBP-SOLUTIONS-FZC-LLC/platform-fastapicommon/compare/v0.1.0...HEAD
+[0.1.0]: https://github.com/BCBP-SOLUTIONS-FZC-LLC/platform-fastapicommon/releases/tag/v0.1.0
