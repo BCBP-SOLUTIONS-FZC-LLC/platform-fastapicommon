@@ -1,0 +1,39 @@
+# Reusable workflow — called by validate.yml's "Test" job. Its job id ("test") combines
+# with the calling chain to produce the "Validate / Test / test" required status check.
+# Deliberately single-version (not matrixed) so the check name has no "(3.x)" suffix and
+# matches the required check exactly — broader multi-version testing lives in ci.yml's
+# separate, non-required "coverage" job.
+name: Test Check
+
+"on":
+  workflow_call:
+    inputs:
+      ref:
+        description: 'Git ref to check out (leave empty to use the caller ref)'
+        type: string
+        required: false
+        default: ''
+
+permissions:
+  contents: read
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v6
+        with:
+          ref: ${{ inputs.ref || github.ref }}
+
+      - name: Set up Python
+        uses: actions/setup-python@v6
+        with:
+          python-version: '3.12'
+          cache: pip
+
+      - name: Install dependencies
+        run: pip install -e ".[dev,grpc,examples]"
+
+      - name: Test (coverage gate enforced by pyproject.toml, fail_under = 90%)
+        run: pytest

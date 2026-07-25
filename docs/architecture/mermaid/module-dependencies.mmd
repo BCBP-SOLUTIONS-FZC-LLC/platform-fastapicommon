@@ -1,0 +1,60 @@
+graph TD
+    subgraph pub["Entry point"]
+        bootstrap["fastapicommon.bootstrap\ncreate_platform_app()"]
+    end
+
+    subgraph http["HTTP integration"]
+        middleware["fastapicommon.middleware\nContextMiddleware · TimeoutMiddleware"]
+        metrics["fastapicommon.metrics\nPrometheusMiddleware · metrics_router\nHTTP_REQUESTS_TOTAL · HTTP_REQUEST_DURATION_SECONDS\nGRPC_REQUESTS_TOTAL · GRPC_REQUEST_DURATION_SECONDS\nrecord_grpc_request"]
+        health["fastapicommon.health\nhealth_router · create_health_router"]
+        telemetry["fastapicommon.telemetry\nsetup_tracing · instrument_grpc_server\ninstrument_grpc_client"]
+    end
+
+    subgraph identity["Identity & access"]
+        auth["fastapicommon.auth\nUSER_ID_HEADER · TENANT_ID_HEADER · TENANT_ROLES_HEADER\nREQUEST_ID_HEADER · CORRELATION_ID_HEADER\nget_current_user · require_authenticated_user"]
+        rbac["fastapicommon.rbac\nRequireRole · RequireAnyRole · RequireAllRoles"]
+    end
+
+    subgraph core["Core (no framework dependency)"]
+        context["fastapicommon.context\nCurrentUser · RequestContext\nbind/reset_request_context · request_context_scope\nget_request_context · get_tenant_id · get_user_id · get_roles"]
+        exceptions["fastapicommon.exceptions\nPlatformException hierarchy\nregister_exception_handlers"]
+        config["fastapicommon.config\nPlatformSettings"]
+    end
+
+    subgraph outbound["Outbound"]
+        propagation["fastapicommon.propagation\ncreate_platform_http_client"]
+    end
+
+    subgraph grpcmod["gRPC (optional extra)"]
+        grpc["fastapicommon.grpc\nContextServerInterceptor\nContextClientInterceptor"]
+    end
+
+    subgraph logmod["Logging"]
+        logging["fastapicommon.logging\nconfigure_logging · get_logger"]
+    end
+
+    bootstrap --> config
+    bootstrap --> middleware
+    bootstrap --> metrics
+    bootstrap --> health
+    bootstrap --> telemetry
+    bootstrap --> exceptions
+    bootstrap --> logging
+
+    middleware --> context
+    middleware --> auth
+    auth --> context
+    auth --> exceptions
+    rbac --> context
+    rbac --> exceptions
+    logging --> context
+    propagation --> context
+    propagation --> auth
+    grpc --> context
+    grpc --> auth
+    grpc --> logging
+    grpc --> metrics
+    health --> config
+
+    classDef core fill:#2b6cb0,color:#fff,stroke:#1a4971
+    class context,exceptions,config core

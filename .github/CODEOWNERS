@@ -1,0 +1,10 @@
+# Default: every file requires review from the platform team.
+# Replace @BCBP-SOLUTIONS-FZC-LLC/platform-team with your actual team slug.
+* @BCBP-SOLUTIONS-FZC-LLC/platform-team
+
+# Workflow and release automation changes require explicit sign-off.
+.github/workflows/ @BCBP-SOLUTIONS-FZC-LLC/platform-team
+.github/dependabot.yml @BCBP-SOLUTIONS-FZC-LLC/platform-team
+
+# Public API surface — extra scrutiny.
+src/fastapicommon/ @BCBP-SOLUTIONS-FZC-LLC/platform-team

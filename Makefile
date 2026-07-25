@@ -1,0 +1,195 @@
+# -----------------------------
+# CONFIG
+# -----------------------------
+-include .env
+
+APP_NAME ?= platform-fastapicommon-example
+APP_ENV ?= dev
+APP_PORT ?= 8080
+BUILD_VERSION ?= $(shell git describe --tags --always --dirty 2>/dev/null || echo dev)
+LOG_FILE ?= logs/app.log
+OTLP_ENDPOINT ?= localhost:4317
+OTEL_COLLECTOR_GRPC_PORT ?= 4317
+OTEL_COLLECTOR_HTTP_PORT ?= 4318
+TEMPO_HTTP_PORT ?= 3200
+LOKI_HTTP_PORT ?= 3100
+PROMETHEUS_HTTP_PORT ?= 9090
+GRAFANA_HTTP_PORT ?= 3000
+PROMETHEUS_SCRAPE_TARGET ?= host.docker.internal:$(APP_PORT)
+
+# Deliberately NOT exported file-wide: `docker compose --env-file .env` reads these
+# directly from .env, and every other recipe below interpolates $(VAR) at Make-expansion
+# time rather than reading the shell environment. A blanket `export` here would leak
+# APP_NAME/OTLP_ENDPOINT into `make test`'s pytest subprocess and silently override
+# PlatformSettings' defaults in tests that assert on them. Only `run` actually needs these
+# as real environment variables (its PlatformSettings() call reads os.environ), so they're
+# set inline on that recipe only.
+
+VENV := .venv
+PY := $(VENV)/bin/python
+
+LINT_PATHS := src tests examples
+
+.PHONY: install lint format format-check vulncheck test coverage build clean \
+        setup help run \
+        prometheus-config docker-build docker-up docker-down docker-logs \
+        lint-docker scan smoke-test \
+        ci
+
+# -----------------------------
+# SETUP
+# -----------------------------
+
+setup:
+	@test -f .env || cp .env-example .env
+	@mkdir -p logs
+	@echo "Environment ready (.env, logs/)"
+
+help:
+	@echo "Available commands:"
+	@echo " make setup         - copy .env-example to .env if missing, create logs/"
+	@echo " make install       - create venv and install dev + grpc + examples extras"
+	@echo " make lint          - ruff check + mypy --strict"
+	@echo " make format        - ruff format + black (rewrites files)"
+	@echo " make format-check  - ruff format --check + black --check (no changes; used in CI)"
+	@echo " make vulncheck     - pip-audit against installed dependencies"
+	@echo " make test          - run pytest with coverage (>=90% gate enforced by pyproject.toml)"
+	@echo " make coverage      - run tests and open an HTML coverage report"
+	@echo " make build         - build the wheel + sdist into dist/"
+	@echo " make run           - run the example FastAPI service locally (uvicorn --reload)"
+	@echo " make docker-build  - build the example service Docker image locally"
+	@echo " make docker-up     - start the local observability stack (otel-collector, tempo, loki, prometheus, grafana)"
+	@echo " make docker-down   - stop the local observability stack"
+	@echo " make docker-logs   - tail logs from the observability stack containers"
+	@echo " make lint-docker   - hadolint against Dockerfile (matches CI's 'Lint Dockerfile' check)"
+	@echo " make scan          - build + Trivy CVE scan (matches CI's 'Trivy CVE scan' check)"
+	@echo " make smoke-test    - build, run, and curl-check the example service (matches CI's 'Smoke tests')"
+	@echo " make ci            - full local pipeline (format-check + lint + test + build)"
+	@echo " make clean         - remove venv, caches, build artifacts, and local logs"
+
+# -----------------------------
+# PYTHON BASICS
+# -----------------------------
+
+install:
+	python3 -m venv $(VENV)
+	$(PY) -m pip install --upgrade pip
+	$(PY) -m pip install -e ".[dev,grpc,examples]"
+	$(PY) -m pre_commit install
+
+lint:
+	$(PY) -m ruff check $(LINT_PATHS)
+	$(PY) -m mypy
+
+format:
+	$(PY) -m ruff format $(LINT_PATHS)
+	$(PY) -m black $(LINT_PATHS)
+
+format-check:
+	$(PY) -m ruff format --check $(LINT_PATHS)
+	$(PY) -m black --check $(LINT_PATHS)
+
+vulncheck:
+	$(PY) -m pip install -q pip-audit
+	$(PY) -m pip_audit
+
+test:
+	$(PY) -m pytest
+
+coverage: test
+	$(PY) -m coverage html
+
+# -----------------------------
+# BUILD
+# -----------------------------
+
+build:
+	@echo "Building wheel + sdist..."
+	$(PY) -m pip install -q build
+	$(PY) -m build
+
+# -----------------------------
+# RUN (example usage)
+# -----------------------------
+
+# Runs the example FastAPI service on the host so OTLP export reaches the
+# otel-collector (localhost:4317) and Prometheus can scrape host.docker.internal.
+# JSON logs are duplicated to LOG_FILE for Promtail to tail. These are set as real
+# environment variables (not just Make variables) because PlatformSettings() inside
+# examples/fastapi_service/main.py reads them from the process environment — scoped to
+# this target only, see the note in the CONFIG section above.
+run: export APP_NAME := $(APP_NAME)
+run: export APP_ENV := $(APP_ENV)
+run: export OTLP_ENDPOINT := $(OTLP_ENDPOINT)
+run: setup
+	@echo "Running example FastAPI service on :$(APP_PORT) (logs -> $(LOG_FILE))..."
+	$(PY) -m uvicorn examples.fastapi_service.main:app --host 0.0.0.0 --port $(APP_PORT) --reload 2>&1 | tee -a $(LOG_FILE)
+
+# -----------------------------
+# DOCKER (EXAMPLE SERVICE IMAGE)
+# -----------------------------
+
+docker-build:
+	@echo "Building Docker image (version: $(BUILD_VERSION))..."
+	docker build -t $(APP_NAME):local --build-arg APP_NAME=$(APP_NAME) --build-arg BUILD_VERSION=$(BUILD_VERSION) .
+
+# Requires hadolint (brew install hadolint). Matches CI's "Lint Dockerfile" check exactly.
+lint-docker:
+	hadolint --failure-threshold warning Dockerfile
+
+# Requires trivy (brew install trivy). Matches CI's "Trivy CVE scan" check exactly:
+# fails only on HIGH/CRITICAL vulnerabilities that have an available fix.
+scan:
+	docker build -t $(APP_NAME):scan .
+	trivy image --severity HIGH,CRITICAL --ignore-unfixed --exit-code 1 --scanners vuln $(APP_NAME):scan
+
+# Builds, runs, and curl-checks the example service — matches CI's "Smoke tests" job.
+smoke-test:
+	docker build -t $(APP_NAME):smoke .
+	docker run -d --name fastapicommon-smoke-test -p $(APP_PORT):8080 $(APP_NAME):smoke
+	@for i in $$(seq 1 30); do \
+		if curl -fsS http://localhost:$(APP_PORT)/health >/dev/null 2>&1; then echo "healthy after $${i}s"; break; fi; \
+		sleep 1; \
+	done
+	curl -fsS http://localhost:$(APP_PORT)/health | grep -q '"status":"ok"'
+	curl -fsS http://localhost:$(APP_PORT)/ready | grep -q '"status":"ok"'
+	curl -fsS http://localhost:$(APP_PORT)/metrics | grep -q 'http_requests_total'
+	curl -fsS http://localhost:$(APP_PORT)/widgets/me | grep -q '"user_id":null'
+	@echo "All smoke checks passed"
+	docker rm -f fastapicommon-smoke-test
+
+# -----------------------------
+# DOCKER (LOCAL OBSERVABILITY STACK)
+# -----------------------------
+
+prometheus-config:
+	@sed 's|__PROMETHEUS_SCRAPE_TARGET__|$(PROMETHEUS_SCRAPE_TARGET)|g' docker/prometheus/prometheus.yml.tpl > docker/prometheus/prometheus.yml
+
+docker-up: setup prometheus-config
+	@echo "Starting observability stack (otel-collector, tempo, loki, promtail, prometheus, grafana)..."
+	docker compose --env-file .env up -d
+	@echo "Grafana:    http://localhost:$(GRAFANA_HTTP_PORT) (admin/admin by default)"
+	@echo "Prometheus: http://localhost:$(PROMETHEUS_HTTP_PORT)"
+	@echo "Now run 'make run' in another terminal to start the example service."
+
+docker-down:
+	@echo "Stopping observability stack..."
+	docker compose --env-file .env down
+
+docker-logs:
+	docker compose --env-file .env logs -f
+
+# -----------------------------
+# CI (mirrors .github/workflows/validate.yml + the build job; docker image build
+# is a separate CI job, not part of the default local loop)
+# -----------------------------
+
+ci: format-check lint test build
+
+# -----------------------------
+# CLEAN
+# -----------------------------
+
+clean:
+	rm -rf $(VENV) .pytest_cache .mypy_cache .ruff_cache htmlcov .coverage coverage.xml dist build *.egg-info
+	rm -rf logs/*.log

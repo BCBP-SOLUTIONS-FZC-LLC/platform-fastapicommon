@@ -1,0 +1,28 @@
+flowchart TD
+    A([create_platform_app called]) --> B[settings = settings or PlatformSettings]
+    B --> C{app_name given?}
+    C -- yes --> D[settings = settings.model_copy\nupdate app_name]
+    C -- no --> E
+    D --> E[configure_logging settings.log_level]
+    E --> F[app = FastAPI title=settings.app_name]
+
+    F --> G["add_middleware TimeoutMiddleware\ntimeout_seconds=settings.request_timeout_seconds"]
+    G --> H{settings.enable_metrics?}
+    H -- yes --> I["add_middleware PrometheusMiddleware\ninclude_router metrics_router"]
+    H -- no --> J
+    I --> J["add_middleware ContextMiddleware"]
+
+    J --> K[include_router health_router]
+    K --> L[register_exception_handlers app]
+    L --> M{settings.enable_tracing?}
+    M -- yes --> N["_build_span_exporter settings"]
+    N --> O{settings.otlp_endpoint set?}
+    O -- yes --> P["OTLPSpanExporter\ninsecure = environment in dev/development/local"]
+    O -- no --> Q["exporter = None\nspans recorded, not exported"]
+    P --> R[setup_tracing app, service_name, exporter]
+    Q --> R
+    M -- no --> S
+    R --> S([return app])
+
+    Note1["Middleware added LAST runs OUTERMOST.\nAdd order here is Timeout, Prometheus, Context —\nso the real request-time order is\nContext (outer) -> Prometheus -> Timeout (inner) -> route handler.\nContext is bound before metrics/timeout run."]
+    J -.-> Note1

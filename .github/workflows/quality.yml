@@ -1,0 +1,54 @@
+# Reusable workflow — called by validate.yml's "Quality" job. Its job id ("quality")
+# combines with the calling chain to produce the "Validate / Quality / quality" required
+# status check.
+# Runs: checkout → Python setup → install → pip check → format check → ruff → mypy → pip-audit
+name: Quality Check
+
+"on":
+  workflow_call:
+    inputs:
+      ref:
+        description: 'Git ref to check out (leave empty to use the caller ref)'
+        type: string
+        required: false
+        default: ''
+
+permissions:
+  contents: read
+
+jobs:
+  quality:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v6
+        with:
+          ref: ${{ inputs.ref || github.ref }}
+
+      - name: Set up Python
+        uses: actions/setup-python@v6
+        with:
+          python-version: '3.12'
+          cache: pip
+
+      - name: Install dependencies
+        run: pip install -e ".[dev,grpc,examples]"
+
+      - name: Verify dependency resolution
+        run: pip check
+
+      - name: Format check (ruff format + black --check)
+        run: |
+          ruff format --check src tests examples
+          black --check src tests examples
+
+      - name: Lint (ruff)
+        run: ruff check src tests examples
+
+      - name: Type check (mypy --strict)
+        run: mypy
+
+      - name: Vulnerability check (pip-audit)
+        run: |
+          pip install pip-audit
+          pip-audit

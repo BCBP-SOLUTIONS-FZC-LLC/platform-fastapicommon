@@ -1,0 +1,105 @@
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[project]
+name = "platform-fastapicommon"
+version = "0.1.0"
+description = "Shared FastAPI and gRPC middleware library for platform services: auth context, tenant propagation, tracing, structured logging, metrics, timeouts, and RBAC."
+readme = "README.md"
+requires-python = ">=3.11"
+license = { text = "Apache-2.0" }
+authors = [{ name = "Platform Engineering" }]
+classifiers = [
+    "Programming Language :: Python :: 3",
+    "Programming Language :: Python :: 3.11",
+    "Programming Language :: Python :: 3.12",
+    "Programming Language :: Python :: 3.13",
+    "Programming Language :: Python :: 3.14",
+    "Framework :: FastAPI",
+    "Typing :: Typed",
+]
+dependencies = [
+    "fastapi>=0.110",
+    "starlette>=0.37",
+    "pydantic>=2.6",
+    "pydantic-settings>=2.2",
+    "structlog>=24.1",
+    "prometheus-client>=0.20",
+    "httpx>=0.27",
+    "opentelemetry-api>=1.24",
+    "opentelemetry-sdk>=1.24",
+    "opentelemetry-instrumentation-fastapi>=0.45b0",
+    "opentelemetry-instrumentation-grpc>=0.45b0",
+    "opentelemetry-exporter-otlp-proto-grpc>=1.24",
+]
+
+[project.optional-dependencies]
+grpc = ["grpcio>=1.62"]
+examples = ["uvicorn[standard]>=0.29"]
+dev = [
+    "pytest>=8.0",
+    "pytest-asyncio>=0.23",
+    "pytest-cov>=5.0",
+    "ruff>=0.4",
+    "mypy>=1.9",
+    "black>=24.3",
+    "pre-commit>=3.7",
+    "grpcio>=1.62",
+    "grpcio-tools>=1.62",
+    "types-protobuf",
+    "uvicorn[standard]>=0.29",
+]
+
+[project.urls]
+Repository = "https://github.com/BCBP-SOLUTIONS-FZC-LLC/platform-fastapicommon"
+
+[tool.hatch.build.targets.wheel]
+packages = ["src/fastapicommon"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+asyncio_mode = "auto"
+addopts = "--cov=fastapicommon --cov-report=term-missing --cov-report=xml"
+
+[tool.coverage.run]
+source = ["src/fastapicommon"]
+branch = true
+
+[tool.coverage.report]
+fail_under = 90
+show_missing = true
+exclude_lines = [
+    "pragma: no cover",
+    "if TYPE_CHECKING:",
+    "raise NotImplementedError",
+]
+
+[tool.ruff]
+line-length = 100
+target-version = "py311"
+src = ["src", "tests"]
+
+[tool.ruff.lint]
+select = ["E", "F", "I", "UP", "B", "C4", "SIM", "N", "ASYNC"]
+# B008: FastAPI's Depends()/Query() defaults are the documented dependency-injection idiom.
+# N818: PlatformException is the name specified by the platform exception contract.
+ignore = ["B008", "N818"]
+
+[tool.ruff.lint.isort]
+known-first-party = ["fastapicommon"]
+
+[tool.black]
+line-length = 100
+target-version = ["py311"]
+
+[tool.mypy]
+python_version = "3.11"
+strict = true
+packages = ["fastapicommon"]
+mypy_path = "src"
+plugins = ["pydantic.mypy"]
+
+[[tool.mypy.overrides]]
+module = ["grpc.*", "prometheus_client.*"]
+ignore_missing_imports = true

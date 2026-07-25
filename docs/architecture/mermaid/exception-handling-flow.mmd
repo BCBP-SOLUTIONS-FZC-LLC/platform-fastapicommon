@@ -1,0 +1,27 @@
+flowchart TD
+    A(["Exception raised while handling a request"]) --> B{"Exception type"}
+
+    B -->|"PlatformException subclass"| C["platform_exception_handler\nassert isinstance(exc, PlatformException)"]
+    C --> D["JSONResponse(status_code=exc.status_code,\ncontent=exc.to_dict())\n= {code, message}"]
+
+    B -->|"RequestValidationError\n(pydantic/FastAPI validation)"| E["request_validation_exception_handler"]
+    E --> F["JSONResponse(422,\n{code: validation_error, message: str(exc)})"]
+
+    B -->|"StarletteHTTPException\n(e.g. 404 no matching route)"| G["http_exception_handler\nassert isinstance(exc, StarletteHTTPException)"]
+    G --> H["JSONResponse(exc.status_code,\n{code: http_error, message: str(exc.detail)})"]
+
+    B -->|"any other Exception"| I["unhandled_exception_handler"]
+    I --> J["logging.getLogger('fastapicommon.exceptions')\n.exception(...)"]
+    J --> K["JSONResponse(500,\n{code: internal_error,\nmessage: 'An unexpected error occurred'})"]
+
+    subgraph reg["register_exception_handlers(app) — called once by create_platform_app"]
+        R1["add_exception_handler(PlatformException, ...)"]
+        R2["add_exception_handler(RequestValidationError, ...)"]
+        R3["add_exception_handler(StarletteHTTPException, ...)"]
+        R4["add_exception_handler(Exception, ...)"]
+    end
+
+    R1 -.->|"registers"| C
+    R2 -.->|"registers"| E
+    R3 -.->|"registers"| G
+    R4 -.->|"registers"| I

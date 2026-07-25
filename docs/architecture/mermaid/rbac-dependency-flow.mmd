@@ -1,0 +1,26 @@
+sequenceDiagram
+    participant H as Route handler
+    participant Dep as FastAPI Depends()
+    participant RBAC as RequireRole / RequireAnyRole / RequireAllRoles
+    participant Ctx as fastapicommon.context
+
+    H ->>+ Dep: request dependencies resolved
+    Dep ->>+ RBAC: __call__()
+    RBAC ->>+ Ctx: get_roles()
+    Ctx -->>- RBAC: current roles (tuple, () if unbound/anonymous)
+
+    alt RequireRole(role)
+        RBAC ->> RBAC: role in current?
+    else RequireAnyRole(*roles)
+        RBAC ->> RBAC: any(r in current for r in roles)?
+    else RequireAllRoles(*roles)
+        RBAC ->> RBAC: all(r in current for r in roles)?
+    end
+
+    alt check fails
+        RBAC -->> Dep: raise ForbiddenException(...)
+        Dep -->> H: 403 {"code":"forbidden","message":"Requires role '...'"}
+    else check passes
+        RBAC -->>- Dep: None (dependency satisfied)
+        Dep -->>- H: handler executes
+    end

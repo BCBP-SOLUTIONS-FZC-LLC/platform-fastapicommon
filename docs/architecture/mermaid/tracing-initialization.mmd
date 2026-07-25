@@ -1,0 +1,19 @@
+flowchart TD
+    A([create_platform_app: settings.enable_tracing == true]) --> B["_build_span_exporter(settings)"]
+    B --> C{settings.otlp_endpoint set?}
+    C -- no --> D["return None\n(spans recorded, never exported)"]
+    C -- yes --> E["OTLPSpanExporter(\n  endpoint=settings.otlp_endpoint,\n  insecure=environment in ('dev','development','local')\n)"]
+
+    D --> F[setup_tracing app, service_name, exporter]
+    E --> F
+
+    F --> G["Resource.create({SERVICE_NAME: service_name})"]
+    G --> H["provider = TracerProvider(resource=resource)"]
+    H --> I{exporter is not None?}
+    I -- yes --> J["provider.add_span_processor(\n  BatchSpanProcessor(exporter))"]
+    I -- no --> K
+    J --> K["trace.set_tracer_provider(provider)"]
+    K --> L["FastAPIInstrumentor.instrument_app(\n  app, tracer_provider=provider)"]
+    L --> M([return provider])
+
+    N(["instrument_grpc_server() / instrument_grpc_client()\n(called separately by the gRPC service, requires the grpc extra)"]) -.-> O["GrpcInstrumentorServer / GrpcInstrumentorClient\n.instrument()"]

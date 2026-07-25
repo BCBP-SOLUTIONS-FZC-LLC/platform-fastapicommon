@@ -1,0 +1,30 @@
+server:
+  http_listen_port: 9080
+
+positions:
+  filename: /tmp/positions.yaml
+
+clients:
+  - url: http://loki:3100/loki/api/v1/push
+
+scrape_configs:
+  - job_name: platform-fastapicommon-example
+    static_configs:
+      - targets:
+          - localhost
+        labels:
+          job: platform-fastapicommon-example
+          service: platform-fastapicommon-example
+          __path__: /var/log/*.log
+    pipeline_stages:
+      - json:
+          expressions:
+            level: level
+            event: event
+            request_id: request_id
+            correlation_id: correlation_id
+            tenant_id: tenant_id
+            user_id: user_id
+      - labels:
+          level:
+          request_id:

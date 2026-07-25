@@ -1,0 +1,20 @@
+graph LR
+    subgraph service["Consuming service (your code)"]
+        main["main.py\nsettings = PlatformSettings()"]
+        routes["router.py\n@router.get(...)\ndependencies=[Depends(RequireRole('tenant_admin'))]"]
+    end
+
+    subgraph lib["fastapicommon"]
+        settings_cls["fastapicommon.config.PlatformSettings\napp_name · log_level · request_timeout_seconds\nenable_tracing · enable_metrics · otlp_endpoint"]
+        bootstrap["fastapicommon.bootstrap.create_platform_app(settings=...)"]
+        get_user["fastapicommon.auth.get_current_user\n/ require_authenticated_user"]
+        rbac["fastapicommon.rbac.RequireRole / RequireAnyRole / RequireAllRoles"]
+        client["fastapicommon.propagation.create_platform_http_client()"]
+    end
+
+    main -->|"env vars / .env"| settings_cls
+    settings_cls --> bootstrap
+    bootstrap -->|"FastAPI app\n(logging, middleware, metrics,\ntracing, health, exception handlers wired)"| routes
+    routes -->|"Depends(get_current_user)"| get_user
+    routes -->|"Depends(RequireRole(...))"| rbac
+    routes -->|"outbound HTTP calls"| client

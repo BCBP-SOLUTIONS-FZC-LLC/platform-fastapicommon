@@ -1,0 +1,29 @@
+sequenceDiagram
+    participant Client as gRPC Client
+    participant CCI as ContextClientInterceptor
+    participant Chan as grpc Channel
+    participant CSI as ContextServerInterceptor
+    participant H as Service handler (unary-unary)
+
+    Note over Client,CCI: Outbound call made from code running inside\na bound RequestContext (e.g. a client call made from an HTTP handler)
+
+    Client ->>+ CCI: intercept_unary_unary(continuation, details, request)
+    CCI ->> CCI: read get_user_id/get_tenant_id/get_request_id/get_correlation_id()
+    CCI ->> CCI: append (x-user-id, x-tenant-id, x-request-id,\nx-correlation-id) to metadata, only if set
+    CCI ->>+ Chan: continuation(new_details, request)
+    Chan ->>+ CSI: intercept_service(continuation, handler_call_details)
+
+    CSI ->> CSI: handler = continuation(handler_call_details)
+    alt handler is None or not unary_unary
+        CSI -->> Chan: return handler unchanged (streaming RPCs pass through)
+    else unary_unary handler
+        CSI ->> CSI: _context_from_metadata(invocation_metadata)\ngenerates request_id/correlation_id if absent
+        CSI ->> CSI: bind_request_context(rpc_context)
+        CSI ->>+ H: original_behavior(request, context)
+        H -->>- CSI: response (or raises)
+        Note over CSI: finally: record_grpc_request(method, status_code, duration)<br/>logger.info("grpc_request_completed", ...)<br/>reset_request_context(token)
+        CSI -->>- Chan: response
+    end
+
+    Chan -->>- CCI: response
+    CCI -->>- Client: response
