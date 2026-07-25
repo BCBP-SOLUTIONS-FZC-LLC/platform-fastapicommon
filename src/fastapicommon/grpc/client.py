@@ -5,6 +5,7 @@ from collections.abc import Callable
 from typing import Any
 
 import grpc
+
 from fastapicommon.auth.headers import (
     CORRELATION_ID_HEADER,
     REQUEST_ID_HEADER,

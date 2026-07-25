@@ -11,6 +11,7 @@ from __future__ import annotations
 from concurrent import futures
 
 import grpc
+
 from fastapicommon.grpc import ContextServerInterceptor
 from fastapicommon.logging import configure_logging, get_logger
 from fastapicommon.telemetry import instrument_grpc_server
