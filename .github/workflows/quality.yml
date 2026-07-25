@@ -1,7 +1,8 @@
 # Reusable workflow — called by validate.yml's "Quality" job. Its job id ("quality")
 # combines with the calling chain to produce the "Validate / Quality / quality" required
 # status check.
-# Runs: checkout → Python setup → install → pip check → format check → ruff → mypy → pip-audit
+# Runs: checkout → uv sync (dev group + grpc extra, from uv.lock) → pip check → format
+# check → ruff → mypy → pip-audit
 name: Quality Check
 
 "on":
@@ -25,30 +26,27 @@ jobs:
         with:
           ref: ${{ inputs.ref || github.ref }}
 
-      - name: Set up Python
-        uses: actions/setup-python@v7
+      - name: Install uv
+        uses: astral-sh/setup-uv@v9
         with:
           python-version: '3.12'
-          cache: pip
 
-      - name: Install dependencies
-        run: pip install -e ".[dev,grpc,examples]"
+      - name: Install dependencies (uv sync from uv.lock)
+        run: uv sync --extra grpc
 
       - name: Verify dependency resolution
-        run: pip check
+        run: uv pip check
 
       - name: Format check (ruff format + black --check)
         run: |
-          ruff format --check src tests examples
-          black --check src tests examples
+          uv run ruff format --check src tests examples
+          uv run black --check src tests examples
 
       - name: Lint (ruff)
-        run: ruff check src tests examples
+        run: uv run ruff check src tests examples
 
       - name: Type check (mypy --strict)
-        run: mypy
+        run: uv run mypy
 
       - name: Vulnerability check (pip-audit)
-        run: |
-          pip install pip-audit
-          pip-audit
+        run: uv run pip-audit

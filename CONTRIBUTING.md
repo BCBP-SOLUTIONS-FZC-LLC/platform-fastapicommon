@@ -7,6 +7,9 @@ cut a release.
 ## Prerequisites
 
 - Python 3.11+ (matches `requires-python` in `pyproject.toml`)
+- [`uv`](https://docs.astral.sh/uv/) — manages the venv, dependency resolution, and
+  `uv.lock` (matches `platform-pgcommon-py`'s convention). Install via `brew install uv`
+  or see uv's install docs; `make install` does not install `uv` itself.
 - Docker (for the local observability stack — see the README's "Local testing with the
   observability stack")
 - `pre-commit` is installed as part of `make install` — no separate install needed
@@ -17,7 +20,7 @@ cut a release.
 git clone https://github.com/BCBP-SOLUTIONS-FZC-LLC/platform-fastapicommon
 cd platform-fastapicommon
 make setup     # copies .env-example -> .env, creates logs/
-make install   # create venv, install dev + grpc + examples extras, install pre-commit hooks
+make install   # uv sync (dev group + grpc extra, from uv.lock) + install pre-commit hooks
 make lint      # verify ruff + mypy pass
 make test      # run all tests with the coverage gate
 ```

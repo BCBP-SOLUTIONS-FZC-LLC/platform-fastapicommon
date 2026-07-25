@@ -36,7 +36,14 @@ dependencies = [
 
 [project.optional-dependencies]
 grpc = ["grpcio>=1.62"]
+# Not part of the library's public API — exists only so the Dockerfile (plain pip, no
+# uv) can install what examples/fastapi_service needs: `pip install ".[grpc,examples]"`.
 examples = ["uvicorn[standard]>=0.29"]
+
+[project.urls]
+Repository = "https://github.com/BCBP-SOLUTIONS-FZC-LLC/platform-fastapicommon"
+
+[dependency-groups]
 dev = [
     "pytest>=8.0",
     "pytest-asyncio>=0.23",
@@ -45,14 +52,22 @@ dev = [
     "mypy>=1.9",
     "black>=24.3",
     "pre-commit>=3.7",
+    "pip-audit>=2.7",
+    # `uv build` is the build frontend now (no separate `build` package needed); twine
+    # is still used for `twine check` in release.yml.
+    "twine>=5.0",
+    # grpcio and uvicorn are duplicated from [project.optional-dependencies] (grpc,
+    # examples) so the dev group alone (the uv default) is enough to run the full test
+    # suite and `make run` — matches platform-pgcommon-py's convention of duplicating
+    # optional-extra deps into dev.
     "grpcio>=1.62",
     "grpcio-tools>=1.62",
     "types-protobuf",
     "uvicorn[standard]>=0.29",
 ]
 
-[project.urls]
-Repository = "https://github.com/BCBP-SOLUTIONS-FZC-LLC/platform-fastapicommon"
+[tool.uv]
+default-groups = ["dev"]
 
 [tool.hatch.build.targets.wheel]
 packages = ["src/fastapicommon"]

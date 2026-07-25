@@ -7,6 +7,30 @@ pre-1.0 caveat on what SemVer guarantees currently apply.
 
 ## [Unreleased]
 
+### Changed
+
+- Local/CI dependency management migrated from plain `pip` + `venv` to
+  [`uv`](https://docs.astral.sh/uv/), matching `platform-pgcommon-py`'s convention.
+  `uv.lock` is now committed for reproducible installs. `[project.optional-dependencies]`
+  keeps `grpc` and `examples` as real, publicly installable extras; local/CI-only tooling
+  (pytest, ruff, mypy, black, pre-commit, pip-audit, twine, plus `grpcio`/`uvicorn`
+  duplicated for convenience) moved to a new `[dependency-groups].dev`
+  (`[tool.uv] default-groups = ["dev"]`). `Makefile` targets now run `uv sync` / `uv run`
+  / `uv build` instead of manually managing `.venv` with `pip`; `.pre-commit-config.yaml`'s
+  local `mypy`/`pytest` hooks now invoke `uv run` instead of `.venv/bin/python -m`; all 5
+  CI jobs that installed dependencies now use `astral-sh/setup-uv` + `uv sync` instead of
+  `actions/setup-python` + `pip install -e`.
+
+### Fixed
+
+- While migrating, `uvicorn` was briefly moved out of the `examples` extra entirely into
+  the new dev group — which would have broken `Dockerfile`'s
+  `pip install ".[grpc,examples]"` (the `examples` extra wouldn't have existed). Caught
+  before committing by actually rebuilding the Docker image; `examples` now stays a real
+  project extra (for the Dockerfile's plain-pip install) *and* is duplicated into the dev
+  group (for local `uv sync` convenience), matching the same pattern already used for
+  `grpc`.
+
 ## [0.1.0] - 2026-07-25
 
 First release of `fastapicommon`.

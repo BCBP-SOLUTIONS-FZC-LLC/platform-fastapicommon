@@ -547,11 +547,17 @@ platform-fastapicommon/
 
 ## Local development (this repo)
 
+Dependency management uses [`uv`](https://docs.astral.sh/uv/) (matching
+`platform-pgcommon-py`'s convention) — `pyproject.toml`'s `[dependency-groups].dev`
+plus the `grpc`/`examples` extras are locked into `uv.lock`, committed to the repo for
+reproducible installs. Install `uv` yourself first (`brew install uv` or see uv's docs);
+`make install` assumes it's already on `PATH`.
+
 ### Setup
 
 ```bash
 make setup     # copies .env-example -> .env, creates logs/
-make install   # create venv, install dev + grpc + examples extras, install pre-commit hooks
+make install   # uv sync (dev group + grpc extra, from uv.lock) + install pre-commit hooks
 ```
 
 ### Common commands
@@ -561,10 +567,10 @@ make install   # create venv, install dev + grpc + examples extras, install pre-
 | `make lint` | ruff check + mypy --strict |
 | `make format` | ruff format + black (rewrites files) |
 | `make format-check` | Same, but check-only — no changes; used in CI |
-| `make vulncheck` | pip-audit against installed dependencies |
+| `make vulncheck` | pip-audit against locked dependencies |
 | `make test` | All tests (coverage gate ≥90%, enforced by `pyproject.toml`) |
 | `make coverage` | Run tests, then open an HTML coverage report |
-| `make build` | Build the wheel + sdist into `dist/` |
+| `make build` | Build the wheel + sdist into `dist/` (`uv build`) |
 | `make run` | Run the example FastAPI service (`uvicorn --reload`) |
 | `make docker-build` | Build the example service Docker image locally |
 | `make docker-up` / `make docker-down` | Start/stop the local observability stack |
@@ -617,11 +623,12 @@ GitHub Actions runs on push/PR to `main`/`develop`. Job names below match the or
 required-status-checks ruleset on `main` exactly:
 
 1. **Validate** — a reusable workflow fanning out into two required checks: **Quality**
-   (format check, ruff lint, mypy --strict, `pip check`, pip-audit) and **Test** (pytest,
-   coverage gate) — shown as `Validate / Quality / quality` and `Validate / Test / test`.
+   (`uv sync` from `uv.lock`, `uv pip check`, format check, ruff lint, mypy --strict,
+   pip-audit) and **Test** (pytest, coverage gate) — shown as `Validate / Quality /
+   quality` and `Validate / Test / test`.
 2. **Coverage** — the same test suite again across the full Python version matrix (3.11,
    3.12, 3.13, 3.14) — informational, not part of the required-checks ruleset.
-3. **Build** — wheel + sdist.
+3. **Build** — wheel + sdist (`uv build`).
 4. **Lint Dockerfile** — hadolint against `Dockerfile`.
 5. **Build image (cache)** — builds the example service image (no push), using GHA cache.
 6. **Trivy CVE scan** — scans the built image; fails on HIGH/CRITICAL vulnerabilities that
