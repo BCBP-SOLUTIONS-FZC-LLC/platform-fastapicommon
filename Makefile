@@ -27,7 +27,8 @@ PROMETHEUS_SCRAPE_TARGET ?= host.docker.internal:$(APP_PORT)
 
 LINT_PATHS := src tests examples
 
-.PHONY: install lint format format-check vulncheck test coverage build clean \
+.PHONY: install lint typecheck format format-check vulncheck build clean \
+        test-unit test-int test-all cover \
         setup help run \
         prometheus-config docker-build docker-up docker-down docker-logs \
         lint-docker scan smoke-test \
@@ -46,12 +47,15 @@ help:
 	@echo "Available commands:"
 	@echo " make setup         - copy .env-example to .env if missing, create logs/"
 	@echo " make install       - uv sync (dev group + grpc extra) + install pre-commit hooks"
-	@echo " make lint          - ruff check + mypy --strict"
+	@echo " make lint          - ruff check"
+	@echo " make typecheck     - mypy --strict"
 	@echo " make format        - ruff format + black (rewrites files)"
 	@echo " make format-check  - ruff format --check + black --check (no changes; used in CI)"
 	@echo " make vulncheck     - pip-audit against locked dependencies"
-	@echo " make test          - run pytest with coverage (>=90% gate enforced by pyproject.toml)"
-	@echo " make coverage      - run tests and open an HTML coverage report"
+	@echo " make test-unit     - unit tests only (tests/unit — no Docker, no wired-up app)"
+	@echo " make test-int      - integration tests (tests/integration — create_platform_app() end-to-end)"
+	@echo " make test-all      - unit + integration in one pytest run (what CI runs)"
+	@echo " make cover         - test-all + open an HTML coverage report (>=90% gate enforced by pyproject.toml)"
 	@echo " make build         - build the wheel + sdist into dist/ (uv build)"
 	@echo " make run           - run the example FastAPI service locally (uvicorn --reload)"
 	@echo " make docker-build  - build the example service Docker image locally"
@@ -61,7 +65,7 @@ help:
 	@echo " make lint-docker   - hadolint against Dockerfile (matches CI's 'Lint Dockerfile' check)"
 	@echo " make scan          - build + Trivy CVE scan (matches CI's 'Trivy CVE scan' check)"
 	@echo " make smoke-test    - build, run, and curl-check the example service (matches CI's 'Smoke tests')"
-	@echo " make ci            - full local pipeline (format-check + lint + test + build)"
+	@echo " make ci            - full local pipeline (format-check + lint + typecheck + test-all + build)"
 	@echo " make clean         - remove venv, caches, build artifacts, and local logs"
 
 # -----------------------------
@@ -74,6 +78,8 @@ install:
 
 lint:
 	uv run ruff check $(LINT_PATHS)
+
+typecheck:
 	uv run mypy
 
 format:
@@ -87,11 +93,25 @@ format-check:
 vulncheck:
 	uv run pip-audit
 
-test:
-	uv run pytest
+# -----------------------------
+# TESTS
+# -----------------------------
 
-coverage: test
+test-unit:
+	uv run pytest tests/unit -v
+
+test-int:
+	uv run pytest tests/integration -v -m integration
+
+test-all:
+	uv run pytest tests/unit tests/integration -v
+
+# Coverage gate (>=90%) is enforced by pyproject.toml's [tool.coverage.report] fail_under,
+# applied automatically via pytest's default addopts — this target just also opens an
+# HTML report.
+cover: test-all
 	uv run coverage html
+	@echo "HTML coverage report: htmlcov/index.html"
 
 # -----------------------------
 # BUILD
@@ -177,7 +197,7 @@ docker-logs:
 # is a separate CI job, not part of the default local loop)
 # -----------------------------
 
-ci: format-check lint test build
+ci: format-check lint typecheck test-all build
 
 # -----------------------------
 # CLEAN

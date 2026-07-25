@@ -532,7 +532,9 @@ platform-fastapicommon/
 │   ├── propagation/     # create_platform_http_client
 │   ├── grpc/            # server/client interceptors (requires the grpc extra)
 │   └── bootstrap/       # create_platform_app() — the single entry point
-├── tests/                # mirrors src/fastapicommon/ one-to-one
+├── tests/
+│   ├── unit/             # mirrors src/fastapicommon/ one-to-one
+│   └── integration/      # multi-module tests (create_platform_app() end-to-end)
 ├── examples/
 │   ├── fastapi_service/  # reference HTTP service (this README's HTTP example, runnable)
 │   └── grpc_service/     # reference gRPC service (raw-bytes generic handler demo)
@@ -564,17 +566,20 @@ make install   # uv sync (dev group + grpc extra, from uv.lock) + install pre-co
 
 | Command | Description |
 |---------|-------------|
-| `make lint` | ruff check + mypy --strict |
+| `make lint` | ruff check |
+| `make typecheck` | mypy --strict |
 | `make format` | ruff format + black (rewrites files) |
 | `make format-check` | Same, but check-only — no changes; used in CI |
 | `make vulncheck` | pip-audit against locked dependencies |
-| `make test` | All tests (coverage gate ≥90%, enforced by `pyproject.toml`) |
-| `make coverage` | Run tests, then open an HTML coverage report |
+| `make test-unit` | `tests/unit` only — no Docker, no wired-up app |
+| `make test-int` | `tests/integration` only — `create_platform_app()` end-to-end |
+| `make test-all` | Both tiers together (coverage gate ≥90%, enforced by `pyproject.toml`) |
+| `make cover` | `test-all`, then open an HTML coverage report |
 | `make build` | Build the wheel + sdist into `dist/` (`uv build`) |
 | `make run` | Run the example FastAPI service (`uvicorn --reload`) |
 | `make docker-build` | Build the example service Docker image locally |
 | `make docker-up` / `make docker-down` | Start/stop the local observability stack |
-| `make ci` | `format-check` + `lint` + `test` + `build` — the full local pipeline |
+| `make ci` | `format-check` + `lint` + `typecheck` + `test-all` + `build` — the full local pipeline |
 
 ### Example service (optional)
 
@@ -608,10 +613,14 @@ end-to-end against this exact `docker-compose.yml`.
 
 ## Testing
 
-- Tests live under `tests/`, mirroring `src/fastapicommon/` one-to-one, plus
-  `tests/bootstrap/` for end-to-end `create_platform_app()` checks.
+- Tests are tiered under `tests/unit/` (mirrors `src/fastapicommon/` one-to-one) and
+  `tests/integration/` (multi-module, e.g. `create_platform_app()` end-to-end) —
+  matching `platform-pgcommon-py`'s tiering, minus the `e2e` tier since nothing here
+  needs Docker or an external service.
 - **Coverage gate:** `pyproject.toml`'s `[tool.coverage.report].fail_under = 90` — enforced
-  automatically by `pytest` (no separate flag needed).
+  automatically on `make test-all`/`make cover`/`make ci` (no separate flag needed).
+  Running `make test-unit` or `make test-int` alone will report below 90% since each only
+  covers part of the codebase — expected, not a regression.
 - All tests run without a live server or Docker — the observability stack is for manual
   verification only.
 

@@ -75,7 +75,10 @@ packages = ["src/fastapicommon"]
 [tool.pytest.ini_options]
 testpaths = ["tests"]
 asyncio_mode = "auto"
-addopts = "--cov=fastapicommon --cov-report=term-missing --cov-report=xml"
+markers = [
+    "integration: exercises multiple modules wired together (e.g. create_platform_app()); no Docker/external services required, unlike platform-pgcommon-py's same-named marker",
+]
+addopts = "--strict-markers --cov=fastapicommon --cov-report=term-missing --cov-report=xml"
 
 [tool.coverage.run]
 source = ["src/fastapicommon"]

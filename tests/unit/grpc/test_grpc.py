@@ -4,6 +4,7 @@ from types import SimpleNamespace
 from typing import Any
 
 import grpc
+
 from fastapicommon.context import (
     CurrentUser,
     RequestContext,

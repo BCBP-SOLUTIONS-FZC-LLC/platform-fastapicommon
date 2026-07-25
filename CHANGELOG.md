@@ -9,6 +9,16 @@ pre-1.0 caveat on what SemVer guarantees currently apply.
 
 ### Changed
 
+- `tests/` restructured into `tests/unit/` and `tests/integration/` tiers, matching
+  `platform-pgcommon-py`'s `unit`/`integration`/`e2e` convention (we only need the first
+  two — nothing here requires Docker or an external service the way `pgcommon-py`'s
+  Postgres-backed tiers do). `tests/bootstrap/test_bootstrap.py` moved to
+  `tests/integration/test_bootstrap.py` and is now tagged `pytest.mark.integration`
+  (registered in `pyproject.toml`, `--strict-markers` enabled); everything else moved
+  under `tests/unit/<module>/` unchanged. `Makefile` gained `test-unit`, `test-int`,
+  `test-all` (replacing `test`), and `cover` (replacing `coverage`); `lint` now runs ruff
+  only, with mypy split into a new `typecheck` target — also matching `pgcommon-py`. `make
+  ci` is now `format-check + lint + typecheck + test-all + build`.
 - Local/CI dependency management migrated from plain `pip` + `venv` to
   [`uv`](https://docs.astral.sh/uv/), matching `platform-pgcommon-py`'s convention.
   `uv.lock` is now committed for reproducible installs. `[project.optional-dependencies]`

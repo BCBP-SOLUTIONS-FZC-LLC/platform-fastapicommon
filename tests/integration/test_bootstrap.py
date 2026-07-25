@@ -1,3 +1,4 @@
+import pytest
 from fastapi import Depends
 from fastapi.testclient import TestClient
 from opentelemetry.exporter.otlp.proto.grpc.trace_exporter import OTLPSpanExporter
@@ -7,6 +8,8 @@ from fastapicommon.bootstrap import create_platform_app
 from fastapicommon.bootstrap.app import _build_span_exporter
 from fastapicommon.config import PlatformSettings
 from fastapicommon.exceptions import NotFoundException
+
+pytestmark = pytest.mark.integration
 
 
 def _build_app(**settings_overrides: object) -> object:
