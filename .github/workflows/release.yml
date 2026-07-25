@@ -1,0 +1,198 @@
+# Triggered by version tags (e.g. v0.1.0 or v0.1.0-rc.1).
+# Pipeline: validate → coverage → build (+ twine check) → docker push → GitHub release
+name: Release
+
+"on":
+  push:
+    tags:
+      - 'v[0-9]*.[0-9]*.[0-9]*'
+      - 'v[0-9]*.[0-9]*.[0-9]*-*'
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: 'Tag to release (e.g. v0.1.0)'
+        required: true
+
+# Default: read-only. Each job that needs extra permissions declares them explicitly.
+permissions:
+  contents: read
+
+env:
+  RELEASE_TAG: ${{ github.event.inputs.tag || github.ref_name }}
+
+jobs:
+  validate:
+    name: Validate
+    uses: ./.github/workflows/validate.yml
+    with:
+      ref: ${{ github.event.inputs.tag || github.ref }}
+
+  coverage:
+    name: Coverage (Python ${{ matrix.python-version }})
+    runs-on: ubuntu-latest
+    needs: validate
+    strategy:
+      matrix:
+        python-version: ['3.11', '3.12', '3.13', '3.14']
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v6
+        with:
+          ref: ${{ github.event.inputs.tag || github.ref }}
+
+      - name: Set up Python
+        uses: actions/setup-python@v6
+        with:
+          python-version: ${{ matrix.python-version }}
+          cache: pip
+
+      - name: Install dependencies
+        run: pip install -e ".[dev,grpc,examples]"
+
+      - name: Test with coverage (>=90% required)
+        run: pytest
+
+  build:
+    name: Build
+    runs-on: ubuntu-latest
+    needs: coverage
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v6
+        with:
+          ref: ${{ github.event.inputs.tag || github.ref }}
+
+      - name: Set up Python
+        uses: actions/setup-python@v6
+        with:
+          python-version: '3.12'
+          cache: pip
+
+      - name: Build wheel + sdist
+        run: |
+          pip install build twine
+          python -m build
+
+      - name: Verify build artifacts (twine check)
+        run: twine check dist/*
+
+      - name: Upload build artifacts
+        uses: actions/upload-artifact@v4
+        with:
+          name: dist
+          path: dist/
+          if-no-files-found: error
+
+  pypi-publish:
+    name: Publish to PyPI
+    runs-on: ubuntu-latest
+    needs: build
+    # Requires a "pypi" Trusted Publisher registered at
+    # https://pypi.org/manage/account/publishing/ for this repo + this workflow filename
+    # (see VERSIONING.md § Publishing to PyPI). No API token is stored anywhere — PyPI
+    # trusts a short-lived OIDC token this job requests via id-token: write.
+    environment:
+      name: pypi
+      url: https://pypi.org/project/platform-fastapicommon/
+    permissions:
+      id-token: write
+    steps:
+      - name: Download build artifacts
+        uses: actions/download-artifact@v4
+        with:
+          name: dist
+          path: dist/
+
+      - name: Publish to PyPI
+        uses: pypa/gh-action-pypi-publish@release/v1
+
+  docker:
+    name: Docker image → GHCR
+    runs-on: ubuntu-latest
+    needs: build
+    permissions:
+      contents: read
+      packages: write
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v6
+        with:
+          ref: ${{ github.event.inputs.tag || github.ref }}
+
+      - name: Log in to GHCR
+        uses: docker/login-action@v4
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Docker metadata
+        id: meta
+        uses: docker/metadata-action@v6
+        with:
+          images: ghcr.io/bcbp-solutions-fzc-llc/platform-fastapicommon
+          # This is a demo/reference image, not a production artefact.
+          # Suppress the automatic 'latest' tag to avoid implying production-readiness.
+          flavor: |
+            latest=false
+          tags: |
+            type=semver,pattern={{version}},value=${{ env.RELEASE_TAG }}
+            type=semver,pattern={{major}}.{{minor}},value=${{ env.RELEASE_TAG }}
+            type=semver,pattern={{major}},value=${{ env.RELEASE_TAG }}
+
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@v4
+
+      - name: Build and push
+        uses: docker/build-push-action@v7
+        with:
+          context: .
+          file: ./Dockerfile
+          push: true
+          tags: ${{ steps.meta.outputs.tags }}
+          labels: ${{ steps.meta.outputs.labels }}
+          build-args: BUILD_VERSION=${{ env.RELEASE_TAG }}
+          cache-from: type=gha
+          cache-to: type=gha,mode=max
+
+  publish:
+    name: GitHub Release
+    runs-on: ubuntu-latest
+    needs: [docker, pypi-publish]
+    permissions:
+      contents: write
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v6
+        with:
+          ref: ${{ github.event.inputs.tag || github.ref }}
+
+      - name: Extract release notes from CHANGELOG
+        shell: bash
+        run: |
+          set -euo pipefail
+          VERSION="${RELEASE_TAG#v}"
+          # Use fgrep (fixed-string) semantics via index() to locate the section header,
+          # avoiding treating dots in semver (e.g. 0.1.0) as awk regex wildcards.
+          awk -v ver="[${VERSION}]" '
+            substr($0, 1, 3) == "## " && index($0, ver) > 0 { found=1; next }
+            /^## \[/ { if (found) exit }
+            found { print }
+          ' CHANGELOG.md | sed -e 's/^[[:space:]]*$//' > release-notes.md
+          if [ ! -s release-notes.md ]; then
+            echo "No changelog entry found for ${VERSION}. Update CHANGELOG.md before tagging." >&2
+            exit 1
+          fi
+
+      - name: Create GitHub Release
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          PRERELEASE_FLAG=""
+          if echo "$RELEASE_TAG" | grep -q -- '-'; then
+            PRERELEASE_FLAG="--prerelease"
+          fi
+          gh release create "$RELEASE_TAG" \
+            --title "$RELEASE_TAG" \
+            --notes-file release-notes.md \
+            $PRERELEASE_FLAG

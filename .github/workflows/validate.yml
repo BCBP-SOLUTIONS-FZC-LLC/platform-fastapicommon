@@ -1,0 +1,33 @@
+# Reusable workflow — called by ci.yml and release.yml as a job named "Validate".
+# Fans out into two nested reusable-workflow calls, producing two required status
+# checks (per the org's protect-main-branch ruleset):
+#   "Validate / Quality / quality"  <- quality.yml
+#   "Validate / Test / test"        <- test.yml
+# (GitHub names a reusable-workflow-call check as "<calling job> / <called job>" at each
+# level of nesting — this file is the middle level.)
+name: Validate
+
+"on":
+  workflow_call:
+    inputs:
+      ref:
+        description: 'Git ref to check out (leave empty to use the caller ref)'
+        type: string
+        required: false
+        default: ''
+
+permissions:
+  contents: read
+
+jobs:
+  quality:
+    name: Quality
+    uses: ./.github/workflows/quality.yml
+    with:
+      ref: ${{ inputs.ref }}
+
+  test:
+    name: Test
+    uses: ./.github/workflows/test.yml
+    with:
+      ref: ${{ inputs.ref }}

@@ -1,0 +1,26 @@
+# Migration Guide: platform-gincommon (Go) -> fastapicommon (Python)
+
+This guide maps concepts from the Go/Gin shared middleware library, `platform-gincommon`,
+to their Python/FastAPI equivalents in this package, for teams porting a Gin service to
+FastAPI.
+
+| Go (Gin) | Python (FastAPI) | Notes |
+|---|---|---|
+| Gin middleware | Starlette middleware (`fastapicommon.middleware`) | Same request/response interception model. |
+| `context.Context` values | `contextvars` (`fastapicommon.context`) | Both are async/goroutine-safe; Python's contextvars are per-`asyncio.Task` instead of per-goroutine. |
+| Structured logger (e.g. zap) | structlog (`fastapicommon.logging`) | JSON-only output on both sides; same enrichment fields (`request_id`, `correlation_id`, `tenant_id`, `user_id`). |
+| Prometheus client (Go) | `prometheus_client` (`fastapicommon.metrics`) | Same metric names and label sets (`http_requests_total`, `http_request_duration_seconds`, `grpc_*`) so dashboards are portable. |
+| OpenTelemetry (Go SDK) | OpenTelemetry (Python SDK) (`fastapicommon.telemetry`) | Same `traceparent` propagation; spans are interoperable across the two SDKs. |
+| gRPC interceptors (Go) | gRPC interceptors (Python) (`fastapicommon.grpc`) | Python interceptors here cover unary-unary; streaming needs manual context binding (see ADR-004). |
+| Health endpoints (Gin routes) | `fastapicommon.health` router | Same `/health`, `/ready`, `/live` paths and semantics. |
+
+## Migration steps
+
+1. Replace the service's Gin router bootstrap with `fastapicommon.bootstrap.create_platform_app()`.
+2. Port service-specific routes to FastAPI routers; mount them on the returned `app`.
+3. Replace direct header reads (`x-user-id`, `x-tenant-id`, etc.) with
+   `fastapicommon.context.get_request_context()` / `fastapicommon.auth.get_current_user`.
+4. Replace Go RBAC middleware calls with `fastapicommon.rbac.RequireRole` /
+   `RequireAnyRole` / `RequireAllRoles` as FastAPI dependencies.
+5. Point log/metrics/tracing dashboards at the new service; label names and header
+   contracts are unchanged, so existing dashboards should work without modification.

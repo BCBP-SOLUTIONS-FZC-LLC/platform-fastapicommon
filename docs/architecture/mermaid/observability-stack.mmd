@@ -1,0 +1,31 @@
+graph LR
+    subgraph app["examples/fastapi_service (or any consuming service)"]
+        ctxmw["ContextMiddleware\nrequest_id / correlation_id / tenant_id / user_id"]
+        promw["PrometheusMiddleware"]
+        logger["structlog JSON logs\n(get_logger, stdout)"]
+        tracer["OTel spans\n(FastAPIInstrumentor)"]
+    end
+
+    subgraph local["Local stack — docker-compose.yml"]
+        logfile["logs/app.log\n(stdout teed by `make run`)"]
+        promtail["promtail"]
+        loki["loki :3100"]
+        prometheus["prometheus :9090\nscrapes host.docker.internal:APP_PORT/metrics"]
+        collector["otel-collector :4317/:4318\n(OTLP/gRPC + HTTP)"]
+        tempo["tempo :3200"]
+        grafana["grafana :3000\n(Prometheus + Loki + Tempo datasources\ntrace <-> log correlation provisioned)"]
+    end
+
+    logger --> logfile
+    logfile --> promtail
+    promtail --> loki
+    loki --> grafana
+
+    promw --> prometheus
+    prometheus --> grafana
+
+    tracer -->|"OTLPSpanExporter\n(only if OTLP_ENDPOINT / settings.otlp_endpoint set)"| collector
+    collector --> tempo
+    tempo --> grafana
+
+    ctxmw -.->|"request_id/correlation_id\ncarried in log fields"| logger

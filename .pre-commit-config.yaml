@@ -1,0 +1,37 @@
+repos:
+  - repo: https://github.com/astral-sh/ruff-pre-commit
+    rev: v0.4.10
+    hooks:
+      - id: ruff
+        args: [--fix]
+
+  - repo: https://github.com/psf/black
+    rev: 24.4.2
+    hooks:
+      - id: black
+
+  # Run against the project venv (not mirrors-mypy's isolated environment) so mypy
+  # resolves fastapi/starlette/structlog/httpx/opentelemetry/etc. the same way `make
+  # lint` does — mirrors-mypy only installs what's listed in `additional_dependencies`,
+  # which drifts out of sync with pyproject.toml's actual dependencies over time.
+  - repo: local
+    hooks:
+      - id: mypy
+        name: mypy
+        entry: .venv/bin/python -m mypy
+        language: system
+        pass_filenames: false
+        types: [python]
+
+      - id: pytest
+        name: pytest
+        entry: .venv/bin/python -m pytest
+        language: system
+        pass_filenames: false
+        types: [python]
+
+  - repo: https://github.com/pre-commit/pre-commit-hooks
+    rev: v4.6.0
+    hooks:
+      - id: trailing-whitespace
+      - id: end-of-file-fixer

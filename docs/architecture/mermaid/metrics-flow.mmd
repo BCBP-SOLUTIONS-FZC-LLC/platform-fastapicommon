@@ -1,0 +1,30 @@
+flowchart TD
+    subgraph init["Module import (once per process — no explicit Init call needed)"]
+        A["fastapicommon.metrics.definitions\nmodule-level Counter/Histogram objects\nregistered on prometheus_client's default REGISTRY at import time"]
+    end
+
+    subgraph http["Per HTTP request — PrometheusMiddleware"]
+        B([call_next request]) --> C["start = time.perf_counter()"]
+        C --> D[await call_next request]
+        D --> E["route = request.scope.get('route')\npath = route.path if route else request.url.path"]
+        E --> F["HTTP_REQUESTS_TOTAL.labels(method, path, status_code).inc()"]
+        F --> G["HTTP_REQUEST_DURATION_SECONDS.labels(method, path).observe(duration)"]
+    end
+
+    subgraph grpcflow["Per gRPC unary-unary call — ContextServerInterceptor"]
+        H([wrapped_behavior request, context]) --> I["original_behavior(request, context)"]
+        I --> J["record_grpc_request(method, status_code, duration_seconds)"]
+        J --> K["GRPC_REQUESTS_TOTAL.labels(method, status_code).inc()"]
+        J --> L["GRPC_REQUEST_DURATION_SECONDS.labels(method).observe(duration_seconds)"]
+    end
+
+    subgraph expose["Exposition"]
+        M["GET /metrics — metrics_router\n(registered only if settings.enable_metrics)"]
+        M --> N["generate_latest()\nContent-Type: CONTENT_TYPE_LATEST"]
+    end
+
+    A -.-> F
+    A -.-> G
+    A -.-> K
+    A -.-> L
+    A -.-> N
