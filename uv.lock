@@ -1353,7 +1353,7 @@ wheels = [
 
 [[package]]
 name = "platform-fastapicommon"
-version = "0.1.0"
+version = "0.1.1"
 source = { editable = "." }
 dependencies = [
     { name = "fastapi" },

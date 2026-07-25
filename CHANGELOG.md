@@ -7,6 +7,8 @@ pre-1.0 caveat on what SemVer guarantees currently apply.
 
 ## [Unreleased]
 
+## [0.1.1] - 2026-07-26
+
 ### Added
 
 - `tests/e2e/test_smoke.py` — a real `tests/e2e` tier (`pytest.mark.e2e`), matching
@@ -67,6 +69,20 @@ pre-1.0 caveat on what SemVer guarantees currently apply.
   test" check now scope their pytest invocation to `tests/unit tests/integration`
   explicitly, so they don't build a Docker image on every run — `tests/e2e` runs
   separately in CI's "Smoke tests" job instead (see Added, above).
+- CI failed with "Unable to resolve action `astral-sh/setup-uv@v9`, unable to find
+  version `v9`": as of v8.0.0, `astral-sh/setup-uv` publishes only immutable exact-version
+  release tags and no longer maintains floating major/minor tags. All 7 usages across
+  `ci.yml`/`test.yml`/`quality.yml`/`release.yml` now pin `@v9.0.0`.
+- `ruff check` failed in CI on a missing blank line between the third-party `import grpc`
+  and first-party `fastapicommon.*` import groups in `src/fastapicommon/grpc/{client,server}.py`
+  and `examples/grpc_service/server.py` — never caught locally because a stale
+  `.ruff_cache` predating the ruff 0.4→0.16 bump (see uv migration, above) masked it, and
+  CI never reached the lint step before now (it was failing earlier at the `setup-uv`
+  action-resolution step above).
+- Follow-up doc-vs-code audit: `docs/architecture/mermaid/module-dependencies.mmd` (and
+  its embedded copy in `ARCHITECTURE.md`) drew a `health -> config` dependency edge that
+  doesn't exist in code; `ARCHITECTURE.md`'s `fastapicommon.health` Public API table was
+  missing `ReadinessCheck`, which `health/__init__.py`'s `__all__` already exports.
 
 ## [0.1.0] - 2026-07-25
 
@@ -177,5 +193,6 @@ First release of `fastapicommon`.
   shared GitHub-hosted runner IP). All 5 places it's used across `ci.yml`/`release.yml`
   now retry once with the same action before failing the job.
 
-[Unreleased]: https://github.com/BCBP-SOLUTIONS-FZC-LLC/platform-fastapicommon/compare/v0.1.0...HEAD
+[Unreleased]: https://github.com/BCBP-SOLUTIONS-FZC-LLC/platform-fastapicommon/compare/v0.1.1...HEAD
+[0.1.1]: https://github.com/BCBP-SOLUTIONS-FZC-LLC/platform-fastapicommon/compare/v0.1.0...v0.1.1
 [0.1.0]: https://github.com/BCBP-SOLUTIONS-FZC-LLC/platform-fastapicommon/releases/tag/v0.1.0
