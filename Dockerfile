@@ -5,7 +5,7 @@
 # ships as a wheel/sdist (see `make build`); this image is a runnable demonstration, not
 # a production artifact of the library.
 
-FROM python:3.12-slim AS builder
+FROM python:3.14-slim AS builder
 
 WORKDIR /src
 
@@ -15,7 +15,7 @@ COPY examples ./examples
 
 RUN pip install --no-cache-dir --prefix=/install ".[grpc,examples]"
 
-FROM python:3.12-slim
+FROM python:3.14-slim
 
 # Pinning apt versions on python:3.12-slim is brittle: Debian's archive rotates old
 # point-release versions out, breaking the build on every base image bump.
