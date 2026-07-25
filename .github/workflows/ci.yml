@@ -96,7 +96,17 @@ jobs:
       - name: Checkout
         uses: actions/checkout@v6
 
+      # Booting buildx pulls the moby/buildkit image from Docker Hub, which occasionally
+      # times out on shared GitHub-hosted runner IPs ("context deadline exceeded") — a
+      # known transient flake, not a config problem. Retry once with the same action
+      # before failing the job.
       - name: Set up Docker Buildx
+        id: buildx
+        continue-on-error: true
+        uses: docker/setup-buildx-action@v4
+
+      - name: Set up Docker Buildx (retry)
+        if: steps.buildx.outcome == 'failure'
         uses: docker/setup-buildx-action@v4
 
       - name: Build (no push)
@@ -117,7 +127,17 @@ jobs:
       - name: Checkout
         uses: actions/checkout@v6
 
+      # Booting buildx pulls the moby/buildkit image from Docker Hub, which occasionally
+      # times out on shared GitHub-hosted runner IPs ("context deadline exceeded") — a
+      # known transient flake, not a config problem. Retry once with the same action
+      # before failing the job.
       - name: Set up Docker Buildx
+        id: buildx
+        continue-on-error: true
+        uses: docker/setup-buildx-action@v4
+
+      - name: Set up Docker Buildx (retry)
+        if: steps.buildx.outcome == 'failure'
         uses: docker/setup-buildx-action@v4
 
       # Rebuilds against the GHA cache populated by "Build image (cache)" — fast, and
@@ -150,7 +170,17 @@ jobs:
       - name: Checkout
         uses: actions/checkout@v6
 
+      # Booting buildx pulls the moby/buildkit image from Docker Hub, which occasionally
+      # times out on shared GitHub-hosted runner IPs ("context deadline exceeded") — a
+      # known transient flake, not a config problem. Retry once with the same action
+      # before failing the job.
       - name: Set up Docker Buildx
+        id: buildx
+        continue-on-error: true
+        uses: docker/setup-buildx-action@v4
+
+      - name: Set up Docker Buildx (retry)
+        if: steps.buildx.outcome == 'failure'
         uses: docker/setup-buildx-action@v4
 
       - name: Build image (load, cached)
@@ -224,7 +254,17 @@ jobs:
             type=ref,event=branch
             type=sha,prefix=sha-,format=short
 
+      # Booting buildx pulls the moby/buildkit image from Docker Hub, which occasionally
+      # times out on shared GitHub-hosted runner IPs ("context deadline exceeded") — a
+      # known transient flake, not a config problem. Retry once with the same action
+      # before failing the job.
       - name: Set up Docker Buildx
+        id: buildx
+        continue-on-error: true
+        uses: docker/setup-buildx-action@v4
+
+      - name: Set up Docker Buildx (retry)
+        if: steps.buildx.outcome == 'failure'
         uses: docker/setup-buildx-action@v4
 
       - name: Build and push image
