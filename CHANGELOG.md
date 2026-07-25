@@ -7,12 +7,29 @@ pre-1.0 caveat on what SemVer guarantees currently apply.
 
 ## [Unreleased]
 
+### Added
+
+- `tests/e2e/test_smoke.py` — a real `tests/e2e` tier (`pytest.mark.e2e`), matching
+  `platform-pgcommon-py`'s `unit`/`integration`/`e2e` convention. `tests/integration`'s
+  `TestClient` runs the ASGI app in-process via `ASGITransport` and neither tier ever
+  imports the app the way `uvicorn examples.fastapi_service.main:app` actually does or
+  verifies the packaged Docker image works at all — `tests/e2e` builds the real image,
+  runs it as a real container, and makes real HTTP calls against it over a real socket
+  (health/readiness, metrics, anonymous `/widgets/me`, and RBAC-gated `DELETE
+  /widgets/{id}` both without and with the required role). Requires Docker; skipped
+  automatically if the `docker` CLI isn't on `PATH`. An `E2E_IMAGE_TAG` env var lets a
+  pipeline that already built the image (e.g. CI's "Smoke tests" job) reuse it instead of
+  building another one. New `make test-e2e` target (`--no-cov`, see Fixed below);
+  `make test-all`/`make ci` now run all three tiers together. `make smoke-test` is now an
+  alias for `make test-e2e`, and CI's "Smoke tests" job now runs `tests/e2e` against the
+  image it already built with cached buildx, instead of a separate raw
+  `docker run`/`curl` script — the two were duplicating the same check.
+
 ### Changed
 
 - `tests/` restructured into `tests/unit/` and `tests/integration/` tiers, matching
-  `platform-pgcommon-py`'s `unit`/`integration`/`e2e` convention (we only need the first
-  two — nothing here requires Docker or an external service the way `pgcommon-py`'s
-  Postgres-backed tiers do). `tests/bootstrap/test_bootstrap.py` moved to
+  `platform-pgcommon-py`'s `unit`/`integration`/`e2e` convention (the `e2e` tier followed
+  separately — see Added, above). `tests/bootstrap/test_bootstrap.py` moved to
   `tests/integration/test_bootstrap.py` and is now tagged `pytest.mark.integration`
   (registered in `pyproject.toml`, `--strict-markers` enabled); everything else moved
   under `tests/unit/<module>/` unchanged. `Makefile` gained `test-unit`, `test-int`,
@@ -40,6 +57,16 @@ pre-1.0 caveat on what SemVer guarantees currently apply.
   project extra (for the Dockerfile's plain-pip install) *and* is duplicated into the dev
   group (for local `uv sync` convenience), matching the same pattern already used for
   `grpc`.
+- Running `tests/e2e` alone (`make test-e2e`) failed pytest's default `--cov=fastapicommon`
+  coverage gate at 0%: `tests/e2e` runs the app inside a separate Docker container
+  process, so coverage.py — instrumenting the host pytest process — genuinely collects
+  nothing. `make test-e2e` now passes `--no-cov`; `make test-all`/`make ci` are unaffected
+  since unit/integration tests in that same combined run still produce valid coverage
+  data (verified: coverage stays 99.81% whether or not `tests/e2e` is included alongside
+  them). CI's per-Python-version "Coverage" matrix job and the required "Validate / Test /
+  test" check now scope their pytest invocation to `tests/unit tests/integration`
+  explicitly, so they don't build a Docker image on every run — `tests/e2e` runs
+  separately in CI's "Smoke tests" job instead (see Added, above).
 
 ## [0.1.0] - 2026-07-25
 

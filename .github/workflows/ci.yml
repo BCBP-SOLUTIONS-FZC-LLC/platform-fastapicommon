@@ -35,8 +35,10 @@ jobs:
       - name: Install dependencies (uv sync from uv.lock)
         run: uv sync --extra grpc
 
+      # Scoped to unit + integration: tests/e2e builds and runs the real Docker image,
+      # which belongs to this workflow's "Smoke tests" job, not a per-Python-version matrix.
       - name: Test with coverage (>=90% required, enforced by pyproject.toml)
-        run: uv run pytest
+        run: uv run pytest tests/unit tests/integration
 
       - name: Upload coverage report
         uses: actions/upload-artifact@v7
@@ -189,38 +191,20 @@ jobs:
           tags: platform-fastapicommon-example:ci
           cache-from: type=gha
 
-      - name: Run container
-        run: docker run -d --name smoke-test -p 8080:8080 platform-fastapicommon-example:ci
+      - name: Install uv
+        uses: astral-sh/setup-uv@v9
+        with:
+          python-version: '3.12'
 
-      - name: Wait for health check
-        run: |
-          for i in $(seq 1 30); do
-            if curl -fsS http://localhost:8080/health >/dev/null 2>&1; then
-              echo "healthy after ${i}s"
-              exit 0
-            fi
-            sleep 1
-          done
-          echo "Service did not become healthy in time" >&2
-          docker logs smoke-test
-          exit 1
+      - name: Install dependencies (uv sync from uv.lock)
+        run: uv sync --extra grpc
 
-      - name: Smoke test endpoints
-        run: |
-          set -euo pipefail
-          curl -fsS http://localhost:8080/health | grep -q '"status":"ok"'
-          curl -fsS http://localhost:8080/ready | grep -q '"status":"ok"'
-          curl -fsS http://localhost:8080/metrics | grep -q 'http_requests_total'
-          curl -fsS http://localhost:8080/widgets/me | grep -q '"user_id":null'
-          echo "All smoke checks passed"
-
-      - name: Container logs
-        if: always()
-        run: docker logs smoke-test || true
-
-      - name: Stop container
-        if: always()
-        run: docker rm -f smoke-test || true
+      # Reuses the image built above (E2E_IMAGE_TAG) instead of tests/e2e building its
+      # own — avoids a redundant docker build in this job.
+      - name: Run e2e tests against the built image
+        env:
+          E2E_IMAGE_TAG: platform-fastapicommon-example:ci
+        run: uv run pytest tests/e2e -v -m e2e --no-cov
 
   docker:
     name: Docker image (example service)

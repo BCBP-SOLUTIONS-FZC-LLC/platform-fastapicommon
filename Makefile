@@ -28,7 +28,7 @@ PROMETHEUS_SCRAPE_TARGET ?= host.docker.internal:$(APP_PORT)
 LINT_PATHS := src tests examples
 
 .PHONY: install lint typecheck format format-check vulncheck build clean \
-        test-unit test-int test-all cover \
+        test-unit test-int test-e2e test-all cover \
         setup help run \
         prometheus-config docker-build docker-up docker-down docker-logs \
         lint-docker scan smoke-test \
@@ -54,7 +54,8 @@ help:
 	@echo " make vulncheck     - pip-audit against locked dependencies"
 	@echo " make test-unit     - unit tests only (tests/unit — no Docker, no wired-up app)"
 	@echo " make test-int      - integration tests (tests/integration — create_platform_app() end-to-end)"
-	@echo " make test-all      - unit + integration in one pytest run (what CI runs)"
+	@echo " make test-e2e      - e2e tests (tests/e2e — builds + runs the real Docker image, requires Docker)"
+	@echo " make test-all      - unit + integration + e2e in one pytest run (requires Docker)"
 	@echo " make cover         - test-all + open an HTML coverage report (>=90% gate enforced by pyproject.toml)"
 	@echo " make build         - build the wheel + sdist into dist/ (uv build)"
 	@echo " make run           - run the example FastAPI service locally (uvicorn --reload)"
@@ -64,7 +65,7 @@ help:
 	@echo " make docker-logs   - tail logs from the observability stack containers"
 	@echo " make lint-docker   - hadolint against Dockerfile (matches CI's 'Lint Dockerfile' check)"
 	@echo " make scan          - build + Trivy CVE scan (matches CI's 'Trivy CVE scan' check)"
-	@echo " make smoke-test    - build, run, and curl-check the example service (matches CI's 'Smoke tests')"
+	@echo " make smoke-test    - alias for test-e2e (matches CI's 'Smoke tests' check)"
 	@echo " make ci            - full local pipeline (format-check + lint + typecheck + test-all + build)"
 	@echo " make clean         - remove venv, caches, build artifacts, and local logs"
 
@@ -103,8 +104,14 @@ test-unit:
 test-int:
 	uv run pytest tests/integration -v -m integration
 
+# --no-cov: this tier runs the app inside a real Docker container, not in-process, so
+# coverage.py (instrumenting this pytest process) has nothing to measure — running it
+# alone would otherwise fail pyproject.toml's 90% coverage gate at 0%.
+test-e2e:
+	uv run pytest tests/e2e -v -m e2e --no-cov
+
 test-all:
-	uv run pytest tests/unit tests/integration -v
+	uv run pytest tests/unit tests/integration tests/e2e -v
 
 # Coverage gate (>=90%) is enforced by pyproject.toml's [tool.coverage.report] fail_under,
 # applied automatically via pytest's default addopts — this target just also opens an
@@ -156,20 +163,9 @@ scan:
 	docker build -t $(APP_NAME):scan .
 	trivy image --severity HIGH,CRITICAL --ignore-unfixed --exit-code 1 --scanners vuln $(APP_NAME):scan
 
-# Builds, runs, and curl-checks the example service — matches CI's "Smoke tests" job.
-smoke-test:
-	docker build -t $(APP_NAME):smoke .
-	docker run -d --name fastapicommon-smoke-test -p $(APP_PORT):8080 $(APP_NAME):smoke
-	@for i in $$(seq 1 30); do \
-		if curl -fsS http://localhost:$(APP_PORT)/health >/dev/null 2>&1; then echo "healthy after $${i}s"; break; fi; \
-		sleep 1; \
-	done
-	curl -fsS http://localhost:$(APP_PORT)/health | grep -q '"status":"ok"'
-	curl -fsS http://localhost:$(APP_PORT)/ready | grep -q '"status":"ok"'
-	curl -fsS http://localhost:$(APP_PORT)/metrics | grep -q 'http_requests_total'
-	curl -fsS http://localhost:$(APP_PORT)/widgets/me | grep -q '"user_id":null'
-	@echo "All smoke checks passed"
-	docker rm -f fastapicommon-smoke-test
+# Alias — tests/e2e/test_smoke.py builds + runs the real image and asserts against it
+# over real HTTP, superseding what used to be a separate raw docker run/curl recipe here.
+smoke-test: test-e2e
 
 # -----------------------------
 # DOCKER (LOCAL OBSERVABILITY STACK)

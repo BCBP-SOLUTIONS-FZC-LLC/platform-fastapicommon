@@ -534,7 +534,8 @@ platform-fastapicommon/
 │   └── bootstrap/       # create_platform_app() — the single entry point
 ├── tests/
 │   ├── unit/             # mirrors src/fastapicommon/ one-to-one
-│   └── integration/      # multi-module tests (create_platform_app() end-to-end)
+│   ├── integration/      # multi-module tests (create_platform_app() end-to-end)
+│   └── e2e/              # builds + runs the real Docker image, real HTTP calls (requires Docker)
 ├── examples/
 │   ├── fastapi_service/  # reference HTTP service (this README's HTTP example, runnable)
 │   └── grpc_service/     # reference gRPC service (raw-bytes generic handler demo)
@@ -573,13 +574,15 @@ make install   # uv sync (dev group + grpc extra, from uv.lock) + install pre-co
 | `make vulncheck` | pip-audit against locked dependencies |
 | `make test-unit` | `tests/unit` only — no Docker, no wired-up app |
 | `make test-int` | `tests/integration` only — `create_platform_app()` end-to-end |
-| `make test-all` | Both tiers together (coverage gate ≥90%, enforced by `pyproject.toml`) |
+| `make test-e2e` | `tests/e2e` only — builds + runs the real Docker image, real HTTP calls (requires Docker) |
+| `make test-all` | All three tiers together (coverage gate ≥90%, enforced by `pyproject.toml`; requires Docker) |
 | `make cover` | `test-all`, then open an HTML coverage report |
 | `make build` | Build the wheel + sdist into `dist/` (`uv build`) |
 | `make run` | Run the example FastAPI service (`uvicorn --reload`) |
 | `make docker-build` | Build the example service Docker image locally |
 | `make docker-up` / `make docker-down` | Start/stop the local observability stack |
-| `make ci` | `format-check` + `lint` + `typecheck` + `test-all` + `build` — the full local pipeline |
+| `make smoke-test` | Alias for `make test-e2e` (matches CI's "Smoke tests" check) |
+| `make ci` | `format-check` + `lint` + `typecheck` + `test-all` + `build` — the full local pipeline (requires Docker) |
 
 ### Example service (optional)
 
@@ -613,16 +616,21 @@ end-to-end against this exact `docker-compose.yml`.
 
 ## Testing
 
-- Tests are tiered under `tests/unit/` (mirrors `src/fastapicommon/` one-to-one) and
-  `tests/integration/` (multi-module, e.g. `create_platform_app()` end-to-end) —
-  matching `platform-pgcommon-py`'s tiering, minus the `e2e` tier since nothing here
-  needs Docker or an external service.
+- Tests are tiered under `tests/unit/` (mirrors `src/fastapicommon/` one-to-one),
+  `tests/integration/` (multi-module, e.g. `create_platform_app()` end-to-end), and
+  `tests/e2e/` (builds and runs the real Docker image, makes real HTTP calls against it
+  over a real socket) — matching `platform-pgcommon-py`'s `unit`/`integration`/`e2e`
+  tiering. `tests/integration`'s `TestClient` runs the ASGI app in-process and
+  structurally cannot verify the packaged image actually works; `tests/e2e` is the one
+  tier that does.
 - **Coverage gate:** `pyproject.toml`'s `[tool.coverage.report].fail_under = 90` — enforced
   automatically on `make test-all`/`make cover`/`make ci` (no separate flag needed).
   Running `make test-unit` or `make test-int` alone will report below 90% since each only
-  covers part of the codebase — expected, not a regression.
-- All tests run without a live server or Docker — the observability stack is for manual
-  verification only.
+  covers part of the codebase — expected, not a regression. `make test-e2e` alone passes
+  `--no-cov`: it runs the app inside a separate Docker container process, so coverage.py
+  (instrumenting the pytest process) has nothing to measure.
+- `tests/e2e` requires Docker; it's skipped automatically if the `docker` CLI isn't on
+  `PATH`. All other tests run without a live server or Docker.
 
 ---
 
@@ -643,8 +651,8 @@ required-status-checks ruleset on `main` exactly:
 6. **Trivy CVE scan** — scans the built image; fails on HIGH/CRITICAL vulnerabilities that
    have an available fix (`--ignore-unfixed`, since unfixed base-image CVEs aren't
    actionable here — see `make scan` to run the same check locally).
-7. **Smoke tests** — runs the built image and curls `/health`, `/ready`, `/metrics`,
-   `/widgets/me` — see `make smoke-test` to run the same check locally.
+7. **Smoke tests** — runs `tests/e2e` (via pytest) against the already-built image from
+   step 5 — see `make smoke-test` to run the same check locally.
 8. **Docker image (example service)** — builds and pushes to GHCR (push events only).
 9. **PR summary** — posts/updates a single PR comment summarizing the checks above (PR
    events only).
