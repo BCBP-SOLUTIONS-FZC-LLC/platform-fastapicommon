@@ -10,6 +10,6 @@ here to keep the base install free of a grpcio dependency.
 
 from fastapicommon.bootstrap import create_platform_app
 
-__version__ = "0.1.0"
+__version__ = "0.1.1"
 
 __all__ = ["__version__", "create_platform_app"]
