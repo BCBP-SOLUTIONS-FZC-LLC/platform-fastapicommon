@@ -27,11 +27,21 @@ class CurrentUser:
 
 @dataclass(frozen=True, slots=True)
 class RequestContext:
-    """Per-request platform context: identity plus request/correlation ids."""
+    """Per-request platform context: identity plus request/correlation/trace ids and client IP.
+
+    `trace_id` and `client_ip` exist for parity with the Go `gincommon` library's
+    `RequestContext{TenantID, UserID, Roles, TraceID, ClientIP}` — a Go service and a Python
+    service must expose the same five semantic values to code that inspects the current
+    request's context. `trace_id` defaults to `""` (no active/valid OTel span, matching the rest
+    of this workspace's "empty string means no trace" convention); `client_ip` defaults to
+    `None` when it cannot be determined.
+    """
 
     request_id: str
     correlation_id: str
     user: CurrentUser = field(default_factory=CurrentUser)
+    trace_id: str = ""
+    client_ip: str | None = None
 
     @property
     def user_id(self) -> str | None:

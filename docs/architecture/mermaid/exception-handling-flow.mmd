@@ -2,17 +2,17 @@ flowchart TD
     A(["Exception raised while handling a request"]) --> B{"Exception type"}
 
     B -->|"PlatformException subclass"| C["platform_exception_handler\nassert isinstance(exc, PlatformException)"]
-    C --> D["JSONResponse(status_code=exc.status_code,\ncontent=exc.to_dict())\n= {code, message}"]
+    C --> D["_error_response(exc.status_code, exc.message)\n= {error, status, trace_id, request_id}\n(matches Go gincommon's ErrorResponse exactly)"]
 
     B -->|"RequestValidationError\n(pydantic/FastAPI validation)"| E["request_validation_exception_handler"]
-    E --> F["JSONResponse(422,\n{code: validation_error, message: str(exc)})"]
+    E --> F["_error_response(422, str(exc))"]
 
     B -->|"StarletteHTTPException\n(e.g. 404 no matching route)"| G["http_exception_handler\nassert isinstance(exc, StarletteHTTPException)"]
-    G --> H["JSONResponse(exc.status_code,\n{code: http_error, message: str(exc.detail)})"]
+    G --> H["_error_response(exc.status_code, str(exc.detail))"]
 
     B -->|"any other Exception"| I["unhandled_exception_handler"]
     I --> J["logging.getLogger('fastapicommon.exceptions')\n.exception(...)"]
-    J --> K["JSONResponse(500,\n{code: internal_error,\nmessage: 'An unexpected error occurred'})"]
+    J --> K["_error_response(500, 'An unexpected error occurred')"]
 
     subgraph reg["register_exception_handlers(app) — called once by create_platform_app"]
         R1["add_exception_handler(PlatformException, ...)"]

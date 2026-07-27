@@ -32,4 +32,6 @@ def test_slow_request_returns_504() -> None:
     client = TestClient(_build_app(timeout_seconds=0.05))
     response = client.get("/slow")
     assert response.status_code == 504
-    assert response.json()["code"] == "gateway_timeout"
+    body = response.json()
+    assert body["status"] == 504
+    assert set(body) == {"error", "status", "trace_id", "request_id"}

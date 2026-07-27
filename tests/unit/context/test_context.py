@@ -4,12 +4,14 @@ from fastapicommon.context import (
     CurrentUser,
     RequestContext,
     bind_request_context,
+    get_client_ip,
     get_correlation_id,
     get_request_context,
     get_request_context_or_none,
     get_request_id,
     get_roles,
     get_tenant_id,
+    get_trace_id,
     get_user_id,
     request_context_scope,
     reset_request_context,
@@ -41,6 +43,20 @@ def test_request_context_properties() -> None:
     assert context.roles == ("admin",)
 
 
+def test_request_context_trace_id_and_client_ip_default() -> None:
+    context = RequestContext(request_id="r1", correlation_id="c1")
+    assert context.trace_id == ""
+    assert context.client_ip is None
+
+
+def test_request_context_trace_id_and_client_ip_can_be_set() -> None:
+    context = RequestContext(
+        request_id="r1", correlation_id="c1", trace_id="a" * 32, client_ip="203.0.113.5"
+    )
+    assert context.trace_id == "a" * 32
+    assert context.client_ip == "203.0.113.5"
+
+
 def test_get_request_context_raises_when_unbound() -> None:
     assert get_request_context_or_none() is None
     with pytest.raises(LookupError):
@@ -53,11 +69,17 @@ def test_getters_return_none_or_empty_when_unbound() -> None:
     assert get_tenant_id() is None
     assert get_user_id() is None
     assert get_roles() == ()
+    assert get_trace_id() == ""
+    assert get_client_ip() is None
 
 
 def test_bind_and_reset_request_context() -> None:
     context = RequestContext(
-        request_id="r1", correlation_id="c1", user=CurrentUser(user_id="u1", tenant_id="t1")
+        request_id="r1",
+        correlation_id="c1",
+        user=CurrentUser(user_id="u1", tenant_id="t1"),
+        trace_id="a" * 32,
+        client_ip="203.0.113.5",
     )
     token = bind_request_context(context)
     try:
@@ -66,6 +88,8 @@ def test_bind_and_reset_request_context() -> None:
         assert get_correlation_id() == "c1"
         assert get_tenant_id() == "t1"
         assert get_user_id() == "u1"
+        assert get_trace_id() == "a" * 32
+        assert get_client_ip() == "203.0.113.5"
     finally:
         reset_request_context(token)
     assert get_request_context_or_none() is None

@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import uuid
 
+from opentelemetry import trace
 from starlette.middleware.base import BaseHTTPMiddleware, RequestResponseEndpoint
 from starlette.requests import Request
 from starlette.responses import Response
@@ -11,9 +12,9 @@ from fastapicommon.auth.headers import (
     REQUEST_ID_HEADER,
     TENANT_ID_HEADER,
     TENANT_ROLES_HEADER,
-    TENANT_ROLES_SEPARATOR,
     USER_ID_HEADER,
 )
+from fastapicommon.auth.validation import normalize_header_value, normalize_request_id, parse_roles
 from fastapicommon.context import (
     CurrentUser,
     RequestContext,
@@ -21,28 +22,58 @@ from fastapicommon.context import (
     reset_request_context,
 )
 
+#: Exact casing matches Go's gincommon response headers (`internal/core/domain/transport.go`) —
+#: a shared dashboard/client parsing either language's response must find the same header names.
+TRACE_ID_RESPONSE_HEADER = "X-Trace-ID"
+REQUEST_ID_RESPONSE_HEADER = "X-Request-ID"
+
+
+def _client_ip(request: Request) -> str | None:
+    """Mirrors Gin's default (no custom trusted-proxy config) `c.ClientIP()`: prefer the first
+    `X-Forwarded-For` entry, then `X-Real-IP`, then the direct socket peer.
+    """
+    forwarded_for = request.headers.get("x-forwarded-for")
+    if forwarded_for:
+        first = forwarded_for.split(",", 1)[0].strip()
+        if first:
+            return first
+    real_ip = request.headers.get("x-real-ip")
+    if real_ip:
+        return real_ip.strip()
+    return request.client.host if request.client is not None else None
+
+
+def _current_trace_id() -> str:
+    span_context = trace.get_current_span().get_span_context()
+    if not span_context.is_valid:
+        return ""
+    return trace.format_trace_id(span_context.trace_id)
+
 
 class ContextMiddleware(BaseHTTPMiddleware):
     """Populates the platform RequestContext from inbound auth/tracing headers for the
     duration of the request, generating request/correlation ids when absent, and echoes
-    both ids back on the response.
+    request/trace ids back on the response.
     """
 
     async def dispatch(self, request: Request, call_next: RequestResponseEndpoint) -> Response:
         headers = request.headers
-        request_id = headers.get(REQUEST_ID_HEADER) or str(uuid.uuid4())
+        request_id = normalize_request_id(headers.get(REQUEST_ID_HEADER)) or str(uuid.uuid4())
         correlation_id = headers.get(CORRELATION_ID_HEADER) or request_id
-        roles_header = headers.get(TENANT_ROLES_HEADER, "")
-        roles = tuple(
-            role.strip() for role in roles_header.split(TENANT_ROLES_SEPARATOR) if role.strip()
-        )
+        roles = parse_roles(headers.get(TENANT_ROLES_HEADER))
 
         user = CurrentUser(
-            user_id=headers.get(USER_ID_HEADER),
-            tenant_id=headers.get(TENANT_ID_HEADER),
+            user_id=normalize_header_value(headers.get(USER_ID_HEADER)),
+            tenant_id=normalize_header_value(headers.get(TENANT_ID_HEADER)),
             roles=roles,
         )
-        context = RequestContext(request_id=request_id, correlation_id=correlation_id, user=user)
+        context = RequestContext(
+            request_id=request_id,
+            correlation_id=correlation_id,
+            user=user,
+            trace_id=_current_trace_id(),
+            client_ip=_client_ip(request),
+        )
 
         token = bind_request_context(context)
         try:
@@ -52,4 +83,7 @@ class ContextMiddleware(BaseHTTPMiddleware):
 
         response.headers[REQUEST_ID_HEADER] = request_id
         response.headers[CORRELATION_ID_HEADER] = correlation_id
+        response.headers[REQUEST_ID_RESPONSE_HEADER] = request_id
+        if context.trace_id:
+            response.headers[TRACE_ID_RESPONSE_HEADER] = context.trace_id
         return response
