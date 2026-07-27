@@ -267,7 +267,7 @@ jobs:
       # platform-interop-tests/README.md for why).
       platform_fastapicommon_ref: ${{ github.head_ref || github.ref_name }}
     secrets:
-      gh_private_token: ${{ secrets.GH_PRIVATE_TOKEN }}
+      gh_private_token: ${{ secrets.GO_PRIVATE_TOKEN }}
 
   pr-summary:
     name: PR summary
