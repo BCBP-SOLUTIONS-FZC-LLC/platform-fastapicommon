@@ -10,9 +10,17 @@ from fastapicommon.auth.headers import (
     CORRELATION_ID_HEADER,
     REQUEST_ID_HEADER,
     TENANT_ID_HEADER,
+    TENANT_ROLES_HEADER,
+    TENANT_ROLES_SEPARATOR,
     USER_ID_HEADER,
 )
-from fastapicommon.context import get_correlation_id, get_request_id, get_tenant_id, get_user_id
+from fastapicommon.context import (
+    get_correlation_id,
+    get_request_id,
+    get_roles,
+    get_tenant_id,
+    get_user_id,
+)
 
 
 class _PropagationAuth(httpx.Auth):
@@ -25,6 +33,7 @@ class _PropagationAuth(httpx.Auth):
         tenant_id = get_tenant_id()
         request_id = get_request_id()
         correlation_id = get_correlation_id()
+        roles = get_roles()
 
         if user_id:
             request.headers[USER_ID_HEADER] = user_id
@@ -34,6 +43,9 @@ class _PropagationAuth(httpx.Auth):
             request.headers[REQUEST_ID_HEADER] = request_id
         if correlation_id:
             request.headers[CORRELATION_ID_HEADER] = correlation_id
+        if roles:
+            # Matches Go's PropagateHeaders: only set when non-empty, comma-joined.
+            request.headers[TENANT_ROLES_HEADER] = TENANT_ROLES_SEPARATOR.join(roles)
 
         inject(request.headers)
 
@@ -42,7 +54,7 @@ class _PropagationAuth(httpx.Auth):
 
 def create_platform_http_client(**kwargs: Any) -> httpx.AsyncClient:
     """Build an httpx.AsyncClient that propagates auth/tracing headers (``x-user-id``,
-    ``x-tenant-id``, ``x-request-id``, ``x-correlation-id``, ``traceparent``) from the
-    current RequestContext onto every outbound request.
+    ``x-tenant-id``, ``x-tenant-roles``, ``x-request-id``, ``x-correlation-id``, ``traceparent``)
+    from the current RequestContext onto every outbound request.
     """
     return httpx.AsyncClient(auth=_PropagationAuth(), **kwargs)

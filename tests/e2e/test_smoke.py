@@ -117,7 +117,9 @@ def test_whoami_anonymous(base_url: str) -> None:
 def test_delete_requires_role(base_url: str) -> None:
     response = httpx.delete(f"{base_url}/widgets/42")
     assert response.status_code == 403
-    assert response.json()["code"] == "forbidden"
+    body = response.json()
+    assert body["status"] == 403
+    assert set(body) == {"error", "status", "trace_id", "request_id"}
 
 
 def test_delete_with_role_succeeds(base_url: str) -> None:

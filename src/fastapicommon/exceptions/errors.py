@@ -5,7 +5,10 @@ class PlatformException(Exception):
     """Base class for platform exceptions that map to a structured JSON error response.
 
     Subclasses set ``status_code`` and ``code`` as class attributes; ``message`` may be
-    overridden per-instance to add detail.
+    overridden per-instance to add detail. ``code`` is a Python-side categorization attribute
+    only — it is not part of the wire response body (see ``exceptions.handlers``), which mirrors
+    the Go ``gincommon`` library's ``{error, status, trace_id, request_id}`` shape exactly so a
+    Go client parsing either language's error response succeeds unchanged.
     """
 
     status_code: int = 500
@@ -15,9 +18,6 @@ class PlatformException(Exception):
     def __init__(self, message: str | None = None) -> None:
         self.message = message or self.default_message
         super().__init__(self.message)
-
-    def to_dict(self) -> dict[str, str]:
-        return {"code": self.code, "message": self.message}
 
 
 class UnauthorizedException(PlatformException):

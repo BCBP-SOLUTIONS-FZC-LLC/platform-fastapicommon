@@ -168,7 +168,7 @@ dependency.
 
 | Symbol | Description |
 |--------|-------------|
-| `PlatformException(message=None)` | Base class; `status_code=500`, `code="internal_error"`; `to_dict()` → `{code, message}` |
+| `PlatformException(message=None)` | Base class; `status_code=500`, `code="internal_error"` (Python-side categorization only, not on the wire); serialized via `exceptions.handlers._error_response` → `{error, status, trace_id, request_id}` |
 | `UnauthorizedException` / `ForbiddenException` / `ValidationException` / `ConflictException` / `NotFoundException` | 401 / 403 / 422 / 409 / 404 subclasses |
 | `register_exception_handlers(app)` | Registers handlers for `PlatformException`, `RequestValidationError`, `StarletteHTTPException`, and generic `Exception` |
 
@@ -261,10 +261,10 @@ sequenceDiagram
     participant TM as TimeoutMiddleware
     participant H as Route handler
 
-    Note over CM,TM: Added last, so ContextMiddleware is outermost;<br/>added first, so TimeoutMiddleware is innermost.
+    Note over CM,TM: Added last, so ContextMiddleware is outermost,<br/>added first, so TimeoutMiddleware is innermost.
 
     Client ->>+ CM: HTTP request
-    Note over CM: read x-user-id, x-tenant-id, x-tenant-roles,<br/>x-request-id, x-correlation-id<br/>generate request_id/correlation_id if absent<br/>bind_request_context(...)
+    Note over CM: read + validate x-user-id, x-tenant-id, x-tenant-roles,<br/>x-request-id, x-correlation-id (Go gincommon validation rules)<br/>generate request_id/correlation_id if absent<br/>compute trace_id from the active OTel span, client_ip from X-Forwarded-For/X-Real-IP/peer<br/>bind_request_context(...)
 
     CM ->>+ PM: call_next(request)
     Note over PM: start = time.perf_counter()
@@ -276,7 +276,7 @@ sequenceDiagram
     H -->>- TM: response
 
     alt handler exceeded timeout_seconds
-        TM -->> Client: 504 {"code":"gateway_timeout", "message": "..."}
+        TM -->> Client: 504 {"error":"...", "status":504, "trace_id":"...", "request_id":"..."}
     else within timeout
         TM -->>- PM: response
     end
@@ -284,7 +284,7 @@ sequenceDiagram
     Note over PM: duration = perf_counter() - start<br/>route = request.scope["route"] (path template)<br/>HTTP_REQUESTS_TOTAL.labels(method, path, status_code).inc()<br/>HTTP_REQUEST_DURATION_SECONDS.labels(method, path).observe(duration)
 
     PM -->>- CM: response
-    Note over CM: response.headers[x-request-id] = request_id<br/>response.headers[x-correlation-id] = correlation_id<br/>reset_request_context(token) in finally
+    Note over CM: response.headers[x-request-id] = request_id<br/>response.headers[x-correlation-id] = correlation_id<br/>response.headers[X-Request-ID] = request_id<br/>response.headers[X-Trace-ID] = trace_id (if set)<br/>reset_request_context(token) in finally
 
     CM -->>- Client: HTTP response
 ```
@@ -307,17 +307,17 @@ flowchart TD
     A(["Exception raised while handling a request"]) --> B{"Exception type"}
 
     B -->|"PlatformException subclass"| C["platform_exception_handler\nassert isinstance(exc, PlatformException)"]
-    C --> D["JSONResponse(status_code=exc.status_code,\ncontent=exc.to_dict())\n= {code, message}"]
+    C --> D["_error_response(exc.status_code, exc.message)\n= {error, status, trace_id, request_id}\n(matches Go gincommon's ErrorResponse exactly)"]
 
     B -->|"RequestValidationError\n(pydantic/FastAPI validation)"| E["request_validation_exception_handler"]
-    E --> F["JSONResponse(422,\n{code: validation_error, message: str(exc)})"]
+    E --> F["_error_response(422, str(exc))"]
 
     B -->|"StarletteHTTPException\n(e.g. 404 no matching route)"| G["http_exception_handler\nassert isinstance(exc, StarletteHTTPException)"]
-    G --> H["JSONResponse(exc.status_code,\n{code: http_error, message: str(exc.detail)})"]
+    G --> H["_error_response(exc.status_code, str(exc.detail))"]
 
     B -->|"any other Exception"| I["unhandled_exception_handler"]
     I --> J["logging.getLogger('fastapicommon.exceptions')\n.exception(...)"]
-    J --> K["JSONResponse(500,\n{code: internal_error,\nmessage: 'An unexpected error occurred'})"]
+    J --> K["_error_response(500, 'An unexpected error occurred')"]
 
     subgraph reg["register_exception_handlers(app) — called once by create_platform_app"]
         R1["add_exception_handler(PlatformException, ...)"]
@@ -366,7 +366,7 @@ sequenceDiagram
 
     alt check fails
         RBAC -->> Dep: raise ForbiddenException(...)
-        Dep -->> H: 403 {"code":"forbidden","message":"Requires role '...'"}
+        Dep -->> H: 403 {"error":"Requires role '...'","status":403,"trace_id":"...","request_id":"..."}
     else check passes
         RBAC -->>- Dep: None (dependency satisfied)
         Dep -->>- H: handler executes
@@ -710,10 +710,10 @@ not provided by this library today — see [Platform contract](#platform-contrac
 | **OTLP tracing export** | Collector unreachable | `BatchSpanProcessor` retries asynchronously in a background thread; logs `Transient error ... retrying` | Request handling is never blocked or failed by export failures |
 | **OTLP tracing export** | `otlp_endpoint` unset | No error, no warning | Spans created with valid trace IDs but never exported |
 | **Structured logging** | N/A | `get_logger()` always returns a usable logger; there is no "nil logger" failure mode in this library | — |
-| **RBAC** | `RequireRole`/`RequireAnyRole`/`RequireAllRoles` check fails | `ForbiddenException` → `403 {"code":"forbidden", ...}` via the registered exception handler | Does not affect other routes or middleware |
-| **Missing/unbound context** | Code calls `get_request_context()` outside `ContextMiddleware` or `request_context_scope` (e.g. a detached background task) | Raises `LookupError` | Use `get_request_context_or_none()` or the individual `get_*` accessors, which return `None`/`()` instead |
-| **Request timeout** | Handler exceeds `request_timeout_seconds` | `504 {"code":"gateway_timeout", ...}` | Server continues serving other requests; see cooperative-cancellation caveat above |
-| **Unhandled exception** | Any exception not a `PlatformException`/`RequestValidationError`/`StarletteHTTPException` | Logged via stdlib `logging`, then `500 {"code":"internal_error", ...}` | Does not crash the process |
+| **RBAC** | `RequireRole`/`RequireAnyRole`/`RequireAllRoles` check fails | `ForbiddenException` → `403 {"error":"...", "status":403, "trace_id":"...", "request_id":"..."}` via the registered exception handler | Does not affect other routes or middleware |
+| **Missing/unbound context** | Code calls `get_request_context()` outside `ContextMiddleware` or `request_context_scope` (e.g. a detached background task) | Raises `LookupError` | Use `get_request_context_or_none()` or the individual `get_*` accessors, which return `None`/`()`/`""` instead |
+| **Request timeout** | Handler exceeds `request_timeout_seconds` | `504 {"error":"...", "status":504, "trace_id":"...", "request_id":"..."}` | Server continues serving other requests; see cooperative-cancellation caveat above |
+| **Unhandled exception** | Any exception not a `PlatformException`/`RequestValidationError`/`StarletteHTTPException` | Logged via stdlib `logging`, then `500 {"error":"...", "status":500, "trace_id":"...", "request_id":"..."}` | Does not crash the process |
 
 No external dependency — OTLP collector, Prometheus scrape, or log sink — can cause request
 handling to fail; all are either in-process (metric counters), async (OTLP batched
@@ -742,11 +742,11 @@ anything, but produces broken tracing, misleading metrics, or an unintended trus
 | Invariant | Where enforced |
 |-----------|---------------|
 | `CurrentUser.roles` defaults to `()`, never `None` | `context/models.py` — RBAC checks (`role in current`) never need a null check |
-| `get_request_context()` raises `LookupError` when unbound; every other accessor (`get_tenant_id`, `get_user_id`, `get_roles`, `get_request_id`, `get_correlation_id`) returns `None`/`()` instead | `context/vars.py` — code that only *wants* the current tenant if any never needs a try/except; code that truly requires a context opts into the strict accessor |
+| `get_request_context()` raises `LookupError` when unbound; every other accessor (`get_tenant_id`, `get_user_id`, `get_roles`, `get_request_id`, `get_correlation_id`, `get_trace_id`, `get_client_ip`) returns `None`/`()`/`""` instead | `context/vars.py` — code that only *wants* the current tenant if any never needs a try/except; code that truly requires a context opts into the strict accessor |
 | Middleware add order is Timeout → Prometheus → Context, so runtime nesting is Context (outer) → Prometheus → Timeout (inner) → handler | `bootstrap/app.py` — context is available to every layer beneath it, including the handler and its dependencies |
 | OTLP `insecure` defaults to `True` when `environment` is `dev`/`development`/`local`, else `False` | `bootstrap/app.py::_build_span_exporter` — mirrors `platform-gincommon`'s `OTEL_EXPORTER_OTLP_INSECURE` default logic |
 | `PrometheusMiddleware` labels by the matched route's path *template*, not the raw URL, when a route matches | `metrics/middleware.py` — keeps cardinality bounded for real traffic; see the caveat above for the unmatched-route (404) case |
 | `ContextServerInterceptor` passes through any handler where `handler.unary_unary` is falsy | `grpc/server.py` — streaming RPCs are never wrapped, never double-instrumented |
 | `TimeoutMiddleware(timeout_seconds=...)` always wraps `call_next` in `asyncio.wait_for`, even for very large timeouts | `middleware/timeout.py` — there's no "disabled" sentinel value; set a large `request_timeout_seconds` to effectively disable it |
-| `PlatformException.to_dict()` always returns exactly `{"code": ..., "message": ...}` | `exceptions/errors.py` — every registered exception handler in `exceptions/handlers.py` returns this same shape, so API consumers can parse errors uniformly regardless of which handler fired |
+| Every registered exception handler serializes through the same `_error_response(status, error)` helper, always producing exactly `{"error": ..., "status": ..., "trace_id": ..., "request_id": ...}` — matching Go `gincommon`'s `ErrorResponse` field-for-field | `exceptions/handlers.py` — API consumers (Go or Python) can parse errors uniformly regardless of which handler fired or which language served the response |
 | `fastapicommon.grpc` is never imported by `fastapicommon/__init__.py` | Base install has no `grpcio` dependency; only importing `fastapicommon.grpc` directly requires the `grpc` extra |

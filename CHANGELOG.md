@@ -7,6 +7,35 @@ pre-1.0 caveat on what SemVer guarantees currently apply.
 
 ## [Unreleased]
 
+### Fixed — cross-language compatibility with the Go `platform-gincommon` library
+
+**Breaking:** these changes bring the interop-critical HTTP surface into byte-for-byte parity
+with `platform-gincommon`, since a Go service and a Python service must produce/consume
+identical headers and error bodies over the same call. Full-parity items still open (a
+pluggable `Authorizer` port, blanket route-group auth enforcement) are tracked separately.
+
+- `exceptions.errors.PlatformException` no longer serializes to `{"code": ..., "message": ...}`.
+  Every registered exception handler (`exceptions/handlers.py`) now returns
+  `{"error": str, "status": int, "trace_id": str, "request_id": str}` — matching Go
+  `gincommon`'s `ErrorResponse` exactly. `PlatformException.code` remains as a Python-side
+  categorization attribute; it is no longer part of the wire response. `TimeoutMiddleware`'s
+  504 response uses the same shape.
+- `context.RequestContext` gained `trace_id: str` (`""` when no OTel span is active) and
+  `client_ip: str | None` fields, for parity with Go's `RequestContext{TenantID, UserID, Roles,
+  TraceID, ClientIP}`. New `get_trace_id()`/`get_client_ip()` accessors in `context.vars`.
+- `ContextMiddleware` now validates `x-user-id`/`x-tenant-id` (non-empty, <=256 bytes, no
+  control characters) and `x-request-id` (<=128 bytes, `^[a-zA-Z0-9._-]+$`) using the same rules
+  as Go's `internal/core/domain/validation.go`; an invalid value is treated as absent rather
+  than accepted. `x-tenant-roles` parsing now validates each token against `^[a-zA-Z0-9_-]+$`,
+  enforces a 64-byte cap, and deduplicates — matching Go's `ParseRoles` exactly (new
+  `auth.validation` module: `normalize_header_value`, `normalize_request_id`, `parse_roles`).
+- `ContextMiddleware` now echoes `X-Request-ID` and (when a valid trace is active) `X-Trace-ID`
+  response headers, matching Go's exact casing, in addition to the existing lowercase
+  `x-request-id`/`x-correlation-id` pair.
+- `propagation.create_platform_http_client()` now propagates `x-tenant-roles` (comma-joined,
+  only when non-empty) on outbound requests — Go's `PropagateHeaders` always included it;
+  Python's outbound propagation previously omitted it.
+
 ## [0.1.1] - 2026-07-26
 
 ### Added

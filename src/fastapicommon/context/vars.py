@@ -77,3 +77,13 @@ def get_user_id() -> str | None:
 def get_roles() -> tuple[str, ...]:
     context = _request_context.get()
     return context.roles if context is not None else ()
+
+
+def get_trace_id() -> str:
+    context = _request_context.get()
+    return context.trace_id if context is not None else ""
+
+
+def get_client_ip() -> str | None:
+    context = _request_context.get()
+    return context.client_ip if context is not None else None

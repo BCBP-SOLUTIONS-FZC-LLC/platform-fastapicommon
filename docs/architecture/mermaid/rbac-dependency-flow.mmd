@@ -19,7 +19,7 @@ sequenceDiagram
 
     alt check fails
         RBAC -->> Dep: raise ForbiddenException(...)
-        Dep -->> H: 403 {"code":"forbidden","message":"Requires role '...'"}
+        Dep -->> H: 403 {"error":"Requires role '...'","status":403,"trace_id":"...","request_id":"..."}
     else check passes
         RBAC -->>- Dep: None (dependency satisfied)
         Dep -->>- H: handler executes

@@ -5,10 +5,10 @@ sequenceDiagram
     participant TM as TimeoutMiddleware
     participant H as Route handler
 
-    Note over CM,TM: Added last, so ContextMiddleware is outermost;<br/>added first, so TimeoutMiddleware is innermost.
+    Note over CM,TM: Added last, so ContextMiddleware is outermost,<br/>added first, so TimeoutMiddleware is innermost.
 
     Client ->>+ CM: HTTP request
-    Note over CM: read x-user-id, x-tenant-id, x-tenant-roles,<br/>x-request-id, x-correlation-id<br/>generate request_id/correlation_id if absent<br/>bind_request_context(...)
+    Note over CM: read + validate x-user-id, x-tenant-id, x-tenant-roles,<br/>x-request-id, x-correlation-id (Go gincommon validation rules)<br/>generate request_id/correlation_id if absent<br/>compute trace_id from the active OTel span, client_ip from X-Forwarded-For/X-Real-IP/peer<br/>bind_request_context(...)
 
     CM ->>+ PM: call_next(request)
     Note over PM: start = time.perf_counter()
@@ -20,7 +20,7 @@ sequenceDiagram
     H -->>- TM: response
 
     alt handler exceeded timeout_seconds
-        TM -->> Client: 504 {"code":"gateway_timeout", "message": "..."}
+        TM -->> Client: 504 {"error":"...", "status":504, "trace_id":"...", "request_id":"..."}
     else within timeout
         TM -->>- PM: response
     end
@@ -28,6 +28,6 @@ sequenceDiagram
     Note over PM: duration = perf_counter() - start<br/>route = request.scope["route"] (path template)<br/>HTTP_REQUESTS_TOTAL.labels(method, path, status_code).inc()<br/>HTTP_REQUEST_DURATION_SECONDS.labels(method, path).observe(duration)
 
     PM -->>- CM: response
-    Note over CM: response.headers[x-request-id] = request_id<br/>response.headers[x-correlation-id] = correlation_id<br/>reset_request_context(token) in finally
+    Note over CM: response.headers[x-request-id] = request_id<br/>response.headers[x-correlation-id] = correlation_id<br/>response.headers[X-Request-ID] = request_id<br/>response.headers[X-Trace-ID] = trace_id (if set)<br/>reset_request_context(token) in finally
 
     CM -->>- Client: HTTP response

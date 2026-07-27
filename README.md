@@ -20,7 +20,7 @@ This library provides three layers your service sits on top of:
 |-------|--------------|----------------------|
 | **Observability** | Request/correlation ID, tracing, Prometheus metrics, structured logging | Nothing on the HTTP side — `create_platform_app()` wires it automatically. On gRPC, add `ContextServerInterceptor` yourself (see [gRPC — quick start](#grpc--quick-start)) |
 | **Security** | Header-based identity extraction; RBAC role checks | Add `Depends(require_authenticated_user)` / `Depends(RequireRole(...))` per route — **nothing is enforced globally**, see [Important rules](#important-rules-for-handler-authors) |
-| **Context** | Builds `RequestContext{request_id, correlation_id, user: CurrentUser}` and binds it via `contextvars` | Read it via `fastapicommon.context.get_request_context()` / `fastapicommon.auth.get_current_user`; propagate outbound via `create_platform_http_client()` |
+| **Context** | Builds `RequestContext{request_id, correlation_id, user: CurrentUser, trace_id, client_ip}` and binds it via `contextvars` | Read it via `fastapicommon.context.get_request_context()` / `fastapicommon.auth.get_current_user`; propagate outbound via `create_platform_http_client()` |
 
 Your service only implements **business logic** on top of these layers. Log format, span
 setup, error response shape, and metric names are standardised here.
@@ -52,7 +52,9 @@ This library **standardises** these concerns once so every service gets:
   (`request_id`, `correlation_id`, `tenant_id`, `user_id`)
 - OTel spans with the same instrumentation (`FastAPIInstrumentor`)
 - A `RequestContext`/`CurrentUser` available in every handler via one dependency
-- The same error JSON shape (`{"code": ..., "message": ...}`) across all services
+- The same error JSON shape (`{"error": ..., "status": ..., "trace_id": ..., "request_id": ...}`)
+  across all services — matching the Go `gincommon` library's `ErrorResponse` exactly, so a Go
+  client parsing either language's error body succeeds unchanged
 
 ---
 
@@ -65,11 +67,11 @@ This library **standardises** these concerns once so every service gets:
 | **Metrics** | `PrometheusMiddleware` — `http_requests_total`, `http_request_duration_seconds` | `record_grpc_request()` via `ContextServerInterceptor` — `grpc_requests_total`, `grpc_request_duration_seconds` |
 | **Logging** | `fastapicommon.logging.get_logger()` — structlog JSON, enriched with context | Same `get_logger()`; `ContextServerInterceptor` logs `grpc_request_completed` after each call |
 | **Auth** | `Depends(require_authenticated_user)` — `401` if `x-user-id` unset (opt-in per route) | **Not provided** — no gRPC equivalent exists; check `get_request_context().user_id` yourself |
-| **Tenant context** | `RequestContext{request_id, correlation_id, user: CurrentUser}` via `get_request_context()` | Same struct, same accessor, bound by `ContextServerInterceptor` |
+| **Tenant context** | `RequestContext{request_id, correlation_id, user: CurrentUser, trace_id, client_ip}` via `get_request_context()` | Same struct, same accessor, bound by `ContextServerInterceptor` |
 | **RBAC** | `RequireRole` / `RequireAnyRole` / `RequireAllRoles` as FastAPI dependencies | **Not provided** — these are FastAPI `Depends`-based; there is no gRPC interceptor equivalent |
 | **Timeout** | `TimeoutMiddleware(timeout_seconds=...)` — `asyncio.wait_for` around the handler, `504` JSON on expiry | **Not provided** — set a deadline on the gRPC channel/client call yourself |
 | **Health** | `health_router` — `/health`, `/live`, `/ready` (200 unless custom readiness checks fail) | — |
-| **Error type** | `PlatformException` hierarchy → `{"code": ..., "message": ...}` JSON via `register_exception_handlers` | Exceptions raised in a unary-unary handler propagate to the client as-is (gRPC has no equivalent exception-handler registry) |
+| **Error type** | `PlatformException` hierarchy → `{"error": ..., "status": ..., "trace_id": ..., "request_id": ...}` JSON via `register_exception_handlers` | Exceptions raised in a unary-unary handler propagate to the client as-is (gRPC has no equivalent exception-handler registry) |
 | **Outbound propagation** | `create_platform_http_client()` — `httpx.AsyncClient` that stamps identity/trace headers on every request | `ContextClientInterceptor` — stamps identity metadata on outbound unary-unary calls |
 | **OpenTelemetry init** | `setup_tracing(app, service_name, exporter=None)` (called automatically by `create_platform_app`) | `instrument_grpc_server()` / `instrument_grpc_client()` (call explicitly) |
 
@@ -205,8 +207,8 @@ from fastapicommon.propagation import create_platform_http_client
 
 async def list_items_handler() -> dict:
     async with create_platform_http_client() as client:
-        # Injects x-user-id, x-tenant-id, x-request-id, x-correlation-id (from the bound
-        # RequestContext, only when set) and traceparent (via OTel propagation).
+        # Injects x-user-id, x-tenant-id, x-tenant-roles, x-request-id, x-correlation-id (from
+        # the bound RequestContext, only when set) and traceparent (via OTel propagation).
         resp = await client.get("http://inventory-svc/internal/stock")
     return resp.json()
 ```
@@ -214,23 +216,23 @@ async def list_items_handler() -> dict:
 ### Error response shape
 
 All `PlatformException` subclasses (and the generic-exception fallback) produce the same
-JSON body:
+JSON body — matching `platform-gincommon`'s `ErrorResponse` exactly, field-for-field, so a
+Go client parsing either language's error response succeeds unchanged:
 
 ```json
-{"code": "not_found", "message": "widget 42 not found"}
+{"error": "widget 42 not found", "status": 404, "trace_id": "...", "request_id": "..."}
 ```
 
-**Unlike `platform-gincommon`'s `ErrorResponse`, this body does not include
-`request_id`/`trace_id`.** Correlation IDs live in **response headers**
-(`x-request-id`, `x-correlation-id`), set by `ContextMiddleware` on every response,
-success or error:
+`trace_id` is `""` when no OTel span is active for the request. The same `request_id`/
+`trace_id` values are also echoed as response headers (`X-Request-ID`/`X-Trace-ID`, plus the
+lowercase `x-request-id`/`x-correlation-id` pair) on every response, success or error:
 
 ```python
 import httpx
 
 resp = httpx.get("http://localhost:8080/widgets/nonexistent")
-print(resp.json())                       # {"code": "not_found", "message": "..."}
-print(resp.headers["x-request-id"])      # correlation ID for this call
+print(resp.json())                       # {"error": "...", "status": 404, "trace_id": "...", "request_id": "..."}
+print(resp.headers["X-Request-ID"])      # same request_id as the JSON body
 ```
 
 ---

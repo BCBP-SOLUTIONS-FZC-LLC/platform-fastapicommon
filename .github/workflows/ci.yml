@@ -258,6 +258,17 @@ jobs:
           cache-from: type=gha
           cache-to: type=gha,mode=max
 
+  interop:
+    name: Cross-language compatibility
+    needs: build
+    uses: BCBP-SOLUTIONS-FZC-LLC/platform-interop-tests/.github/workflows/interop.yml@main
+    with:
+      # This repo's own PR/branch ref; the other five default to their main branch (see
+      # platform-interop-tests/README.md for why).
+      platform_fastapicommon_ref: ${{ github.head_ref || github.ref_name }}
+    secrets:
+      gh_private_token: ${{ secrets.GO_PRIVATE_TOKEN }}
+
   pr-summary:
     name: PR summary
     runs-on: ubuntu-latest
