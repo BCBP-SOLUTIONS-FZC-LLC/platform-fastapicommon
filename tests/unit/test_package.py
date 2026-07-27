@@ -3,7 +3,7 @@ from fastapicommon import create_platform_app
 
 
 def test_version_is_exposed() -> None:
-    assert fastapicommon.__version__ == "0.1.1"
+    assert fastapicommon.__version__ == "0.2.0"
 
 
 def test_create_platform_app_is_reexported_at_top_level() -> None:
