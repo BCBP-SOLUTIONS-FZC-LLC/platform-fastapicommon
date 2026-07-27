@@ -7,6 +7,15 @@ pre-1.0 caveat on what SemVer guarantees currently apply.
 
 ## [Unreleased]
 
+## [0.2.0] - 2026-07-27
+
+### Added
+
+- New CI job **Cross-language compatibility** (`ci.yml`) calls the shared
+  `platform-interop-tests` reusable workflow against this branch's ref, checking this
+  library's wire behavior against the Go `platform-gincommon` library and the other
+  platform sibling repos on every PR.
+
 ### Fixed — cross-language compatibility with the Go `platform-gincommon` library
 
 **Breaking:** these changes bring the interop-critical HTTP surface into byte-for-byte parity
@@ -222,6 +231,7 @@ First release of `fastapicommon`.
   shared GitHub-hosted runner IP). All 5 places it's used across `ci.yml`/`release.yml`
   now retry once with the same action before failing the job.
 
-[Unreleased]: https://github.com/BCBP-SOLUTIONS-FZC-LLC/platform-fastapicommon/compare/v0.1.1...HEAD
+[Unreleased]: https://github.com/BCBP-SOLUTIONS-FZC-LLC/platform-fastapicommon/compare/v0.2.0...HEAD
+[0.2.0]: https://github.com/BCBP-SOLUTIONS-FZC-LLC/platform-fastapicommon/compare/v0.1.1...v0.2.0
 [0.1.1]: https://github.com/BCBP-SOLUTIONS-FZC-LLC/platform-fastapicommon/compare/v0.1.0...v0.1.1
 [0.1.0]: https://github.com/BCBP-SOLUTIONS-FZC-LLC/platform-fastapicommon/releases/tag/v0.1.0
