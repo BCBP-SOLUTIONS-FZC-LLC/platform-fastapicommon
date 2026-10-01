@@ -11,9 +11,12 @@ from fastapicommon.exceptions import NotFoundException
 
 pytestmark = pytest.mark.integration
 
+#: Metrics (on by default) require a registry domain and environment.
+IDENTITY: dict[str, object] = {"observability_domain": "iam", "environment": "test"}
+
 
 def _build_app(**settings_overrides: object) -> object:
-    settings = PlatformSettings(_env_file=None, **settings_overrides)
+    settings = PlatformSettings(_env_file=None, **{**IDENTITY, **settings_overrides})
     app = create_platform_app(settings=settings)
 
     @app.get("/whoami")
@@ -59,7 +62,7 @@ def test_metrics_disabled_removes_endpoint() -> None:
 
 
 def test_app_name_override() -> None:
-    settings = PlatformSettings(_env_file=None)
+    settings = PlatformSettings(_env_file=None, **IDENTITY)
     app = create_platform_app(app_name="override-name", settings=settings)
     assert app.title == "override-name"
 
@@ -82,6 +85,6 @@ def test_create_platform_app_wires_otlp_exporter_without_raising() -> None:
     # exist in this environment, spamming stderr. Request-handling with instrumentation
     # enabled is already covered by every other test in this file (otlp_endpoint unset);
     # this test's only job is confirming construction itself doesn't raise when it's set.
-    settings = PlatformSettings(_env_file=None, otlp_endpoint="localhost:4317")
+    settings = PlatformSettings(_env_file=None, otlp_endpoint="localhost:4317", **IDENTITY)
     app = create_platform_app(settings=settings)
     assert app is not None

@@ -7,6 +7,69 @@ pre-1.0 caveat on what SemVer guarantees currently apply.
 
 ## [Unreleased]
 
+### Added — Enterprise Platform Observability Standard (parity with `platform-gincommon`)
+
+- `platform_*` metrics — now the only HTTP/gRPC metrics the library emits — for the registry
+  domain (`PlatformSettings.observability_domain` / `OBSERVABILITY_DOMAIN`), with the const labels
+  `domain`, `service` (`app_name`) and `environment` on every series:
+  `platform_build_info{version}`, `platform_http_requests_total`,
+  `platform_http_request_duration_seconds`, `platform_http_request_size_bytes`,
+  `platform_http_response_size_bytes` (all `{method, route, status_class, error_class}`),
+  `platform_http_active_requests{route}`, `platform_http_panics_total`,
+  `platform_http_rate_limited_requests_total`, `platform_http_request_timeouts_total` (all
+  `{method, route}`), `platform_grpc_server_handled_total{grpc_method, grpc_code, status_class,
+  error_class}`, `platform_grpc_server_handling_seconds`,
+  `platform_grpc_server_request_size_bytes`, `platform_grpc_server_response_size_bytes` (all
+  `{grpc_method, status_class, error_class}`), `platform_grpc_server_inflight_requests`,
+  `platform_grpc_rate_limited_requests_total` and `platform_grpc_panics_total` (all
+  `{grpc_method}`). Names, help, label order and buckets come from the Platform Observability
+  Registry, vendored byte-for-byte from gincommon at `src/fastapicommon/metrics/registry.json`.
+- The platform `method` label is bounded (standard methods, else `OTHER`); `route` is the
+  Gin-style route template (`/items/:item_id`) or `unknown`, never the raw path.
+- New `PlatformSettings` fields `observability_domain` (required while `enable_metrics` is on)
+  and `build_version` (`BUILD_VERSION`). The environment label is the explicitly provided `environment`
+  (`APP_ENV`, then `ENVIRONMENT`), trimmed and lowercased, and must be one of
+  `local, dev, test, staging, prod` (no aliases).
+- `create_platform_app()` raises `ValueError` at startup on a missing domain (the message names
+  `OBSERVABILITY_DOMAIN`), an unknown domain, an invalid service label
+  (`^[a-z][a-z0-9_-]{0,62}$`), or a missing/out-of-vocabulary environment. With
+  `enable_metrics=False` no domain is needed; a configured one is still validated.
+- `ContextServerInterceptor(settings=None)`: pass `PlatformSettings` to initialize metrics in a
+  gRPC-only service (same validation; nothing is initialized with `enable_metrics=False`).
+- `fastapicommon.metrics`: `MetricsOptions`, `MetricsIdentity`, `init_metrics`,
+  `init_metrics_from_settings`, `resolve_metrics_options`, `platform_metrics`,
+  `platform_metrics_enabled`, `metrics_identity`, `metrics_registry`, `http_method_label`,
+  `PlatformMetrics`, `ObservabilityRegistry`, `default_registry`.
+- Compliance test `tests/integration/test_metrics_compliance.py` checks every emitted
+  `platform_*` sample against the vendored registry's labels and vocabularies.
+
+### Changed
+
+- `metrics_router` serves `metrics_registry()` (prometheus_client's default `REGISTRY` unless
+  `init_metrics(..., registry=...)` was given one) instead of always the default registry.
+- **Breaking:** `OBSERVABILITY_DOMAIN` (or `PlatformSettings.observability_domain`) is now
+  mandatory whenever metrics are enabled (the default). `create_platform_app()`,
+  `init_metrics()`, `init_metrics_from_settings()` and `ContextServerInterceptor(settings)` raise
+  `ValueError` without one; set `enable_metrics=False` to run without metrics.
+- `init_metrics_from_settings()` honours `settings.enable_metrics` (initializes nothing when it
+  is false). `PrometheusMiddleware` is a pass-through until metrics are initialized.
+
+### Removed
+
+- **Breaking:** the legacy metrics `http_requests_total`, `http_request_duration_seconds`,
+  `grpc_requests_total` and `grpc_request_duration_seconds` are no longer defined or emitted
+  (status `removed` in the registry). Use the `platform_*` equivalents.
+- **Breaking:** the `fastapicommon.metrics` exports `HTTP_REQUESTS_TOTAL`,
+  `HTTP_REQUEST_DURATION_SECONDS`, `GRPC_REQUESTS_TOTAL`, `GRPC_REQUEST_DURATION_SECONDS` and
+  `record_grpc_request`, and the `fastapicommon.metrics.definitions` module.
+- The `disable_legacy_metrics` setting (`DISABLE_LEGACY_METRICS`) and
+  `MetricsOptions.disable_legacy_metrics` / `MetricsIdentity.disable_legacy_metrics` /
+  `MetricsIdentity.platform_enabled`.
+- There is **no compatibility period**: the Enterprise Platform Observability Standard's
+  parallel-emission window is unnecessary because neither `platform-fastapicommon` nor
+  `platform-gincommon` was ever deployed to production or dev, so no dashboard, alert or
+  recording rule depends on the legacy names.
+
 ## [0.2.0] - 2026-07-27
 
 ### Added

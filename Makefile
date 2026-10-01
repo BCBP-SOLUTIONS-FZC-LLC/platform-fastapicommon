@@ -6,6 +6,7 @@
 APP_NAME ?= platform-fastapicommon-example
 APP_ENV ?= dev
 APP_PORT ?= 8080
+OBSERVABILITY_DOMAIN ?= iam
 BUILD_VERSION ?= $(shell git describe --tags --always --dirty 2>/dev/null || echo dev)
 LOG_FILE ?= logs/app.log
 OTLP_ENDPOINT ?= localhost:4317
@@ -140,6 +141,7 @@ build:
 # this target only, see the note in the CONFIG section above.
 run: export APP_NAME := $(APP_NAME)
 run: export APP_ENV := $(APP_ENV)
+run: export OBSERVABILITY_DOMAIN := $(OBSERVABILITY_DOMAIN)
 run: export OTLP_ENDPOINT := $(OTLP_ENDPOINT)
 run: setup
 	@echo "Running example FastAPI service on :$(APP_PORT) (logs -> $(LOG_FILE))..."

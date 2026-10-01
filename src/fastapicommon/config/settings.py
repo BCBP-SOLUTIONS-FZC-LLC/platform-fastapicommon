@@ -24,3 +24,15 @@ class PlatformSettings(BaseSettings):
     enable_tracing: bool = True
     enable_metrics: bool = True
     otlp_endpoint: str | None = None
+
+    # --- Enterprise Platform Observability Standard (mirrors gincommon.Config) ---
+    # Registry domain (iam, workflow, billing, ...) — env OBSERVABILITY_DOMAIN. Required whenever
+    # enable_metrics is true: the platform_* metrics carry the const labels
+    # {domain, service, environment}; `service` is app_name and `environment` is the explicitly
+    # provided `environment` (APP_ENV / ENVIRONMENT / kwarg; the "development" default does not
+    # count). create_platform_app raises ValueError on a missing or unknown domain, an app_name
+    # that is not a valid service label, or a missing / out-of-vocabulary environment.
+    observability_domain: str = ""
+    # Build version — env BUILD_VERSION; "unknown" when empty. Only platform_build_info carries
+    # it (as its `version` label).
+    build_version: str = ""

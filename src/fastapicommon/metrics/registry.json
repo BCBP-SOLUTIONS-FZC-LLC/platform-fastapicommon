@@ -1,0 +1,2177 @@
+{
+  "schema_version": 1,
+  "const_labels": [
+    "domain",
+    "service",
+    "environment"
+  ],
+  "required_labels": {
+    "platform": [
+      "domain",
+      "service",
+      "environment"
+    ],
+    "domain": [
+      "service",
+      "environment"
+    ],
+    "service": [
+      "service",
+      "environment"
+    ]
+  },
+  "prohibited_labels": [
+    "user_id",
+    "email",
+    "tenant_id",
+    "request_id",
+    "event_id",
+    "session_id",
+    "trace_id",
+    "span_id",
+    "correlation_id",
+    "user",
+    "username",
+    "ip",
+    "client_ip",
+    "url",
+    "path",
+    "query",
+    "message_id",
+    "subject",
+    "actor"
+  ],
+  "prohibited_label_suffixes": [
+    "_id",
+    "_email",
+    "_ip",
+    "_uuid",
+    "_token"
+  ],
+  "exempt_prefixes": [
+    "go_",
+    "process_",
+    "promhttp_",
+    "python_"
+  ],
+  "bucket_presets": {
+    "request_duration": [
+      0.001,
+      0.002,
+      0.005,
+      0.01,
+      0.015,
+      0.025,
+      0.05,
+      0.075,
+      0.1,
+      0.15,
+      0.2,
+      0.3,
+      0.5,
+      0.75,
+      1,
+      2,
+      5,
+      10
+    ],
+    "payload_size": [
+      128,
+      256,
+      512,
+      1024,
+      2048,
+      4096,
+      8192,
+      16384,
+      32768,
+      65536,
+      262144,
+      1048576
+    ],
+    "dependency_request": [
+      0.005,
+      0.01,
+      0.025,
+      0.05,
+      0.1,
+      0.25,
+      0.5,
+      1,
+      2.5,
+      5,
+      10,
+      30
+    ],
+    "message_processing": [
+      0.005,
+      0.01,
+      0.025,
+      0.05,
+      0.1,
+      0.25,
+      0.5,
+      1,
+      2.5,
+      5,
+      10,
+      30,
+      60,
+      120
+    ],
+    "event_propagation": [
+      0.01,
+      0.05,
+      0.1,
+      0.25,
+      0.5,
+      1,
+      2.5,
+      5,
+      10,
+      30,
+      60,
+      300,
+      900,
+      3600
+    ],
+    "db_query": [
+      0.005,
+      0.01,
+      0.025,
+      0.05,
+      0.1,
+      0.25,
+      0.5,
+      1,
+      2.5,
+      5,
+      10
+    ],
+    "db_pool_acquire": [
+      0.001,
+      0.005,
+      0.01,
+      0.05,
+      0.1,
+      0.5,
+      1,
+      10
+    ]
+  },
+  "labels": {
+    "dependency": {
+      "description": "Downstream dependency (database, broker, HTTP API) by logical name.",
+      "pattern": "^[a-z0-9][a-z0-9._-]{0,63}$",
+      "max_values": 50,
+      "cardinality": "bounded by configured dependencies"
+    },
+    "domain": {
+      "description": "Business domain that owns the emitting service. Injected centrally from Config.Domain / OBSERVABILITY_DOMAIN.",
+      "values": [
+        "iam",
+        "workflow",
+        "billing",
+        "tender_management",
+        "notifications",
+        "documents"
+      ],
+      "cardinality": "fixed"
+    },
+    "environment": {
+      "description": "Deployment environment. Injected centrally from Config.Environment, else APP_ENV, else ENVIRONMENT (trimmed, lowercased; no aliases, so production is rejected: use prod). Same precedence in every platform library.",
+      "values": [
+        "local",
+        "dev",
+        "test",
+        "staging",
+        "prod"
+      ],
+      "cardinality": "fixed"
+    },
+    "error_class": {
+      "description": "Outcome class matching status_class.",
+      "values": [
+        "success",
+        "client_error",
+        "server_error"
+      ],
+      "cardinality": "fixed"
+    },
+    "event_type": {
+      "description": "Event envelope type (<domain>.<entity>.<past-tense-verb>[.v<N>]). Bounded by the emitter: unknown when empty, __oversized__ over 128 bytes, __other__ once the process limit of distinct values (platform-events default 200) is reached.",
+      "pattern": "^.{1,128}$",
+      "max_values": 203,
+      "cardinality": "bounded by the event catalogue and the per-process event_type limit"
+    },
+    "grpc_code": {
+      "description": "gRPC status code name.",
+      "values": [
+        "OK",
+        "Canceled",
+        "Unknown",
+        "InvalidArgument",
+        "DeadlineExceeded",
+        "NotFound",
+        "AlreadyExists",
+        "PermissionDenied",
+        "ResourceExhausted",
+        "FailedPrecondition",
+        "Aborted",
+        "OutOfRange",
+        "Unimplemented",
+        "Internal",
+        "Unavailable",
+        "DataLoss",
+        "Unauthenticated"
+      ],
+      "cardinality": "fixed"
+    },
+    "grpc_method": {
+      "description": "Full gRPC method name (/package.Service/Method), or unknown.",
+      "pattern": "^(unknown|/?[A-Za-z0-9_.]+/[A-Za-z0-9_]+)$",
+      "max_values": 1000,
+      "cardinality": "bounded by registered services"
+    },
+    "label": {
+      "description": "Name of a label whose values were replaced to bound cardinality.",
+      "values": [
+        "event_type"
+      ],
+      "cardinality": "fixed"
+    },
+    "library": {
+      "description": "Platform library reporting its build, by repository name. Go and Python ports are distinct values because they have separate version streams.",
+      "values": [
+        "platform-gincommon",
+        "platform-events",
+        "platform-pgcommon",
+        "platform-fastapicommon",
+        "platform-eventcommon",
+        "platform-pgcommon-py"
+      ],
+      "cardinality": "fixed"
+    },
+    "library_version": {
+      "description": "Module version of the library the service was built with (e.g. v1.6.0), devel for an unreleased build.",
+      "pattern": "^(devel|v?[0-9A-Za-z][0-9A-Za-z._+-]{0,63})$",
+      "max_values": 5,
+      "cardinality": "one value per deployment"
+    },
+    "method": {
+      "description": "HTTP request method. Methods outside the standard set are reported as OTHER.",
+      "values": [
+        "GET",
+        "HEAD",
+        "POST",
+        "PUT",
+        "PATCH",
+        "DELETE",
+        "OPTIONS",
+        "CONNECT",
+        "TRACE",
+        "OTHER"
+      ],
+      "cardinality": "fixed"
+    },
+    "operation": {
+      "description": "Logical operation from the fixed per-metric set declared in the registry entry (e.g. consume, outbox_publish, SQL verbs SELECT/INSERT).",
+      "pattern": "^[A-Za-z][A-Za-z0-9_.-]{0,63}$",
+      "max_values": 100,
+      "cardinality": "bounded enum"
+    },
+    "outcome": {
+      "description": "success: completed as intended; failure: rejected for a business reason; error: system or transport fault. Each metric declares the subset it uses.",
+      "values": [
+        "success",
+        "failure",
+        "error"
+      ],
+      "cardinality": "fixed"
+    },
+    "pool": {
+      "description": "Database pool name from Config.PoolName (e.g. default, primary, replica), static per deployment.",
+      "pattern": "^[a-z][a-z0-9_]{0,31}$",
+      "max_values": 10,
+      "cardinality": "a handful per service"
+    },
+    "queue": {
+      "description": "Queue name: the last path segment of the queue URL (e.g. orders, orders.fifo), never the full URL; unknown when empty.",
+      "pattern": "^(unknown|[A-Za-z0-9][A-Za-z0-9._-]{0,79})$",
+      "max_values": 100,
+      "cardinality": "bounded by configured queues"
+    },
+    "reason": {
+      "description": "Failure or routing reason from a fixed per-metric enum, snake_case. Never an error message.",
+      "pattern": "^[a-z][a-z0-9_]{0,63}$",
+      "max_values": 50,
+      "cardinality": "bounded enum"
+    },
+    "route": {
+      "description": "Gin route template (e.g. /api/items/:id), or unknown for unmatched requests. Never the raw URL path.",
+      "pattern": "^(unknown|/[A-Za-z0-9_./:*~-]*)$",
+      "max_values": 1000,
+      "cardinality": "bounded by registered routes"
+    },
+    "service": {
+      "description": "Emitting service (e.g. event-consumer). Injected centrally from Config.ServiceName / the library Identity. Same rule as platform-events and platform-pgcommon identities.",
+      "pattern": "^[a-z][a-z0-9_-]{0,62}$",
+      "cardinality": "one value per deployment"
+    },
+    "source": {
+      "description": "Origin system of a change or event, snake_case.",
+      "pattern": "^[a-z][a-z0-9_]{0,63}$",
+      "max_values": 50,
+      "cardinality": "bounded enum"
+    },
+    "state": {
+      "description": "Connection pool connection state.",
+      "values": [
+        "idle",
+        "acquired",
+        "constructing"
+      ],
+      "cardinality": "fixed"
+    },
+    "status_class": {
+      "description": "Response class. HTTP 1xx-3xx and gRPC OK are 2xx; client-side gRPC codes are 4xx; everything else is 5xx.",
+      "values": [
+        "2xx",
+        "4xx",
+        "5xx"
+      ],
+      "cardinality": "fixed"
+    },
+    "strategy": {
+      "description": "Resolution or authentication strategy from a fixed set, snake_case.",
+      "pattern": "^[a-z][a-z0-9_]{0,63}$",
+      "max_values": 20,
+      "cardinality": "bounded enum"
+    },
+    "topic": {
+      "description": "Topic name: the last segment of the topic ARN (e.g. iam-events, orders.fifo), never the full ARN; unknown when empty.",
+      "pattern": "^(unknown|[A-Za-z0-9][A-Za-z0-9._-]{0,255})$",
+      "max_values": 100,
+      "cardinality": "bounded by configured topics"
+    },
+    "version": {
+      "description": "Build version of the emitting binary (Config.BuildVersion / BUILD_VERSION; unknown when unset). Only on build-info metrics: a per-build label on every series would multiply series on each deploy.",
+      "pattern": "^[0-9A-Za-z][0-9A-Za-z._+-]{0,63}$",
+      "cardinality": "one value per deployment"
+    }
+  },
+  "metrics": [
+    {
+      "name": "platform_build_info",
+      "tier": "platform",
+      "type": "gauge",
+      "status": "proposed",
+      "help": "Always 1; the version label carries the build of the emitting service.",
+      "labels": [
+        "version"
+      ],
+      "aggregation": "count by (domain, environment, version) for rollout tracking; never summed.",
+      "owner": "platform-gincommon"
+    },
+    {
+      "name": "platform_http_requests_total",
+      "tier": "platform",
+      "type": "counter",
+      "status": "proposed",
+      "help": "HTTP requests completed by the server, including recovered panics (counted as 5xx).",
+      "labels": [
+        "method",
+        "route",
+        "status_class",
+        "error_class"
+      ],
+      "aggregation": "sum by (domain, service, environment, ...) of rate(); safe to sum across services and domains.",
+      "owner": "platform-gincommon"
+    },
+    {
+      "name": "platform_http_request_duration_seconds",
+      "tier": "platform",
+      "type": "histogram",
+      "unit": "seconds",
+      "buckets": "request_duration",
+      "status": "proposed",
+      "help": "HTTP server request latency in seconds, measured by MetricsMiddleware.",
+      "labels": [
+        "method",
+        "route",
+        "status_class",
+        "error_class"
+      ],
+      "aggregation": "histogram_quantile over sum by (le, ...) of rate(_bucket); buckets are identical in every service.",
+      "owner": "platform-gincommon"
+    },
+    {
+      "name": "platform_http_request_size_bytes",
+      "tier": "platform",
+      "type": "histogram",
+      "unit": "bytes",
+      "buckets": "payload_size",
+      "status": "proposed",
+      "help": "HTTP request body size in bytes from Content-Length (0 when unknown).",
+      "labels": [
+        "method",
+        "route",
+        "status_class",
+        "error_class"
+      ],
+      "aggregation": "histogram_quantile over sum by (le, ...) of rate(_bucket).",
+      "owner": "platform-gincommon"
+    },
+    {
+      "name": "platform_http_response_size_bytes",
+      "tier": "platform",
+      "type": "histogram",
+      "unit": "bytes",
+      "buckets": "payload_size",
+      "status": "proposed",
+      "help": "HTTP response body size in bytes.",
+      "labels": [
+        "method",
+        "route",
+        "status_class",
+        "error_class"
+      ],
+      "aggregation": "histogram_quantile over sum by (le, ...) of rate(_bucket).",
+      "owner": "platform-gincommon"
+    },
+    {
+      "name": "platform_http_active_requests",
+      "tier": "platform",
+      "type": "gauge",
+      "status": "proposed",
+      "help": "HTTP requests currently being handled.",
+      "labels": [
+        "route"
+      ],
+      "aggregation": "sum by (domain, service, environment); also an HPA signal.",
+      "owner": "platform-gincommon"
+    },
+    {
+      "name": "platform_http_panics_total",
+      "tier": "platform",
+      "type": "counter",
+      "status": "proposed",
+      "help": "HTTP handler panics recovered by the middleware stack.",
+      "labels": [
+        "method",
+        "route"
+      ],
+      "aggregation": "sum by (domain, service, environment) of increase().",
+      "owner": "platform-gincommon"
+    },
+    {
+      "name": "platform_http_rate_limited_requests_total",
+      "tier": "platform",
+      "type": "counter",
+      "status": "proposed",
+      "help": "HTTP requests answered with 429 Too Many Requests.",
+      "labels": [
+        "method",
+        "route"
+      ],
+      "aggregation": "sum by (domain, service, environment, route) of rate().",
+      "owner": "platform-gincommon"
+    },
+    {
+      "name": "platform_http_request_timeouts_total",
+      "tier": "platform",
+      "type": "counter",
+      "status": "proposed",
+      "help": "HTTP requests whose TimeoutMiddleware deadline expired before the handler responded.",
+      "labels": [
+        "method",
+        "route"
+      ],
+      "aggregation": "sum by (domain, service, environment, route) of rate().",
+      "owner": "platform-gincommon"
+    },
+    {
+      "name": "platform_grpc_server_handled_total",
+      "tier": "platform",
+      "type": "counter",
+      "status": "proposed",
+      "help": "gRPC server RPCs completed, including recovered panics (counted as Internal).",
+      "labels": [
+        "grpc_method",
+        "grpc_code",
+        "status_class",
+        "error_class"
+      ],
+      "aggregation": "sum by (domain, service, environment, ...) of rate(); safe to sum across services and domains.",
+      "owner": "platform-gincommon"
+    },
+    {
+      "name": "platform_grpc_server_handling_seconds",
+      "tier": "platform",
+      "type": "histogram",
+      "unit": "seconds",
+      "buckets": "request_duration",
+      "status": "proposed",
+      "help": "gRPC server RPC latency in seconds.",
+      "labels": [
+        "grpc_method",
+        "status_class",
+        "error_class"
+      ],
+      "aggregation": "histogram_quantile over sum by (le, ...) of rate(_bucket); buckets are identical in every service.",
+      "owner": "platform-gincommon"
+    },
+    {
+      "name": "platform_grpc_server_request_size_bytes",
+      "tier": "platform",
+      "type": "histogram",
+      "unit": "bytes",
+      "buckets": "payload_size",
+      "status": "proposed",
+      "help": "gRPC request message size in bytes (sum over messages for streams).",
+      "labels": [
+        "grpc_method",
+        "status_class",
+        "error_class"
+      ],
+      "aggregation": "histogram_quantile over sum by (le, ...) of rate(_bucket).",
+      "owner": "platform-gincommon"
+    },
+    {
+      "name": "platform_grpc_server_response_size_bytes",
+      "tier": "platform",
+      "type": "histogram",
+      "unit": "bytes",
+      "buckets": "payload_size",
+      "status": "proposed",
+      "help": "gRPC response message size in bytes (sum over messages for streams).",
+      "labels": [
+        "grpc_method",
+        "status_class",
+        "error_class"
+      ],
+      "aggregation": "histogram_quantile over sum by (le, ...) of rate(_bucket).",
+      "owner": "platform-gincommon"
+    },
+    {
+      "name": "platform_grpc_server_inflight_requests",
+      "tier": "platform",
+      "type": "gauge",
+      "status": "proposed",
+      "help": "gRPC server RPCs currently being handled.",
+      "labels": [
+        "grpc_method"
+      ],
+      "aggregation": "sum by (domain, service, environment); also an HPA signal.",
+      "owner": "platform-gincommon"
+    },
+    {
+      "name": "platform_grpc_rate_limited_requests_total",
+      "tier": "platform",
+      "type": "counter",
+      "status": "proposed",
+      "help": "gRPC RPCs that ended with ResourceExhausted.",
+      "labels": [
+        "grpc_method"
+      ],
+      "aggregation": "sum by (domain, service, environment, grpc_method) of rate().",
+      "owner": "platform-gincommon"
+    },
+    {
+      "name": "platform_grpc_panics_total",
+      "tier": "platform",
+      "type": "counter",
+      "status": "proposed",
+      "help": "gRPC handler panics recovered by the interceptor stack.",
+      "labels": [
+        "grpc_method"
+      ],
+      "aggregation": "sum by (domain, service, environment) of increase().",
+      "owner": "platform-gincommon"
+    },
+    {
+      "name": "platform_messages_received_total",
+      "tier": "platform",
+      "owner": "platform-events",
+      "type": "counter",
+      "status": "approved",
+      "help": "A message delivered to a consumer by its queue (one per SQS delivery, redeliveries included), counted on receipt before it is parsed.",
+      "labels": [
+        "queue"
+      ],
+      "aggregation": "Inbound rate per service: sum by (domain, service) (rate(platform_messages_received_total[5m])). Platform-wide: sum by (domain) (…).",
+      "cardinality": "queue (≤5 per service).",
+      "governance_notes": "Canonical name per the standard. queue is an approved dimension; its value is the queue name, not the URL."
+    },
+    {
+      "name": "platform_messages_processed_total",
+      "tier": "platform",
+      "owner": "platform-events",
+      "type": "counter",
+      "status": "approved",
+      "help": "A received message whose handler completed successfully, after which the message was acknowledged (deleted). Messages dead-lettered instead are counted in platform_dlq_messages_total, not here.",
+      "labels": [
+        "queue",
+        "event_type"
+      ],
+      "aggregation": "Success ratio: sum by (domain, service) (rate(platform_messages_processed_total[5m])) / sum by (domain, service) (rate(platform_messages_received_total[5m])).",
+      "cardinality": "queue (≤5) × event_type (registered types a service consumes, typically ≤30).",
+      "governance_notes": "Canonical name per the standard. event_type is an approved dimension."
+    },
+    {
+      "name": "platform_messages_failed_total",
+      "tier": "platform",
+      "owner": "platform-events",
+      "type": "counter",
+      "status": "approved",
+      "help": "A received message that could not be processed on this delivery, by reason: malformed (not a valid envelope), decode_error (schema-registry codec failure), handler_error, handler_panic, or dead_letter_error (dead-letter handling or DLQ forwarding failed). A failed message is retried or dead-lettered; see platform_retry_total and platform_dlq_messages_total.",
+      "labels": [
+        "queue",
+        "event_type",
+        "reason"
+      ],
+      "aggregation": "Failure ratio: sum by (domain, service) (rate(platform_messages_failed_total[5m])) / sum by (domain, service) (rate(platform_messages_received_total[5m])). Poison producers: sum by (domain, service, queue) (rate(platform_messages_failed_total{reason=\"malformed\"}[15m])).",
+      "cardinality": "queue (≤5) × event_type (≤30) × reason (5); malformed always has event_type=unknown.",
+      "governance_notes": "Canonical name per the standard. The reason vocabulary is requested for approval. Values emitted by platform-events: reason ∈ {malformed, decode_error, handler_error, handler_panic, dead_letter_error}. Other emitters use the global label vocabulary; governance to decide whether to ratify a closed platform-wide enum."
+    },
+    {
+      "name": "platform_retry_total",
+      "tier": "platform",
+      "owner": "platform-events",
+      "type": "counter",
+      "status": "approved",
+      "help": "An attempt that failed and was left for automatic retry: a consumed message whose processing failed and stays on its queue for redelivery (operation=consume), or an outbox publish that failed with attempts remaining (operation=outbox_publish).",
+      "labels": [
+        "operation",
+        "event_type"
+      ],
+      "aggregation": "Retry pressure per service: sum by (domain, service, operation) (rate(platform_retry_total[5m])).",
+      "cardinality": "operation (2) × event_type (≤30).",
+      "governance_notes": "Canonical name per the standard, but IAM services already register platform_retry_total with conflicting label sets ({target_service,endpoint}; {event_type,reason}). In such a service registration is refused and reported as a RegistrationWarning (fail-soft), so the reference alerts do not depend on this metric until governance approves ONE label vocabulary. Values emitted by platform-events: operation ∈ {consume, outbox_publish}. Other emitters use the global label vocabulary; governance to decide whether to ratify a closed platform-wide enum."
+    },
+    {
+      "name": "platform_dlq_messages_total",
+      "tier": "platform",
+      "owner": "platform-events",
+      "type": "counter",
+      "status": "approved",
+      "help": "A message moved to dead-letter storage: forwarded to its SQS queue's RedrivePolicy DLQ (operation=consume), or moved to outbox_dead_letters after exhausting its publish attempts (operation=outbox_publish), by reason.",
+      "labels": [
+        "operation",
+        "event_type",
+        "reason"
+      ],
+      "aggregation": "Dead-letter inflow: sum by (domain, service, operation, reason) (increase(platform_dlq_messages_total[15m])). Any sustained non-zero rate needs attention.",
+      "cardinality": "operation (2) × event_type (≤30) × reason (5).",
+      "governance_notes": "Canonical name per the standard. operation and reason vocabularies are requested for approval. Values emitted by platform-events: operation ∈ {consume, outbox_publish}; reason ∈ {malformed, decode_error, max_receive_count, explicit, max_attempts}. Other emitters use the global label vocabulary; governance to decide whether to ratify a closed platform-wide enum."
+    },
+    {
+      "name": "platform_duplicate_messages_total",
+      "tier": "platform",
+      "owner": "platform-events",
+      "type": "counter",
+      "status": "proposed",
+      "help": "A redelivered message acknowledged without running its handler because the consumer's dedup ledger (inbox processed_events) had already recorded its event ID.",
+      "labels": [
+        "queue",
+        "event_type"
+      ],
+      "aggregation": "Duplicate ratio: sum by (domain, service) (rate(platform_duplicate_messages_total[15m])) / sum by (domain, service) (rate(platform_messages_received_total[15m])).",
+      "cardinality": "queue (≤5) × event_type (≤30).",
+      "governance_notes": "Registry-proposed example in the standard. The legacy metric's consumer label is replaced by queue."
+    },
+    {
+      "name": "platform_dependency_request_seconds",
+      "tier": "platform",
+      "owner": "platform-events",
+      "type": "histogram",
+      "unit": "seconds",
+      "buckets": "dependency_request",
+      "status": "proposed",
+      "help": "Client-observed wall time of one call to an external dependency — SNS (publish, publish_batch), SQS (receive_message, delete_message, change_message_visibility, send_message, get_queue_attributes, get_queue_url) or the configured schema-registry codec (encode, decode) — by outcome. The _count series counts calls. receive_message is a long poll: its duration includes up to WaitTimeSeconds (default 20 s) of waiting on an empty queue, so exclude it from latency views (it stays meaningful for error rates).",
+      "labels": [
+        "dependency",
+        "operation",
+        "outcome"
+      ],
+      "aggregation": "Error ratio: sum by (domain, service, dependency) (rate(platform_dependency_request_seconds_count{outcome=\"error\"}[5m])) / sum by (domain, service, dependency) (rate(platform_dependency_request_seconds_count[5m])). p99 (long-poll receives excluded): histogram_quantile(0.99, sum by (le, domain, service, dependency, operation) (rate(platform_dependency_request_seconds_bucket{operation!=\"receive_message\"}[5m]))).",
+      "cardinality": "dependency × operation (10 valid pairs) × outcome (2) × 12 buckets.",
+      "governance_notes": "Registry-proposed example in the standard. IAM services register this name with conflicting label sets ({target_service,endpoint} vs {dependency,operation,outcome}); platform-events uses {dependency,operation,outcome}. Where a service's registry already holds another shape the metric is disabled with a RegistrationWarning (fail-soft). Values emitted by platform-events: dependency ∈ {sns, sqs, codec}; operation ∈ {publish, publish_batch, receive_message, delete_message, change_message_visibility, send_message, get_queue_attributes, get_queue_url, encode, decode}; outcome ∈ {success, error}. Other emitters use the global label vocabulary; governance to decide whether to ratify a closed platform-wide enum."
+    },
+    {
+      "name": "platform_event_propagation_seconds",
+      "tier": "platform",
+      "owner": "platform-events",
+      "type": "histogram",
+      "unit": "seconds",
+      "buckets": "event_propagation",
+      "status": "proposed",
+      "help": "Time from an event's creation (envelope `time`, set by the producer) to its FIRST receipt by a consumer (ApproximateReceiveCount ≤ 1) — end-to-end propagation delay through the outbox, SNS and SQS. Redeliveries are not observed, so retry delay does not inflate it. Negative clock skew is clamped to 0.",
+      "labels": [
+        "queue",
+        "event_type"
+      ],
+      "aggregation": "p95 propagation per consumer: histogram_quantile(0.95, sum by (le, domain, service, queue) (rate(platform_event_propagation_seconds_bucket[5m]))). Includes producer clock skew.",
+      "cardinality": "queue (≤5) × event_type (≤30) × 14 buckets.",
+      "governance_notes": "Registry-proposed example in the standard. New signal (no legacy predecessor)."
+    },
+    {
+      "name": "platform_queue_depth",
+      "tier": "platform",
+      "owner": "platform-events",
+      "type": "gauge",
+      "status": "proposed",
+      "help": "Messages waiting on a consumer's queue to be received (SQS ApproximateNumberOfMessages — visible, not in flight or delayed), sampled by the consumer every WithQueueDepthMetrics interval. Approximate by SQS design.",
+      "labels": [
+        "queue"
+      ],
+      "aggregation": "Every replica samples the same queue, so aggregate with max, not sum: max by (domain, service, queue) (platform_queue_depth). The natural HPA/KEDA scaling signal once ratified.",
+      "cardinality": "queue (≤5 per service).",
+      "governance_notes": "Registry-proposed example in the standard. Emitted by platform-events because consuming services may not use the SQS SDK themselves (depguard); opt-in (WithQueueDepthMetrics) since each replica polls sqs:GetQueueAttributes."
+    },
+    {
+      "name": "platform_dlq_depth",
+      "tier": "platform",
+      "owner": "platform-events",
+      "type": "gauge",
+      "status": "proposed",
+      "help": "Messages sitting in the dead-letter queue attached to a consumer's queue by its RedrivePolicy (SQS ApproximateNumberOfMessages of the DLQ), sampled with platform_queue_depth. queue is the SOURCE queue's name, so the gauge joins with the consumer's other queue metrics.",
+      "labels": [
+        "queue"
+      ],
+      "aggregation": "max by (domain, service, queue) (platform_dlq_depth) > 0 — messages awaiting investigation or replay. Complements platform_dlq_messages_total (inflow) with the backlog.",
+      "cardinality": "queue (≤5 per service).",
+      "governance_notes": "Registry-proposed example in the standard. Not emitted when the queue has no RedrivePolicy."
+    },
+    {
+      "name": "platform_messages_in_flight",
+      "tier": "platform",
+      "owner": "platform-events",
+      "type": "gauge",
+      "status": "proposed",
+      "help": "Messages a consumer has received and is currently processing (decode, dead-letter routing or handler), per replica. At the consumer's concurrency limit for long periods means the replica is saturated; a value that never drops points at a hung handler (see WithHandlerTimeout).",
+      "labels": [
+        "queue"
+      ],
+      "aggregation": "sum by (domain, service, queue) (platform_messages_in_flight) for total work in progress; compare per replica against the configured concurrency for saturation.",
+      "cardinality": "queue (≤5 per service).",
+      "governance_notes": "Proposed by platform-events. Complements platform_queue_depth (waiting) with work in progress."
+    },
+    {
+      "name": "platform_messages_published_total",
+      "tier": "platform",
+      "owner": "platform-events",
+      "type": "counter",
+      "status": "proposed",
+      "help": "One event a producer attempted to publish to a topic, by outcome (error includes validation, encoding and broker failures; a batch counts each message).",
+      "labels": [
+        "topic",
+        "event_type",
+        "outcome"
+      ],
+      "label_values": {
+        "outcome": [
+          "success",
+          "error"
+        ]
+      },
+      "aggregation": "Publish error ratio: sum by (domain, service, topic) (rate(platform_messages_published_total{outcome=\"error\"}[5m])) / sum by (domain, service, topic) (rate(platform_messages_published_total[5m])).",
+      "cardinality": "topic (≤3) × event_type (≤30) × outcome (2).",
+      "governance_notes": "New platform_* name (not among the standard's canonical or registry-proposed examples); submitted under the Registry Ratification Requirement. Shadow-emitted until ratified. The producer-side counterpart of platform_messages_received_total; requests approval of a topic label."
+    },
+    {
+      "name": "platform_message_processing_duration_seconds",
+      "tier": "platform",
+      "owner": "platform-events",
+      "type": "histogram",
+      "unit": "seconds",
+      "buckets": "message_processing",
+      "status": "proposed",
+      "help": "Wall time a consumer's handler (or dead-letter handler) spent on one delivery, whatever the outcome.",
+      "labels": [
+        "queue",
+        "event_type"
+      ],
+      "aggregation": "p99 handler latency: histogram_quantile(0.99, sum by (le, domain, service, queue) (rate(platform_message_processing_duration_seconds_bucket[5m]))).",
+      "cardinality": "queue (≤5) × event_type (≤30) × 14 buckets.",
+      "governance_notes": "New platform_* name (not among the standard's canonical or registry-proposed examples); submitted under the Registry Ratification Requirement. Shadow-emitted until ratified."
+    },
+    {
+      "name": "platform_outbox_pending_events",
+      "tier": "platform",
+      "owner": "platform-events",
+      "type": "gauge",
+      "status": "proposed",
+      "help": "Events in a service's transactional outbox that are due to be published (unpublished, not leased and not waiting out a retry backoff), sampled every outbox GaugeInterval (default 15s) and capped at 100000 (a reading of 100000 means at least that many). Left at its last value when the count query fails (see platform_outbox_errors_total{operation=\"pending_count\"}).",
+      "labels": [],
+      "aggregation": "Backlog per service: max by (domain, service) (platform_outbox_pending_events) — every runner reads the same table, so use max, not sum.",
+      "cardinality": "One series per service instance.",
+      "governance_notes": "New platform_* name (not among the standard's canonical or registry-proposed examples); submitted under the Registry Ratification Requirement. Shadow-emitted until ratified."
+    },
+    {
+      "name": "platform_outbox_leased_events",
+      "tier": "platform",
+      "owner": "platform-events",
+      "type": "gauge",
+      "status": "proposed",
+      "help": "Unpublished outbox events not yet due: claimed by a runner and being published, or waiting out a retry backoff. Sampled every GaugeInterval, capped at 100000.",
+      "labels": [],
+      "aggregation": "max by (domain, service) (platform_outbox_leased_events).",
+      "cardinality": "One series per service instance.",
+      "governance_notes": "New platform_* name (not among the standard's canonical or registry-proposed examples); submitted under the Registry Ratification Requirement. Shadow-emitted until ratified."
+    },
+    {
+      "name": "platform_outbox_oldest_pending_age",
+      "tier": "platform",
+      "owner": "platform-events",
+      "type": "gauge",
+      "status": "proposed",
+      "help": "Age of the oldest unpublished outbox event (now − created_at), 0 when nothing is unpublished, sampled every GaugeInterval. Transient publish failures never dead-letter, so this is the signal that delivery has stopped even when the backlog is small (e.g. a credential outage on a low-volume service).",
+      "labels": [],
+      "aggregation": "max by (domain, service) (platform_outbox_oldest_pending_age) — every runner reads the same table. Alert on it staying above the delivery-latency objective (e.g. > 600 for 10m) once ratified.",
+      "cardinality": "One series per service instance.",
+      "governance_notes": "Proposed by platform-events. Left at its last value when the query fails (platform_outbox_errors_total{operation=\"oldest_pending\"})."
+    },
+    {
+      "name": "platform_outbox_ordering_blocked_events",
+      "tier": "platform",
+      "owner": "platform-events",
+      "type": "gauge",
+      "status": "proposed",
+      "help": "Ordered outbox events (outbox.EnqueueOrdered) waiting behind an earlier unpublished record with the same ordering key. Sampled every GaugeInterval, capped at 100000. A value that keeps growing means a key's head record keeps failing and holds the rest of its key.",
+      "labels": [],
+      "aggregation": "max by (domain, service) (platform_outbox_ordering_blocked_events) — every runner reads the same table.",
+      "cardinality": "One series per service instance.",
+      "governance_notes": "Proposed by platform-events with per-key ordering. Left at its last value when the query fails (platform_outbox_errors_total{operation=\"blocked_count\"})."
+    },
+    {
+      "name": "platform_message_timeouts_total",
+      "tier": "platform",
+      "owner": "platform-events",
+      "type": "counter",
+      "status": "proposed",
+      "help": "A received message whose WithHandlerTimeout deadline expired, by the stage it expired in: decode (codec decode), dead_letter_handler, or handler. Each is also counted in platform_messages_failed_total under its usual reason (decode_error, dead_letter_error, handler_error) — this counter separates timeouts from other failures without changing that Canonical metric's vocabulary.",
+      "labels": [
+        "queue",
+        "event_type",
+        "operation"
+      ],
+      "label_values": {
+        "operation": [
+          "decode",
+          "dead_letter_handler",
+          "handler"
+        ]
+      },
+      "aggregation": "Timeout share of failures: sum by (domain, service, queue) (rate(platform_message_timeouts_total[5m])) / sum by (domain, service, queue) (rate(platform_messages_failed_total[5m])).",
+      "cardinality": "queue (≤5) × event_type (≤30) × operation (3).",
+      "governance_notes": "Proposed by platform-events. Emitted only when the consumer uses WithHandlerTimeout."
+    },
+    {
+      "name": "platform_outbox_publish_attempts_total",
+      "tier": "platform",
+      "owner": "platform-events",
+      "type": "counter",
+      "status": "proposed",
+      "help": "One attempt by the outbox runner to publish a claimed outbox event, by outcome.",
+      "labels": [
+        "event_type",
+        "outcome"
+      ],
+      "label_values": {
+        "outcome": [
+          "success",
+          "error"
+        ]
+      },
+      "aggregation": "Outbox publish error ratio: sum by (domain, service) (rate(platform_outbox_publish_attempts_total{outcome=\"error\"}[5m])) / sum by (domain, service) (rate(platform_outbox_publish_attempts_total[5m])).",
+      "cardinality": "event_type (≤30) × outcome (2).",
+      "governance_notes": "New platform_* name (not among the standard's canonical or registry-proposed examples); submitted under the Registry Ratification Requirement. Shadow-emitted until ratified."
+    },
+    {
+      "name": "platform_outbox_errors_total",
+      "tier": "platform",
+      "owner": "platform-events",
+      "type": "counter",
+      "status": "proposed",
+      "help": "An outbox runner step that failed outside a publish attempt: poll (claiming a batch), unmarshal (a stored envelope that no longer parses), mark_published (an event published but not marked — it will be delivered again), pending_count / leased_count / oldest_pending / blocked_count (a gauge query).",
+      "labels": [
+        "operation"
+      ],
+      "label_values": {
+        "operation": [
+          "poll",
+          "unmarshal",
+          "mark_published",
+          "pending_count",
+          "leased_count",
+          "oldest_pending",
+          "blocked_count"
+        ]
+      },
+      "aggregation": "sum by (domain, service, operation) (rate(platform_outbox_errors_total[5m])) > 0.",
+      "cardinality": "operation (7).",
+      "governance_notes": "New platform_* name (not among the standard's canonical or registry-proposed examples); submitted under the Registry Ratification Requirement. Shadow-emitted until ratified."
+    },
+    {
+      "name": "platform_outbox_dead_letter_operations_total",
+      "tier": "platform",
+      "owner": "platform-events",
+      "type": "counter",
+      "status": "proposed",
+      "help": "Outbox dead-letter records acted on by an operator call: reprocess (moved back to outbox_events for retry) or discard (permanently deleted). Counts records, not calls.",
+      "labels": [
+        "operation"
+      ],
+      "label_values": {
+        "operation": [
+          "reprocess",
+          "discard"
+        ]
+      },
+      "aggregation": "Audit trail: sum by (domain, service, operation) (increase(platform_outbox_dead_letter_operations_total[1d])).",
+      "cardinality": "operation (2).",
+      "governance_notes": "New platform_* name (not among the standard's canonical or registry-proposed examples); submitted under the Registry Ratification Requirement. Shadow-emitted until ratified."
+    },
+    {
+      "name": "platform_telemetry_label_overflow_total",
+      "tier": "platform",
+      "owner": "platform-events",
+      "type": "counter",
+      "status": "proposed",
+      "help": "A label value the library replaced because it exceeded its cardinality bound: event_type over 128 bytes → `__oversized__`, or a new distinct event_type beyond the per-process limit (default 200) → `__other__`. Counts replacements. Non-zero means a misconfigured or adversarial producer, or a limit set below the service's real number of event types.",
+      "labels": [
+        "label"
+      ],
+      "label_values": {
+        "label": [
+          "event_type"
+        ]
+      },
+      "aggregation": "sum by (domain, service, label) (rate(platform_telemetry_label_overflow_total[15m])) > 0.",
+      "cardinality": "label (1).",
+      "governance_notes": "New platform_* name (not among the standard's canonical or registry-proposed examples); submitted under the Registry Ratification Requirement. Shadow-emitted until ratified."
+    },
+    {
+      "name": "platform_library_info",
+      "tier": "platform",
+      "owner": "platform-events",
+      "type": "gauge",
+      "status": "proposed",
+      "help": "Always 1. Identifies a platform library and the version a service was built with, for fleet-wide upgrade tracking.",
+      "labels": [
+        "library",
+        "library_version"
+      ],
+      "aggregation": "Services still on an old version: count by (library_version) (platform_library_info{library=\"platform-events\"}).",
+      "cardinality": "One series per service instance.",
+      "governance_notes": "New platform_* name (not among the standard's canonical or registry-proposed examples); submitted under the Registry Ratification Requirement. Shadow-emitted until ratified. Intended to be shared by every platform library (platform-pgcommon, platform-gincommon); the legacy build_info carried the service's own version, which is not in the Tier 1 vocabulary. Every platform library reports itself here, so library uses the global vocabulary (platform-events emits library=\"platform-events\")."
+    },
+    {
+      "name": "platform_db_queries_total",
+      "tier": "platform",
+      "owner": "platform-pgcommon",
+      "type": "counter",
+      "status": "proposed",
+      "help": "One statement a service executed against PostgreSQL through a pgcommon pool — a query, a SendBatch (operation=BATCH) or a CopyFrom (operation=COPY) — counted when it completes, by outcome. Statements pgcommon issues itself (RLS GUC set_config on acquire, BEGIN / COMMIT / ROLLBACK, transaction timeouts, savepoints, the PgBouncer wrapping transaction) are excluded unless they fail: a failed COMMIT or GUC injection is a failure of the caller's work.",
+      "labels": [
+        "pool",
+        "operation",
+        "outcome"
+      ],
+      "label_values": {
+        "operation": [
+          "ALTER",
+          "ANALYZE",
+          "BEGIN",
+          "CALL",
+          "COMMENT",
+          "COMMIT",
+          "COPY",
+          "CREATE",
+          "DELETE",
+          "DISCARD",
+          "DO",
+          "DROP",
+          "END",
+          "EXPLAIN",
+          "GRANT",
+          "INSERT",
+          "LISTEN",
+          "LOCK",
+          "MERGE",
+          "NOTIFY",
+          "PREPARE",
+          "REFRESH",
+          "RELEASE",
+          "RESET",
+          "REVOKE",
+          "ROLLBACK",
+          "SAVEPOINT",
+          "SELECT",
+          "SET",
+          "SHOW",
+          "START",
+          "TABLE",
+          "TRUNCATE",
+          "UNLISTEN",
+          "UPDATE",
+          "VACUUM",
+          "VALUES",
+          "WITH",
+          "BATCH",
+          "other"
+        ],
+        "outcome": [
+          "success",
+          "error"
+        ]
+      },
+      "aggregation": "Error ratio per service: sum by (domain, service) (rate(platform_db_queries_total{outcome=\"error\"}[5m])) / sum by (domain, service) (rate(platform_db_queries_total[5m])). Platform-wide database load: sum by (domain) (rate(platform_db_queries_total[5m])).",
+      "cardinality": "pool (≤3) × operation (closed allowlist, only observed verbs materialise) × outcome (2). SQL text is never a label.",
+      "governance_notes": "New platform_* name (not among the standard's canonical or registry-proposed examples); submitted under the Registry Ratification Requirement. Reviewers should also decide whether the pool/query dimensions belong under a generic shared metric instead — platform_dependency_request_seconds{dependency=\"postgres\"} / platform_retry_total — once those names have ONE approved label vocabulary: today IAM services register them with conflicting label sets ({target_service,endpoint} vs {dependency,operation,outcome}; {event_type,reason}), so pgcommon cannot join them without breaking registration in those services."
+    },
+    {
+      "name": "platform_db_query_duration_seconds",
+      "tier": "platform",
+      "owner": "platform-pgcommon",
+      "type": "histogram",
+      "unit": "seconds",
+      "buckets": "db_query",
+      "status": "proposed",
+      "help": "Client-observed wall time of one statement (query, SendBatch or CopyFrom) against PostgreSQL through a pgcommon pool, from send to result. Library-internal statements (RLS GUC set_config, BEGIN / COMMIT / ROLLBACK, transaction timeouts, savepoints) are excluded unless they fail: a failed COMMIT or GUC injection is a failure of the caller's work.",
+      "labels": [
+        "pool",
+        "operation"
+      ],
+      "label_values": {
+        "operation": [
+          "ALTER",
+          "ANALYZE",
+          "BEGIN",
+          "CALL",
+          "COMMENT",
+          "COMMIT",
+          "COPY",
+          "CREATE",
+          "DELETE",
+          "DISCARD",
+          "DO",
+          "DROP",
+          "END",
+          "EXPLAIN",
+          "GRANT",
+          "INSERT",
+          "LISTEN",
+          "LOCK",
+          "MERGE",
+          "NOTIFY",
+          "PREPARE",
+          "REFRESH",
+          "RELEASE",
+          "RESET",
+          "REVOKE",
+          "ROLLBACK",
+          "SAVEPOINT",
+          "SELECT",
+          "SET",
+          "SHOW",
+          "START",
+          "TABLE",
+          "TRUNCATE",
+          "UNLISTEN",
+          "UPDATE",
+          "VACUUM",
+          "VALUES",
+          "WITH",
+          "BATCH",
+          "other"
+        ]
+      },
+      "aggregation": "p99 per service: histogram_quantile(0.99, sum by (le, domain, service) (rate(platform_db_query_duration_seconds_bucket[5m]))). Buckets are identical in every service, so cross-service quantiles are valid.",
+      "cardinality": "pool (≤3) × operation (closed allowlist) × 11 buckets.",
+      "governance_notes": "New platform_* name (not among the standard's canonical or registry-proposed examples); submitted under the Registry Ratification Requirement. Reviewers should also decide whether the pool/query dimensions belong under a generic shared metric instead — platform_dependency_request_seconds{dependency=\"postgres\"} / platform_retry_total — once those names have ONE approved label vocabulary: today IAM services register them with conflicting label sets ({target_service,endpoint} vs {dependency,operation,outcome}; {event_type,reason}), so pgcommon cannot join them without breaking registration in those services."
+    },
+    {
+      "name": "platform_db_pool_acquires_total",
+      "tier": "platform",
+      "owner": "platform-pgcommon",
+      "type": "counter",
+      "status": "proposed",
+      "help": "One attempt to check a connection out of a pgcommon pool (WithConn, RunInTx and helpers), by outcome; error includes acquire timeouts (context deadline exceeded while waiting) and a closed pool. An attempt abandoned by the caller (context cancelled) is not counted under either outcome; its wait is still recorded in platform_db_pool_acquire_duration_seconds.",
+      "labels": [
+        "pool",
+        "outcome"
+      ],
+      "label_values": {
+        "outcome": [
+          "success",
+          "error"
+        ]
+      },
+      "aggregation": "Acquire failure ratio: sum by (domain, service, pool) (rate(platform_db_pool_acquires_total{outcome=\"error\"}[5m])) / sum by (domain, service, pool) (rate(platform_db_pool_acquires_total[5m])).",
+      "cardinality": "pool (≤3) × outcome (2).",
+      "governance_notes": "New platform_* name (not among the standard's canonical or registry-proposed examples); submitted under the Registry Ratification Requirement. Reviewers should also decide whether the pool/query dimensions belong under a generic shared metric instead — platform_dependency_request_seconds{dependency=\"postgres\"} / platform_retry_total — once those names have ONE approved label vocabulary: today IAM services register them with conflicting label sets ({target_service,endpoint} vs {dependency,operation,outcome}; {event_type,reason}), so pgcommon cannot join them without breaking registration in those services."
+    },
+    {
+      "name": "platform_db_pool_acquire_duration_seconds",
+      "tier": "platform",
+      "owner": "platform-pgcommon",
+      "type": "histogram",
+      "unit": "seconds",
+      "buckets": "db_pool_acquire",
+      "status": "proposed",
+      "help": "Time a caller waited to check a connection out of a pgcommon pool, recorded for every attempt including failures — a saturation signal.",
+      "labels": [
+        "pool"
+      ],
+      "aggregation": "p99 wait per pool: histogram_quantile(0.99, sum by (le, domain, service, pool) (rate(platform_db_pool_acquire_duration_seconds_bucket[5m]))).",
+      "cardinality": "pool (≤3) × 8 buckets.",
+      "governance_notes": "New platform_* name (not among the standard's canonical or registry-proposed examples); submitted under the Registry Ratification Requirement. Reviewers should also decide whether the pool/query dimensions belong under a generic shared metric instead — platform_dependency_request_seconds{dependency=\"postgres\"} / platform_retry_total — once those names have ONE approved label vocabulary: today IAM services register them with conflicting label sets ({target_service,endpoint} vs {dependency,operation,outcome}; {event_type,reason}), so pgcommon cannot join them without breaking registration in those services."
+    },
+    {
+      "name": "platform_db_slow_queries_total",
+      "tier": "platform",
+      "owner": "platform-pgcommon",
+      "type": "counter",
+      "status": "proposed",
+      "help": "A statement whose wall time exceeded the pool's configured slow-query threshold (Config.SlowQueryThreshold). Counted for every occurrence, independent of log rate limiting. Library-internal statements (RLS GUC set_config, BEGIN / COMMIT / ROLLBACK, transaction timeouts, savepoints) are excluded.",
+      "labels": [
+        "pool"
+      ],
+      "aggregation": "Thresholds are per-service configuration, so compare trends within a service rather than absolute rates across services.",
+      "cardinality": "pool (≤3).",
+      "governance_notes": "New platform_* name (not among the standard's canonical or registry-proposed examples); submitted under the Registry Ratification Requirement. Reviewers should also decide whether the pool/query dimensions belong under a generic shared metric instead — platform_dependency_request_seconds{dependency=\"postgres\"} / platform_retry_total — once those names have ONE approved label vocabulary: today IAM services register them with conflicting label sets ({target_service,endpoint} vs {dependency,operation,outcome}; {event_type,reason}), so pgcommon cannot join them without breaking registration in those services."
+    },
+    {
+      "name": "platform_db_transaction_retries_total",
+      "tier": "platform",
+      "owner": "platform-pgcommon",
+      "type": "counter",
+      "status": "proposed",
+      "help": "A transaction attempt that failed with a retryable PostgreSQL error and was retried by RunInTxWithRetry*: deadlock (SQLSTATE 40P01) or serialization failure (40001).",
+      "labels": [
+        "pool",
+        "reason"
+      ],
+      "label_values": {
+        "reason": [
+          "deadlock",
+          "serialization"
+        ]
+      },
+      "aggregation": "Contention board: sum by (domain, service, reason) (rate(platform_db_transaction_retries_total[5m])).",
+      "cardinality": "pool (≤3) × reason (2).",
+      "governance_notes": "New platform_* name (not among the standard's canonical or registry-proposed examples); submitted under the Registry Ratification Requirement. Reviewers should also decide whether the pool/query dimensions belong under a generic shared metric instead — platform_dependency_request_seconds{dependency=\"postgres\"} / platform_retry_total — once those names have ONE approved label vocabulary: today IAM services register them with conflicting label sets ({target_service,endpoint} vs {dependency,operation,outcome}; {event_type,reason}), so pgcommon cannot join them without breaking registration in those services."
+    },
+    {
+      "name": "platform_db_transaction_retries_exhausted_total",
+      "tier": "platform",
+      "owner": "platform-pgcommon",
+      "type": "counter",
+      "status": "proposed",
+      "help": "A RunInTxWithRetry* call that used every attempt and still failed with a retryable error — the operation failed for the caller.",
+      "labels": [
+        "pool",
+        "reason"
+      ],
+      "label_values": {
+        "reason": [
+          "deadlock",
+          "serialization"
+        ]
+      },
+      "aggregation": "Any sustained non-zero rate is user-visible failure: sum by (domain, service) (increase(platform_db_transaction_retries_exhausted_total[15m])) > 0.",
+      "cardinality": "pool (≤3) × reason (2).",
+      "governance_notes": "New platform_* name (not among the standard's canonical or registry-proposed examples); submitted under the Registry Ratification Requirement. Reviewers should also decide whether the pool/query dimensions belong under a generic shared metric instead — platform_dependency_request_seconds{dependency=\"postgres\"} / platform_retry_total — once those names have ONE approved label vocabulary: today IAM services register them with conflicting label sets ({target_service,endpoint} vs {dependency,operation,outcome}; {event_type,reason}), so pgcommon cannot join them without breaking registration in those services."
+    },
+    {
+      "name": "platform_db_pool_connections",
+      "tier": "platform",
+      "owner": "platform-pgcommon",
+      "type": "gauge",
+      "status": "proposed",
+      "help": "Connections currently held by a pgcommon pool, by state: idle (available), acquired (checked out), constructing (being dialled). Sampled at scrape time from the pool's statistics.",
+      "labels": [
+        "pool",
+        "state"
+      ],
+      "label_values": {
+        "state": [
+          "idle",
+          "acquired",
+          "constructing"
+        ]
+      },
+      "aggregation": "Utilisation: sum by (domain, service, pool) (platform_db_pool_connections{state=\"acquired\"}) / sum by (domain, service, pool) (platform_db_pool_max_connections). Total = sum over state.",
+      "cardinality": "pool (≤3) × state (3).",
+      "governance_notes": "New platform_* name (not among the standard's canonical or registry-proposed examples); submitted under the Registry Ratification Requirement. Reviewers should also decide whether the pool/query dimensions belong under a generic shared metric instead — platform_dependency_request_seconds{dependency=\"postgres\"} / platform_retry_total — once those names have ONE approved label vocabulary: today IAM services register them with conflicting label sets ({target_service,endpoint} vs {dependency,operation,outcome}; {event_type,reason}), so pgcommon cannot join them without breaking registration in those services."
+    },
+    {
+      "name": "platform_db_pool_max_connections",
+      "tier": "platform",
+      "owner": "platform-pgcommon",
+      "type": "gauge",
+      "status": "proposed",
+      "help": "The configured connection limit of a pgcommon pool (Config.MaxConns).",
+      "labels": [
+        "pool"
+      ],
+      "aggregation": "Denominator for utilisation (see platform_db_pool_connections).",
+      "cardinality": "pool (≤3).",
+      "governance_notes": "New platform_* name (not among the standard's canonical or registry-proposed examples); submitted under the Registry Ratification Requirement. Reviewers should also decide whether the pool/query dimensions belong under a generic shared metric instead — platform_dependency_request_seconds{dependency=\"postgres\"} / platform_retry_total — once those names have ONE approved label vocabulary: today IAM services register them with conflicting label sets ({target_service,endpoint} vs {dependency,operation,outcome}; {event_type,reason}), so pgcommon cannot join them without breaking registration in those services."
+    },
+    {
+      "name": "platform_db_pool_empty_acquires_total",
+      "tier": "platform",
+      "owner": "platform-pgcommon",
+      "type": "counter",
+      "status": "proposed",
+      "help": "Cumulative acquires that had to wait because every connection was checked out (pool exhausted). A rising rate means the pool is undersized for the service's concurrency.",
+      "labels": [
+        "pool"
+      ],
+      "aggregation": "Saturation: sum by (domain, service, pool) (rate(platform_db_pool_empty_acquires_total[5m])) > 0.",
+      "cardinality": "pool (≤3).",
+      "governance_notes": "New platform_* name (not among the standard's canonical or registry-proposed examples); submitted under the Registry Ratification Requirement. Reviewers should also decide whether the pool/query dimensions belong under a generic shared metric instead — platform_dependency_request_seconds{dependency=\"postgres\"} / platform_retry_total — once those names have ONE approved label vocabulary: today IAM services register them with conflicting label sets ({target_service,endpoint} vs {dependency,operation,outcome}; {event_type,reason}), so pgcommon cannot join them without breaking registration in those services."
+    },
+    {
+      "name": "iam_auth_events_total",
+      "tier": "domain",
+      "domain": "iam",
+      "type": "counter",
+      "status": "proposed",
+      "help": "Authentication events (login, logout, token refresh, MFA challenge) observed by an IAM service.",
+      "labels": [
+        "event_type",
+        "outcome"
+      ],
+      "aggregation": "sum by (environment, event_type, outcome) of rate(); identical meaning in every IAM service."
+    },
+    {
+      "name": "iam_tenant_resolution_total",
+      "tier": "domain",
+      "domain": "iam",
+      "type": "counter",
+      "status": "proposed",
+      "help": "Attempts to resolve the tenant of a request or event.",
+      "labels": [
+        "strategy",
+        "outcome"
+      ],
+      "aggregation": "sum by (environment, strategy, outcome) of rate()."
+    },
+    {
+      "name": "iam_identity_sync_total",
+      "tier": "domain",
+      "domain": "iam",
+      "type": "counter",
+      "status": "proposed",
+      "help": "Identity records synchronised from an external identity source.",
+      "labels": [
+        "source",
+        "outcome"
+      ],
+      "aggregation": "sum by (environment, source, outcome) of rate()."
+    },
+    {
+      "name": "iam_realm_operations_total",
+      "tier": "domain",
+      "domain": "iam",
+      "type": "counter",
+      "status": "proposed",
+      "help": "Administrative realm operations (create, update, delete, configure).",
+      "labels": [
+        "operation",
+        "outcome"
+      ],
+      "aggregation": "sum by (environment, operation, outcome) of rate()."
+    },
+    {
+      "name": "build_info",
+      "tier": "legacy",
+      "type": "gauge",
+      "status": "removed",
+      "help": "Legacy build info gauge.",
+      "labels": [],
+      "replacements": [
+        "platform_build_info"
+      ],
+      "sunset": "Removed with no compatibility period: no library emitting it had been deployed to production or dev, so there were no dashboards, alerts or series to migrate.",
+      "owner": "platform-gincommon"
+    },
+    {
+      "name": "http_requests_total",
+      "tier": "legacy",
+      "type": "counter",
+      "status": "removed",
+      "help": "Legacy HTTP request counter.",
+      "labels": [
+        "method",
+        "route",
+        "status_class",
+        "error_class"
+      ],
+      "replacements": [
+        "platform_http_requests_total"
+      ],
+      "sunset": "Removed with no compatibility period: no library emitting it had been deployed to production or dev, so there were no dashboards, alerts or series to migrate.",
+      "owner": "platform-gincommon"
+    },
+    {
+      "name": "http_request_duration_seconds",
+      "tier": "legacy",
+      "type": "histogram",
+      "unit": "seconds",
+      "status": "removed",
+      "help": "Legacy HTTP latency histogram.",
+      "labels": [
+        "method",
+        "route",
+        "status_class",
+        "error_class"
+      ],
+      "replacements": [
+        "platform_http_request_duration_seconds"
+      ],
+      "sunset": "Removed with no compatibility period: no library emitting it had been deployed to production or dev, so there were no dashboards, alerts or series to migrate.",
+      "owner": "platform-gincommon"
+    },
+    {
+      "name": "http_request_size_bytes",
+      "tier": "legacy",
+      "type": "histogram",
+      "unit": "bytes",
+      "status": "removed",
+      "help": "Legacy HTTP request size histogram.",
+      "labels": [
+        "method",
+        "route",
+        "status_class",
+        "error_class"
+      ],
+      "replacements": [
+        "platform_http_request_size_bytes"
+      ],
+      "sunset": "Removed with no compatibility period: no library emitting it had been deployed to production or dev, so there were no dashboards, alerts or series to migrate.",
+      "owner": "platform-gincommon"
+    },
+    {
+      "name": "http_response_size_bytes",
+      "tier": "legacy",
+      "type": "histogram",
+      "unit": "bytes",
+      "status": "removed",
+      "help": "Legacy HTTP response size histogram.",
+      "labels": [
+        "method",
+        "route",
+        "status_class",
+        "error_class"
+      ],
+      "replacements": [
+        "platform_http_response_size_bytes"
+      ],
+      "sunset": "Removed with no compatibility period: no library emitting it had been deployed to production or dev, so there were no dashboards, alerts or series to migrate.",
+      "owner": "platform-gincommon"
+    },
+    {
+      "name": "http_active_requests",
+      "tier": "legacy",
+      "type": "gauge",
+      "status": "removed",
+      "help": "Legacy in-flight HTTP requests gauge.",
+      "labels": [
+        "route"
+      ],
+      "replacements": [
+        "platform_http_active_requests"
+      ],
+      "sunset": "Removed with no compatibility period: no library emitting it had been deployed to production or dev, so there were no dashboards, alerts or series to migrate.",
+      "owner": "platform-gincommon"
+    },
+    {
+      "name": "http_panic_total",
+      "tier": "legacy",
+      "type": "counter",
+      "status": "removed",
+      "help": "Legacy HTTP panic counter.",
+      "labels": [
+        "method",
+        "route"
+      ],
+      "replacements": [
+        "platform_http_panics_total"
+      ],
+      "sunset": "Removed with no compatibility period: no library emitting it had been deployed to production or dev, so there were no dashboards, alerts or series to migrate.",
+      "owner": "platform-gincommon"
+    },
+    {
+      "name": "rate_limited_requests_total",
+      "tier": "legacy",
+      "type": "counter",
+      "status": "removed",
+      "help": "Legacy HTTP 429 counter.",
+      "labels": [
+        "method",
+        "route"
+      ],
+      "replacements": [
+        "platform_http_rate_limited_requests_total"
+      ],
+      "sunset": "Removed with no compatibility period: no library emitting it had been deployed to production or dev, so there were no dashboards, alerts or series to migrate.",
+      "owner": "platform-gincommon"
+    },
+    {
+      "name": "http_request_timeout_total",
+      "tier": "legacy",
+      "type": "counter",
+      "status": "removed",
+      "help": "Legacy HTTP timeout counter.",
+      "labels": [
+        "method",
+        "route"
+      ],
+      "replacements": [
+        "platform_http_request_timeouts_total"
+      ],
+      "sunset": "Removed with no compatibility period: no library emitting it had been deployed to production or dev, so there were no dashboards, alerts or series to migrate.",
+      "owner": "platform-gincommon"
+    },
+    {
+      "name": "grpc_server_handled_total",
+      "tier": "legacy",
+      "type": "counter",
+      "status": "removed",
+      "help": "Legacy gRPC RPC counter.",
+      "labels": [
+        "method",
+        "grpc_code",
+        "status_class",
+        "error_class"
+      ],
+      "replacements": [
+        "platform_grpc_server_handled_total"
+      ],
+      "sunset": "Removed with no compatibility period: no library emitting it had been deployed to production or dev, so there were no dashboards, alerts or series to migrate.",
+      "owner": "platform-gincommon"
+    },
+    {
+      "name": "grpc_server_handling_seconds",
+      "tier": "legacy",
+      "type": "histogram",
+      "unit": "seconds",
+      "status": "removed",
+      "help": "Legacy gRPC latency histogram.",
+      "labels": [
+        "method",
+        "status_class",
+        "error_class"
+      ],
+      "replacements": [
+        "platform_grpc_server_handling_seconds"
+      ],
+      "sunset": "Removed with no compatibility period: no library emitting it had been deployed to production or dev, so there were no dashboards, alerts or series to migrate.",
+      "owner": "platform-gincommon"
+    },
+    {
+      "name": "grpc_server_request_size_bytes",
+      "tier": "legacy",
+      "type": "histogram",
+      "unit": "bytes",
+      "status": "removed",
+      "help": "Legacy gRPC request size histogram.",
+      "labels": [
+        "method",
+        "status_class",
+        "error_class"
+      ],
+      "replacements": [
+        "platform_grpc_server_request_size_bytes"
+      ],
+      "sunset": "Removed with no compatibility period: no library emitting it had been deployed to production or dev, so there were no dashboards, alerts or series to migrate.",
+      "owner": "platform-gincommon"
+    },
+    {
+      "name": "grpc_server_response_size_bytes",
+      "tier": "legacy",
+      "type": "histogram",
+      "unit": "bytes",
+      "status": "removed",
+      "help": "Legacy gRPC response size histogram.",
+      "labels": [
+        "method",
+        "status_class",
+        "error_class"
+      ],
+      "replacements": [
+        "platform_grpc_server_response_size_bytes"
+      ],
+      "sunset": "Removed with no compatibility period: no library emitting it had been deployed to production or dev, so there were no dashboards, alerts or series to migrate.",
+      "owner": "platform-gincommon"
+    },
+    {
+      "name": "grpc_server_inflight_requests",
+      "tier": "legacy",
+      "type": "gauge",
+      "status": "removed",
+      "help": "Legacy in-flight gRPC gauge.",
+      "labels": [
+        "method"
+      ],
+      "replacements": [
+        "platform_grpc_server_inflight_requests"
+      ],
+      "sunset": "Removed with no compatibility period: no library emitting it had been deployed to production or dev, so there were no dashboards, alerts or series to migrate.",
+      "owner": "platform-gincommon"
+    },
+    {
+      "name": "grpc_rate_limited_requests_total",
+      "tier": "legacy",
+      "type": "counter",
+      "status": "removed",
+      "help": "Legacy gRPC ResourceExhausted counter.",
+      "labels": [
+        "method"
+      ],
+      "replacements": [
+        "platform_grpc_rate_limited_requests_total"
+      ],
+      "sunset": "Removed with no compatibility period: no library emitting it had been deployed to production or dev, so there were no dashboards, alerts or series to migrate.",
+      "owner": "platform-gincommon"
+    },
+    {
+      "name": "grpc_panic_total",
+      "tier": "legacy",
+      "type": "counter",
+      "status": "removed",
+      "help": "Legacy gRPC panic counter.",
+      "labels": [
+        "method"
+      ],
+      "replacements": [
+        "platform_grpc_panics_total"
+      ],
+      "sunset": "Removed with no compatibility period: no library emitting it had been deployed to production or dev, so there were no dashboards, alerts or series to migrate.",
+      "owner": "platform-gincommon"
+    },
+    {
+      "name": "platform_events_build_info",
+      "tier": "legacy",
+      "owner": "platform-events",
+      "type": "gauge",
+      "status": "removed",
+      "help": "Legacy build-info gauge (always 1) carrying the service name and the service's build version.",
+      "labels": [
+        "version"
+      ],
+      "replacements": [
+        "platform_library_info"
+      ],
+      "sunset": "Removed with no compatibility period: no library emitting it had been deployed to production or dev, so there were no dashboards, alerts or series to migrate."
+    },
+    {
+      "name": "events_published_total",
+      "tier": "legacy",
+      "owner": "platform-events",
+      "type": "counter",
+      "status": "removed",
+      "help": "Legacy publish counter (status=success|error).",
+      "labels": [
+        "topic",
+        "event_type",
+        "status"
+      ],
+      "replacements": [
+        "platform_messages_published_total"
+      ],
+      "sunset": "Removed with no compatibility period: no library emitting it had been deployed to production or dev, so there were no dashboards, alerts or series to migrate."
+    },
+    {
+      "name": "events_publish_duration_seconds",
+      "tier": "legacy",
+      "owner": "platform-events",
+      "type": "histogram",
+      "unit": "seconds",
+      "status": "removed",
+      "help": "Legacy SNS publish duration.",
+      "labels": [
+        "topic",
+        "event_type"
+      ],
+      "replacements": [
+        "platform_dependency_request_seconds"
+      ],
+      "sunset": "Removed with no compatibility period: no library emitting it had been deployed to production or dev, so there were no dashboards, alerts or series to migrate."
+    },
+    {
+      "name": "events_consumed_total",
+      "tier": "legacy",
+      "owner": "platform-events",
+      "type": "counter",
+      "status": "removed",
+      "help": "Legacy consume counter (status=success|error|malformed|dlq_success|dlq_error).",
+      "labels": [
+        "queue",
+        "event_type",
+        "status"
+      ],
+      "replacements": [
+        "platform_messages_processed_total",
+        "platform_messages_failed_total",
+        "platform_dlq_messages_total"
+      ],
+      "sunset": "Removed with no compatibility period: no library emitting it had been deployed to production or dev, so there were no dashboards, alerts or series to migrate."
+    },
+    {
+      "name": "events_consume_duration_seconds",
+      "tier": "legacy",
+      "owner": "platform-events",
+      "type": "histogram",
+      "unit": "seconds",
+      "status": "removed",
+      "help": "Legacy handler duration.",
+      "labels": [
+        "queue",
+        "event_type"
+      ],
+      "replacements": [
+        "platform_message_processing_duration_seconds"
+      ],
+      "sunset": "Removed with no compatibility period: no library emitting it had been deployed to production or dev, so there were no dashboards, alerts or series to migrate."
+    },
+    {
+      "name": "events_codec_encode_total",
+      "tier": "legacy",
+      "owner": "platform-events",
+      "type": "counter",
+      "status": "removed",
+      "help": "Legacy codec encode counter (status=success|noop|error).",
+      "labels": [
+        "topic",
+        "event_type",
+        "status"
+      ],
+      "replacements": [
+        "platform_dependency_request_seconds"
+      ],
+      "sunset": "Removed with no compatibility period: no library emitting it had been deployed to production or dev, so there were no dashboards, alerts or series to migrate."
+    },
+    {
+      "name": "events_codec_encode_duration_seconds",
+      "tier": "legacy",
+      "owner": "platform-events",
+      "type": "histogram",
+      "unit": "seconds",
+      "status": "removed",
+      "help": "Legacy codec encode duration.",
+      "labels": [
+        "topic",
+        "event_type"
+      ],
+      "replacements": [
+        "platform_dependency_request_seconds"
+      ],
+      "sunset": "Removed with no compatibility period: no library emitting it had been deployed to production or dev, so there were no dashboards, alerts or series to migrate."
+    },
+    {
+      "name": "events_codec_decode_total",
+      "tier": "legacy",
+      "owner": "platform-events",
+      "type": "counter",
+      "status": "removed",
+      "help": "Legacy codec decode counter (status=success|error).",
+      "labels": [
+        "queue",
+        "event_type",
+        "status"
+      ],
+      "replacements": [
+        "platform_dependency_request_seconds"
+      ],
+      "sunset": "Removed with no compatibility period: no library emitting it had been deployed to production or dev, so there were no dashboards, alerts or series to migrate."
+    },
+    {
+      "name": "events_codec_decode_duration_seconds",
+      "tier": "legacy",
+      "owner": "platform-events",
+      "type": "histogram",
+      "unit": "seconds",
+      "status": "removed",
+      "help": "Legacy codec decode duration.",
+      "labels": [
+        "queue",
+        "event_type"
+      ],
+      "replacements": [
+        "platform_dependency_request_seconds"
+      ],
+      "sunset": "Removed with no compatibility period: no library emitting it had been deployed to production or dev, so there were no dashboards, alerts or series to migrate."
+    },
+    {
+      "name": "outbox_pending_total",
+      "tier": "legacy",
+      "owner": "platform-events",
+      "type": "gauge",
+      "status": "removed",
+      "help": "Legacy pending-outbox gauge (-1 = stale reading).",
+      "labels": [],
+      "replacements": [
+        "platform_outbox_pending_events"
+      ],
+      "sunset": "Removed with no compatibility period: no library emitting it had been deployed to production or dev, so there were no dashboards, alerts or series to migrate."
+    },
+    {
+      "name": "outbox_leased_total",
+      "tier": "legacy",
+      "owner": "platform-events",
+      "type": "gauge",
+      "status": "removed",
+      "help": "Legacy leased-outbox gauge.",
+      "labels": [],
+      "replacements": [
+        "platform_outbox_leased_events"
+      ],
+      "sunset": "Removed with no compatibility period: no library emitting it had been deployed to production or dev, so there were no dashboards, alerts or series to migrate."
+    },
+    {
+      "name": "outbox_published_total",
+      "tier": "legacy",
+      "owner": "platform-events",
+      "type": "counter",
+      "status": "removed",
+      "help": "Legacy outbox publish outcome counter.",
+      "labels": [
+        "event_type",
+        "status"
+      ],
+      "replacements": [
+        "platform_outbox_publish_attempts_total"
+      ],
+      "sunset": "Removed with no compatibility period: no library emitting it had been deployed to production or dev, so there were no dashboards, alerts or series to migrate."
+    },
+    {
+      "name": "outbox_attempts_total",
+      "tier": "legacy",
+      "owner": "platform-events",
+      "type": "counter",
+      "status": "removed",
+      "help": "Legacy outbox publish attempt counter.",
+      "labels": [
+        "event_type"
+      ],
+      "replacements": [
+        "platform_outbox_publish_attempts_total",
+        "platform_retry_total"
+      ],
+      "sunset": "Removed with no compatibility period: no library emitting it had been deployed to production or dev, so there were no dashboards, alerts or series to migrate."
+    },
+    {
+      "name": "outbox_dead_letters_total",
+      "tier": "legacy",
+      "owner": "platform-events",
+      "type": "counter",
+      "status": "removed",
+      "help": "Legacy outbox dead-letter counter.",
+      "labels": [
+        "event_type"
+      ],
+      "replacements": [
+        "platform_dlq_messages_total"
+      ],
+      "sunset": "Removed with no compatibility period: no library emitting it had been deployed to production or dev, so there were no dashboards, alerts or series to migrate."
+    },
+    {
+      "name": "outbox_dead_letters_reprocessed_total",
+      "tier": "legacy",
+      "owner": "platform-events",
+      "type": "counter",
+      "status": "removed",
+      "help": "Legacy reprocessed dead-letter counter.",
+      "labels": [],
+      "replacements": [
+        "platform_outbox_dead_letter_operations_total"
+      ],
+      "sunset": "Removed with no compatibility period: no library emitting it had been deployed to production or dev, so there were no dashboards, alerts or series to migrate."
+    },
+    {
+      "name": "outbox_dead_letters_discarded_total",
+      "tier": "legacy",
+      "owner": "platform-events",
+      "type": "counter",
+      "status": "removed",
+      "help": "Legacy discarded dead-letter counter.",
+      "labels": [],
+      "replacements": [
+        "platform_outbox_dead_letter_operations_total"
+      ],
+      "sunset": "Removed with no compatibility period: no library emitting it had been deployed to production or dev, so there were no dashboards, alerts or series to migrate."
+    },
+    {
+      "name": "sqs_receive_errors_total",
+      "tier": "legacy",
+      "owner": "platform-events",
+      "type": "counter",
+      "status": "removed",
+      "help": "Legacy ReceiveMessage error counter.",
+      "labels": [
+        "queue"
+      ],
+      "replacements": [
+        "platform_dependency_request_seconds"
+      ],
+      "sunset": "Removed with no compatibility period: no library emitting it had been deployed to production or dev, so there were no dashboards, alerts or series to migrate."
+    },
+    {
+      "name": "sqs_delete_errors_total",
+      "tier": "legacy",
+      "owner": "platform-events",
+      "type": "counter",
+      "status": "removed",
+      "help": "Legacy DeleteMessage error counter.",
+      "labels": [
+        "queue"
+      ],
+      "replacements": [
+        "platform_dependency_request_seconds"
+      ],
+      "sunset": "Removed with no compatibility period: no library emitting it had been deployed to production or dev, so there were no dashboards, alerts or series to migrate."
+    },
+    {
+      "name": "sqs_visibility_extension_errors_total",
+      "tier": "legacy",
+      "owner": "platform-events",
+      "type": "counter",
+      "status": "removed",
+      "help": "Legacy ChangeMessageVisibility error counter.",
+      "labels": [
+        "queue"
+      ],
+      "replacements": [
+        "platform_dependency_request_seconds"
+      ],
+      "sunset": "Removed with no compatibility period: no library emitting it had been deployed to production or dev, so there were no dashboards, alerts or series to migrate."
+    },
+    {
+      "name": "outbox_poll_errors_total",
+      "tier": "legacy",
+      "owner": "platform-events",
+      "type": "counter",
+      "status": "removed",
+      "help": "Legacy outbox poll error counter.",
+      "labels": [],
+      "replacements": [
+        "platform_outbox_errors_total"
+      ],
+      "sunset": "Removed with no compatibility period: no library emitting it had been deployed to production or dev, so there were no dashboards, alerts or series to migrate."
+    },
+    {
+      "name": "outbox_unmarshal_errors_total",
+      "tier": "legacy",
+      "owner": "platform-events",
+      "type": "counter",
+      "status": "removed",
+      "help": "Legacy outbox unmarshal error counter.",
+      "labels": [],
+      "replacements": [
+        "platform_outbox_errors_total"
+      ],
+      "sunset": "Removed with no compatibility period: no library emitting it had been deployed to production or dev, so there were no dashboards, alerts or series to migrate."
+    },
+    {
+      "name": "outbox_mark_published_errors_total",
+      "tier": "legacy",
+      "owner": "platform-events",
+      "type": "counter",
+      "status": "removed",
+      "help": "Legacy MarkPublished error counter.",
+      "labels": [],
+      "replacements": [
+        "platform_outbox_errors_total"
+      ],
+      "sunset": "Removed with no compatibility period: no library emitting it had been deployed to production or dev, so there were no dashboards, alerts or series to migrate."
+    },
+    {
+      "name": "events_inbox_duplicates_total",
+      "tier": "legacy",
+      "owner": "platform-events",
+      "type": "counter",
+      "status": "removed",
+      "help": "Legacy inbox duplicate counter.",
+      "labels": [
+        "consumer"
+      ],
+      "replacements": [
+        "platform_duplicate_messages_total"
+      ],
+      "sunset": "Removed with no compatibility period: no library emitting it had been deployed to production or dev, so there were no dashboards, alerts or series to migrate."
+    },
+    {
+      "name": "events_dlq_forwarded_total",
+      "tier": "legacy",
+      "owner": "platform-events",
+      "type": "counter",
+      "status": "removed",
+      "help": "Legacy DLQ forward counter (status=success|error).",
+      "labels": [
+        "queue",
+        "event_type",
+        "status"
+      ],
+      "replacements": [
+        "platform_dlq_messages_total"
+      ],
+      "sunset": "Removed with no compatibility period: no library emitting it had been deployed to production or dev, so there were no dashboards, alerts or series to migrate."
+    },
+    {
+      "name": "events_oversized_event_type_label_total",
+      "tier": "legacy",
+      "owner": "platform-events",
+      "type": "counter",
+      "status": "removed",
+      "help": "Legacy oversized event_type counter.",
+      "labels": [],
+      "replacements": [
+        "platform_telemetry_label_overflow_total"
+      ],
+      "sunset": "Removed with no compatibility period: no library emitting it had been deployed to production or dev, so there were no dashboards, alerts or series to migrate."
+    },
+    {
+      "name": "pgcommon_query_total",
+      "tier": "legacy",
+      "owner": "platform-pgcommon",
+      "type": "counter",
+      "status": "removed",
+      "help": "Legacy query counter (status=success|error).",
+      "labels": [
+        "pool",
+        "operation",
+        "status"
+      ],
+      "replacements": [
+        "platform_db_queries_total"
+      ],
+      "sunset": "Removed with no compatibility period: no library emitting it had been deployed to production or dev, so there were no dashboards, alerts or series to migrate."
+    },
+    {
+      "name": "pgcommon_query_duration_seconds",
+      "tier": "legacy",
+      "owner": "platform-pgcommon",
+      "type": "histogram",
+      "unit": "seconds",
+      "status": "removed",
+      "help": "Legacy query duration histogram.",
+      "labels": [
+        "pool",
+        "operation"
+      ],
+      "replacements": [
+        "platform_db_query_duration_seconds"
+      ],
+      "sunset": "Removed with no compatibility period: no library emitting it had been deployed to production or dev, so there were no dashboards, alerts or series to migrate."
+    },
+    {
+      "name": "pgcommon_pool_acquire_total",
+      "tier": "legacy",
+      "owner": "platform-pgcommon",
+      "type": "counter",
+      "status": "removed",
+      "help": "Legacy acquire counter (status=success|error); caller-cancelled attempts are not counted.",
+      "labels": [
+        "pool",
+        "status"
+      ],
+      "replacements": [
+        "platform_db_pool_acquires_total"
+      ],
+      "sunset": "Removed with no compatibility period: no library emitting it had been deployed to production or dev, so there were no dashboards, alerts or series to migrate."
+    },
+    {
+      "name": "pgcommon_pool_acquire_duration_seconds",
+      "tier": "legacy",
+      "owner": "platform-pgcommon",
+      "type": "histogram",
+      "unit": "seconds",
+      "status": "removed",
+      "help": "Legacy acquire wait histogram.",
+      "labels": [
+        "pool"
+      ],
+      "replacements": [
+        "platform_db_pool_acquire_duration_seconds"
+      ],
+      "sunset": "Removed with no compatibility period: no library emitting it had been deployed to production or dev, so there were no dashboards, alerts or series to migrate."
+    },
+    {
+      "name": "pgcommon_slow_query_total",
+      "tier": "legacy",
+      "owner": "platform-pgcommon",
+      "type": "counter",
+      "status": "removed",
+      "help": "Legacy slow-query counter.",
+      "labels": [
+        "pool"
+      ],
+      "replacements": [
+        "platform_db_slow_queries_total"
+      ],
+      "sunset": "Removed with no compatibility period: no library emitting it had been deployed to production or dev, so there were no dashboards, alerts or series to migrate."
+    },
+    {
+      "name": "pgcommon_retry_total",
+      "tier": "legacy",
+      "owner": "platform-pgcommon",
+      "type": "counter",
+      "status": "removed",
+      "help": "Legacy transaction retry counter.",
+      "labels": [
+        "pool",
+        "reason"
+      ],
+      "replacements": [
+        "platform_db_transaction_retries_total"
+      ],
+      "sunset": "Removed with no compatibility period: no library emitting it had been deployed to production or dev, so there were no dashboards, alerts or series to migrate."
+    },
+    {
+      "name": "pgcommon_retry_exhausted_total",
+      "tier": "legacy",
+      "owner": "platform-pgcommon",
+      "type": "counter",
+      "status": "removed",
+      "help": "Legacy retries-exhausted counter.",
+      "labels": [
+        "pool",
+        "reason"
+      ],
+      "replacements": [
+        "platform_db_transaction_retries_exhausted_total"
+      ],
+      "sunset": "Removed with no compatibility period: no library emitting it had been deployed to production or dev, so there were no dashboards, alerts or series to migrate."
+    },
+    {
+      "name": "pgcommon_pool_total_conns",
+      "tier": "legacy",
+      "owner": "platform-pgcommon",
+      "type": "gauge",
+      "status": "removed",
+      "help": "Legacy total connections gauge (pool is a const label).",
+      "labels": [],
+      "replacements": [
+        "platform_db_pool_connections"
+      ],
+      "sunset": "Removed with no compatibility period: no library emitting it had been deployed to production or dev, so there were no dashboards, alerts or series to migrate."
+    },
+    {
+      "name": "pgcommon_pool_idle_conns",
+      "tier": "legacy",
+      "owner": "platform-pgcommon",
+      "type": "gauge",
+      "status": "removed",
+      "help": "Legacy idle connections gauge.",
+      "labels": [],
+      "replacements": [
+        "platform_db_pool_connections"
+      ],
+      "sunset": "Removed with no compatibility period: no library emitting it had been deployed to production or dev, so there were no dashboards, alerts or series to migrate."
+    },
+    {
+      "name": "pgcommon_pool_acquired_conns",
+      "tier": "legacy",
+      "owner": "platform-pgcommon",
+      "type": "gauge",
+      "status": "removed",
+      "help": "Legacy acquired connections gauge.",
+      "labels": [],
+      "replacements": [
+        "platform_db_pool_connections"
+      ],
+      "sunset": "Removed with no compatibility period: no library emitting it had been deployed to production or dev, so there were no dashboards, alerts or series to migrate."
+    },
+    {
+      "name": "pgcommon_pool_constructing_conns",
+      "tier": "legacy",
+      "owner": "platform-pgcommon",
+      "type": "gauge",
+      "status": "removed",
+      "help": "Legacy constructing connections gauge.",
+      "labels": [],
+      "replacements": [
+        "platform_db_pool_connections"
+      ],
+      "sunset": "Removed with no compatibility period: no library emitting it had been deployed to production or dev, so there were no dashboards, alerts or series to migrate."
+    },
+    {
+      "name": "pgcommon_pool_max_conns",
+      "tier": "legacy",
+      "owner": "platform-pgcommon",
+      "type": "gauge",
+      "status": "removed",
+      "help": "Legacy max connections gauge.",
+      "labels": [],
+      "replacements": [
+        "platform_db_pool_max_connections"
+      ],
+      "sunset": "Removed with no compatibility period: no library emitting it had been deployed to production or dev, so there were no dashboards, alerts or series to migrate."
+    },
+    {
+      "name": "pgcommon_pool_empty_acquire_total",
+      "tier": "legacy",
+      "owner": "platform-pgcommon",
+      "type": "counter",
+      "status": "removed",
+      "help": "Legacy cumulative empty-acquire counter.",
+      "labels": [],
+      "replacements": [
+        "platform_db_pool_empty_acquires_total"
+      ],
+      "sunset": "Removed with no compatibility period: no library emitting it had been deployed to production or dev, so there were no dashboards, alerts or series to migrate."
+    },
+    {
+      "name": "pgcommon_build_info",
+      "tier": "legacy",
+      "owner": "platform-pgcommon-py",
+      "type": "gauge",
+      "status": "removed",
+      "help": "Legacy build info gauge of the Python port platform-pgcommon-py (no Go counterpart).",
+      "labels": [],
+      "replacements": [
+        "platform_library_info"
+      ],
+      "sunset": "Removed with no compatibility period: no library emitting it had been deployed to production or dev, so there were no dashboards, alerts or series to migrate.",
+      "governance_notes": "No successor is emitted yet: neither platform-pgcommon nor platform-pgcommon-py emits platform_library_info{library=\"platform-pgcommon\"}. Adopt it in Go first, then port."
+    },
+    {
+      "name": "grpc_requests_total",
+      "tier": "legacy",
+      "owner": "platform-fastapicommon",
+      "type": "counter",
+      "status": "removed",
+      "help": "Pre-standard fastapicommon gRPC metric (Python port only).",
+      "labels": [
+        "method",
+        "grpc_code"
+      ],
+      "replacements": [
+        "platform_grpc_server_handled_total"
+      ],
+      "sunset": "Removed with no compatibility period: no library emitting it had been deployed to production or dev, so there were no dashboards, alerts or series to migrate."
+    },
+    {
+      "name": "grpc_request_duration_seconds",
+      "tier": "legacy",
+      "owner": "platform-fastapicommon",
+      "type": "histogram",
+      "unit": "seconds",
+      "status": "removed",
+      "help": "Pre-standard fastapicommon gRPC metric (Python port only).",
+      "labels": [
+        "method"
+      ],
+      "replacements": [
+        "platform_grpc_server_handling_seconds"
+      ],
+      "sunset": "Removed with no compatibility period: no library emitting it had been deployed to production or dev, so there were no dashboards, alerts or series to migrate."
+    }
+  ]
+}

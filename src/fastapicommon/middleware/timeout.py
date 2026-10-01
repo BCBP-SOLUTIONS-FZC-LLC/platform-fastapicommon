@@ -8,10 +8,15 @@ from starlette.requests import Request
 from starlette.responses import JSONResponse, Response
 
 from fastapicommon.context import get_request_context_or_none
+from fastapicommon.metrics.platform import http_route_label, platform_metrics
 
 
 class TimeoutMiddleware(BaseHTTPMiddleware):
-    """Cancels requests that exceed ``timeout_seconds`` and returns 504 Gateway Timeout."""
+    """Cancels requests that exceed ``timeout_seconds`` and returns 504 Gateway Timeout.
+
+    Each timeout is counted in ``platform_http_request_timeouts_total`` once platform metrics
+    are enabled (Go: ``RecordHTTPTimeout`` in gincommon's ``TimeoutMiddleware``).
+    """
 
     def __init__(self, app: Starlette, timeout_seconds: float = 30.0) -> None:
         super().__init__(app)
@@ -21,6 +26,9 @@ class TimeoutMiddleware(BaseHTTPMiddleware):
         try:
             return await asyncio.wait_for(call_next(request), timeout=self.timeout_seconds)
         except TimeoutError:
+            platform = platform_metrics()
+            if platform is not None:
+                platform.record_http_timeout(request.method, http_route_label(request.scope))
             # Same {error, status, trace_id, request_id} shape as fastapicommon.exceptions —
             # ContextMiddleware runs outermost (see bootstrap.create_platform_app), so the
             # RequestContext is already bound here.

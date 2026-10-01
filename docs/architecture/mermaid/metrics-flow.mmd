@@ -1,30 +1,29 @@
 flowchart TD
-    subgraph init["Module import (once per process — no explicit Init call needed)"]
-        A["fastapicommon.metrics.definitions\nmodule-level Counter/Histogram objects\nregistered on prometheus_client's default REGISTRY at import time"]
+    subgraph init["Startup — init_metrics (create_platform_app / ContextServerInterceptor(settings))"]
+        A0{"enable_metrics?"} -->|no| A1["nothing initialized\n(no domain needed)"]
+        A0 -->|yes| A2{"domain set?\n(observability_domain or OBSERVABILITY_DOMAIN)"}
+        A2 -->|no| AX["raise ValueError\n(names OBSERVABILITY_DOMAIN)"]
+        A2 -->|yes| A3["resolve + validate identity against registry.json\n(domain, service, environment)"]
+        A3 --> A["PlatformMetrics: platform_* collectors\nregistered on REGISTRY (first call wins)"]
     end
 
     subgraph http["Per HTTP request — PrometheusMiddleware"]
-        B([call_next request]) --> C["start = time.perf_counter()"]
-        C --> D[await call_next request]
-        D --> E["route = request.scope.get('route')\npath = route.path if route else request.url.path"]
-        E --> F["HTTP_REQUESTS_TOTAL.labels(method, path, status_code).inc()"]
-        F --> G["HTTP_REQUEST_DURATION_SECONDS.labels(method, path).observe(duration)"]
+        B([call_next request]) --> C["route = http_route_label(scope)\n(Gin-style template or 'unknown')"]
+        C --> D["platform_http_active_requests +1\nawait call_next request"]
+        D --> F["platform_http_requests_total / _request_duration_seconds\n_request_size_bytes / _response_size_bytes\n{method, route, status_class, error_class}"]
+        D -.->|exception| P["recorded as 500 + platform_http_panics_total, re-raised"]
     end
 
     subgraph grpcflow["Per gRPC unary-unary call — ContextServerInterceptor"]
         H([wrapped_behavior request, context]) --> I["original_behavior(request, context)"]
-        I --> J["record_grpc_request(method, status_code, duration_seconds)"]
-        J --> K["GRPC_REQUESTS_TOTAL.labels(method, status_code).inc()"]
-        J --> L["GRPC_REQUEST_DURATION_SECONDS.labels(method).observe(duration_seconds)"]
+        I --> K["platform_grpc_server_handled_total / _handling_seconds\n_request_size_bytes / _response_size_bytes\n{grpc_method, ...}"]
     end
 
     subgraph expose["Exposition"]
         M["GET /metrics — metrics_router\n(registered only if settings.enable_metrics)"]
-        M --> N["generate_latest()\nContent-Type: CONTENT_TYPE_LATEST"]
+        M --> N["generate_latest(metrics_registry())\nContent-Type: CONTENT_TYPE_LATEST"]
     end
 
     A -.-> F
-    A -.-> G
     A -.-> K
-    A -.-> L
     A -.-> N

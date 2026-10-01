@@ -25,7 +25,7 @@ sequenceDiagram
         TM -->>- PM: response
     end
 
-    Note over PM: duration = perf_counter() - start<br/>route = request.scope["route"] (path template)<br/>HTTP_REQUESTS_TOTAL.labels(method, path, status_code).inc()<br/>HTTP_REQUEST_DURATION_SECONDS.labels(method, path).observe(duration)
+    Note over PM: duration = perf_counter() - start<br/>route = http_route_label(scope) (Gin-style template or "unknown")<br/>platform_http_requests_total{method, route, status_class, error_class}.inc()<br/>platform_http_request_duration_seconds{...}.observe(duration)
 
     PM -->>- CM: response
     Note over CM: response.headers[x-request-id] = request_id<br/>response.headers[x-correlation-id] = correlation_id<br/>response.headers[X-Request-ID] = request_id<br/>response.headers[X-Trace-ID] = trace_id (if set)<br/>reset_request_context(token) in finally
