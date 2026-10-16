@@ -1,0 +1,195 @@
+# Reusable workflow — quality gate.
+# workflow hygiene · lock · format · lint · types · observability standard ·
+# gincommon parity · docs · CI script tests · vulnerabilities · Dockerfile pins ·
+# packaging.
+# Called by ci.yml and release.yml. Must pass before push/release; does NOT
+# gate trivy or smoke (those only need validate-test.yml). Ported from
+# platform-gincommon (via platform-eventcommon's Python port). The emitted
+# platform_* metrics are checked against the Platform Observability Registry
+# by tests/integration/test_metrics_compliance.py, in validate-test.
+name: Validate / Quality
+
+"on":
+  workflow_call:
+    inputs:
+      ref:
+        description: 'Git ref to check out (leave empty to use the caller ref)'
+        type: string
+        required: false
+        default: ''
+      skip:
+        description: >-
+          Skip the job (ci.yml: documentation-only change). Skipped here, not
+          at the caller, so the required check "<workflow> / <job>" still
+          reports (a skipped job counts as success for branch protection).
+        type: boolean
+        required: false
+        default: false
+      require_gincommon_parity:
+        description: >-
+          Fail (instead of warn) when platform-gincommon cannot be checked out for the
+          parity step — set on pushes to main and by release.yml, so nothing is merged or
+          released without the comparison; PRs (forks have no secrets) only warn.
+        type: boolean
+        required: false
+        default: false
+    secrets:
+      # The only secret this workflow reads (checkout of a private repo;
+      # github.token is the fallback). Callers pass it explicitly — no
+      # `secrets: inherit`, so PR test code never runs with other secrets
+      # in scope.
+      CI_REPO_READ_TOKEN:
+        required: false
+
+permissions:
+  contents: read
+
+env:
+  FORCE_JAVASCRIPT_ACTIONS_TO_NODE24: 'true'
+  # The platform-gincommon release whose Platform Observability Registry and reference
+  # Prometheus rules are vendored here byte for byte (the gincommon parity step below).
+  GINCOMMON_REF: v2.0.0
+
+jobs:
+  quality:
+    name: quality
+    if: ${{ !inputs.skip }}
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    env:
+      # Whether the private platform-gincommon repo can be checked out (parity step); a step's
+      # `if:` cannot read its own env, hence job level. Only the boolean, never the token.
+      HAS_REPO_READ_TOKEN: ${{ secrets.CI_REPO_READ_TOKEN != '' }}
+    steps:
+      - name: Checkout
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          ref: ${{ inputs.ref || github.ref }}
+          persist-credentials: false
+          token: ${{ secrets.CI_REPO_READ_TOKEN || github.token }}
+
+      - name: Install uv
+        uses: astral-sh/setup-uv@c771a70e6277c0a99b617c7a806ffedaca235ff9 # v9.0.0
+        with:
+          # The uv the Dockerfile pins, so CI and the image resolve and build alike.
+          version: '0.13.1'
+          python-version: '3.12'
+
+      # The Go repo's "Tidy check": uv.lock must match pyproject.toml.
+      - name: Lock check
+        run: |
+          if ! make lock-check; then
+            echo "::error file=uv.lock,title=Lock drift::uv.lock is stale for pyproject.toml — run 'uv lock' and commit the result."
+            exit 1
+          fi
+
+      # No private-package credential (see validate-test.yml).
+      - name: Install dependencies (uv sync from uv.lock)
+        run: uv sync --locked
+
+      # The Go repo's "Verify modules": the installed environment is consistent.
+      - name: Verify dependency resolution
+        run: uv pip check
+
+      # Workflow files must use literal operators, not HTML entity encodings.
+      - name: Reject HTML-escaped operators in workflow files
+        run: |
+          if grep -REn '&(gt|lt|amp);' .github/workflows/ .github/scripts/; then
+            echo "::error::Workflow or script files contain HTML entities. Use literal operators instead."
+            exit 1
+          fi
+
+      - name: Format check (ruff format + black --check)
+        run: |
+          if ! make format-check; then
+            echo "::error title=Format check::Not formatted — run 'make format'"
+            exit 1
+          fi
+
+      - name: Lint (ruff)
+        run: uv run --no-sync ruff check --output-format=github src tests examples
+
+      - name: Type check (mypy --strict)
+        run: uv run --no-sync mypy
+
+      # Enterprise Platform Observability Standard (gincommon's `make metrics-lint`): the
+      # vendored registry's self-check, the reference rules referencing registered
+      # platform_* names only, promtool check + unit tests of those rules (digest-pinned
+      # prom/prometheus image), and docs/observability/metric-registry.md drift.
+      # Emitted-metric compliance runs in validate-test (test_metrics_compliance.py).
+      - name: Observability standard
+        run: |
+          if ! make metrics-lint; then
+            echo "::error file=src/fastapicommon/metrics/registry.json,title=Observability standard::make metrics-lint failed — run it locally (make metrics-inventory regenerates the inventory)."
+            exit 1
+          fi
+
+      # Go is the source of truth: registry.json, docker/prometheus/rules and the generated
+      # metric-registry.md must equal platform-gincommon's at GINCOMMON_REF. The private repo
+      # is checked out with CI_REPO_READ_TOKEN, then moved out of the workspace so nothing else
+      # (ruff, pytest) sees it. Without the token (a fork PR) the step warns — never a silent
+      # pass; on main and for a release it fails.
+      - name: Check out platform-gincommon (parity)
+        id: go-checkout
+        if: env.HAS_REPO_READ_TOKEN == 'true'
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          repository: BCBP-SOLUTIONS-FZC-LLC/platform-gincommon
+          ref: ${{ env.GINCOMMON_REF }}
+          path: .platform-gincommon
+          persist-credentials: false
+          token: ${{ secrets.CI_REPO_READ_TOKEN }}
+
+      - name: gincommon parity (registry, reference rules, inventory)
+        run: |
+          if [ "${GO_CHECKOUT}" != success ]; then
+            if [ "${REQUIRE_PARITY}" = true ]; then
+              echo "::error title=gincommon parity not checked::platform-gincommon ${GINCOMMON_REF} could not be checked out (is CI_REPO_READ_TOKEN set, with read access to platform-gincommon?) — required on main and for a release."
+              exit 1
+            fi
+            echo "::warning title=gincommon parity not checked::CI_REPO_READ_TOKEN is not available to this run (fork PR?) — the vendored registry and rules were not compared with platform-gincommon ${GINCOMMON_REF}."
+            exit 0
+          fi
+          mv .platform-gincommon "${RUNNER_TEMP}/platform-gincommon"
+          make gincommon-parity GINCOMMON_DIR="${RUNNER_TEMP}/platform-gincommon"
+        env:
+          GO_CHECKOUT: ${{ steps.go-checkout.outcome }}
+          REQUIRE_PARITY: ${{ inputs.require_gincommon_parity }}
+
+      # Architecture diagrams: every docs/architecture/mermaid/*.mmd must be
+      # embedded byte-identically in ARCHITECTURE.md. ci.yml skips this job on
+      # docs-only changes (skip input); docs.yml runs the same check on those.
+      - name: Architecture diagram sync
+        run: make docs-check
+
+      # Regression tests for the CI scripts: detect-changes.sh's docs-only
+      # decision (renames, moves, deletions, spaces, '::' paths) and its log
+      # sanitising. A wrong docs-only verdict would skip every required check.
+      - name: CI script tests
+        run: make ci-scripts-test
+
+      # Locked runtime + dev dependencies (the image installs the same locked
+      # runtime set; Trivy scans the image separately in ci.yml).
+      - name: Vulnerability check (pip-audit)
+        run: |
+          if ! make vulncheck; then
+            echo "::error file=uv.lock,title=Vulnerability found::pip-audit detected vulnerabilities — run 'make vulncheck' locally to view details."
+            exit 1
+          fi
+
+      # Enforce digest-pinned FROM lines in the Dockerfile. Floating tags (e.g.
+      # python:3.14-slim without @sha256:...) can be silently overwritten by
+      # upstream maintainers, breaking supply-chain guarantees.
+      - name: Dockerfile base image digest check
+        run: |
+          if grep -E '^FROM [^ @]+:[^ @]+( AS .+)?$' Dockerfile; then
+            echo "::error file=Dockerfile,title=Unpinned base image::Dockerfile FROM lines must use digest-pinned references (e.g. python:3.14-slim@sha256:...)."
+            exit 1
+          fi
+          echo "Dockerfile base images are digest-pinned."
+
+      # Packaging: wheel + sdist build with the hash-locked backend, twine
+      # check, and the wheel installs into a clean venv (version, imports).
+      # (The release builds its published artifacts itself, in its dist job.)
+      - name: Build check (wheel + sdist, twine check, installed wheel)
+        run: make build

@@ -1,19 +1,34 @@
 flowchart TD
-    A([create_platform_app: settings.enable_tracing == true]) --> B["_build_span_exporter(settings)"]
-    B --> C{settings.otlp_endpoint set?}
-    C -- no --> D["return None\n(spans recorded, never exported)"]
-    C -- yes --> E["OTLPSpanExporter(\n  endpoint=settings.otlp_endpoint,\n  insecure=environment in ('dev','development','local')\n)"]
+    A(["Tracing entry point"]) --> B{"Which one?"}
+    B -- "create_platform_app / ensure_tracing(config)" --> E{"current global provider?"}
+    E -- "ours, active, configured<br/>(or this call is provisional too)" --> KEEP(["keep it"])
+    E -- "a service-installed SDK TracerProvider" --> KEEP2(["keep it — never replaced, flushed or shut down"])
+    E -- "none, ours provisional, or ours after shutdown" --> INST
+    B -- "init_tracing(config)" --> I2{"service-installed SDK TracerProvider?"}
+    I2 -- yes --> KEPT(["returned unchanged, propagator untouched<br/>warn otel_provider_kept"])
+    I2 -- no --> INST
+    B -- "init_tracing_from_env()<br/>(OTEL_SERVICE_NAME → APP_NAME)" --> P{"name empty?"}
+    P -- yes --> PROV["stderr warning · provisional unknown_service"] --> INST
+    P -- no --> INST
 
-    D --> F[setup_tracing app, service_name, exporter]
-    E --> F
+    INST["install under _lock"] --> CFG["TracingConfig.from_env: explicit environment wins over APP_ENV<br/>endpoint: OTLP_ENDPOINT → OTEL_EXPORTER_OTLP_ENDPOINT → localhost:4317<br/>none / off / disabled, or OTEL_TRACES_EXPORTER=none → no exporter<br/>insecure: dev/local · ratio 1.0 dev/local, else 0.1 (NaN / invalid → default + warning)"]
+    CFG --> TP["TracerProvider: resource service.name · service.version ·<br/>service.namespace (domain) · deployment.environment.name<br/>sampler ParentBased(root) (+ remote-parent re-sampling)"]
+    TP --> X{"exporter?"}
+    X -- "given (tests)" --> BSP["BatchSpanProcessor(exporter)"]
+    X -- "endpoint" --> OTLP{"OTLPSpanExporter ok?"}
+    OTLP -- yes --> BSP
+    OTLP -- no --> FAIL["warn otel_exporter_init_failed — in-process only"]
+    X -- "none" --> NOEXP["spans in-process, valid trace ids"]
+    BSP --> SWAP
+    FAIL --> SWAP
+    NOEXP --> SWAP
+    SWAP["_global.inner = provider · propagator W3C (+ baggage)<br/>set_tracer_provider(_global) only once · info otel_tracing_initialized"]
+    SWAP --> OLD(["after unlock: old generation force_flush + shutdown"])
 
-    F --> G["Resource.create({SERVICE_NAME: service_name})"]
-    G --> H["provider = TracerProvider(resource=resource)"]
-    H --> I{exporter is not None?}
-    I -- yes --> J["provider.add_span_processor(\n  BatchSpanProcessor(exporter))"]
-    I -- no --> K
-    J --> K["trace.set_tracer_provider(provider)"]
-    K --> L["FastAPIInstrumentor.instrument_app(\n  app, tracer_provider=provider)"]
-    L --> M([return provider])
+    subgraph deleg["Delegating global provider"]
+        D1["get_tracer(scope) → _DelegatingTracer"] --> D2["start_span / start_as_current_span (also as a decorator):<br/>resolve the CURRENT inner provider per call, cached per provider"]
+        D2 --> D3["no provider → NonRecordingSpan keeping the parent context"]
+    end
 
-    N(["instrument_grpc_server() / instrument_grpc_client()\n(called separately by the gRPC service, requires the grpc extra)"]) -.-> O["GrpcInstrumentorServer / GrpcInstrumentorClient\n.instrument()"]
+    FL(["app shutdown: flush_tracing() — export buffered spans, keep the provider"])
+    SD(["shutdown_tracing() — process exit: inner = None, flush + shut down"])

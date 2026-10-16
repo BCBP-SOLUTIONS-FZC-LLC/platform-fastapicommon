@@ -1,0 +1,174 @@
+# Reusable workflow — test gate.
+# Unit + integration suites with coverage on Python 3.12 and the coverage gate
+# (≥ 90%) — the required check "Validate / Test / test" — plus, in parallel,
+# the same suites on the other supported Pythons (3.11, 3.13, 3.14) and on the
+# lowest version of every direct dependency pyproject.toml admits. tests/e2e
+# (the real Docker image over real HTTP) runs in ci.yml's smoke job, against
+# the very image trivy scans and push publishes.
+# Called by ci.yml and release.yml. Gates trivy, smoke, interop, push, release:
+# a caller's `needs: validate-test` waits for EVERY job below, so the version
+# matrix and lowest-deps gate exactly what the required check gates. Their
+# check names ("Validate / Test / python 3.13", "Validate / Test / lowest
+# direct dependencies") are not required checks, and do not need to be.
+# Ported from platform-gincommon (via platform-eventcommon's Python port).
+name: Validate / Test
+
+"on":
+  workflow_call:
+    inputs:
+      ref:
+        description: 'Git ref to check out (leave empty to use the caller ref)'
+        type: string
+        required: false
+        default: ''
+      skip:
+        description: >-
+          Skip the jobs (ci.yml: documentation-only change). Skipped here, not
+          at the caller, so the required check "<workflow> / <job>" still
+          reports (a skipped job counts as success for branch protection).
+        type: boolean
+        required: false
+        default: false
+    secrets:
+      # The only secret this workflow reads (checkout of a private repo;
+      # github.token is the fallback). Callers pass it explicitly — no
+      # `secrets: inherit`, so PR test code never runs with other secrets
+      # in scope.
+      CI_REPO_READ_TOKEN:
+        required: false
+    outputs:
+      pct:
+        description: 'Total line + branch coverage percentage (Python 3.12 run)'
+        value: ${{ jobs.test.outputs.pct }}
+
+permissions:
+  contents: read
+
+env:
+  FORCE_JAVASCRIPT_ACTIONS_TO_NODE24: 'true'
+
+jobs:
+  # The required check. Single Python version (3.12) so the check name has no
+  # matrix suffix and stays exactly "Validate / Test / test".
+  test:
+    name: test
+    if: ${{ !inputs.skip }}
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    outputs:
+      pct: ${{ steps.gate.outputs.pct }}
+    steps:
+      - name: Checkout
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          ref: ${{ inputs.ref || github.ref }}
+          persist-credentials: false
+          token: ${{ secrets.CI_REPO_READ_TOKEN || github.token }}
+
+      - name: Install uv
+        uses: astral-sh/setup-uv@c771a70e6277c0a99b617c7a806ffedaca235ff9 # v9.0.0
+        with:
+          # The uv the Dockerfile pins, so CI and the image resolve and build alike.
+          version: '0.13.1'
+          python-version: '3.12'
+
+      # No private-package credential: the package has no private dependency,
+      # and a credential written here would be readable by the PR's test code
+      # below. If one is ever needed, scope it to this one step's `env:` and
+      # remove it in the same step, BEFORE any test or make target.
+      # --locked: fail (do not re-resolve) if uv.lock is stale.
+      - name: Install dependencies (uv sync from uv.lock)
+        run: uv sync --locked
+
+      # Mandatory blocking gate: one pass over the in-process suites with
+      # coverage (make test-ci leaves .coverage + coverage.xml).
+      - name: Tests — unit · integration (coverage)
+        run: make test-ci
+
+      # Asserts the line + branch coverage meets pyproject.toml's fail_under
+      # (90%). Do not lower this threshold.
+      - name: Coverage threshold gate (≥ 90%)
+        id: gate
+        run: bash .github/scripts/coverage-gate.sh
+
+      - name: Upload coverage report
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        if: always()
+        with:
+          name: coverage-report-${{ github.sha }}
+          path: coverage.xml
+          if-no-files-found: ignore
+          retention-days: 30
+
+  # The same suite on every other Python pyproject.toml supports. The coverage
+  # gate applies here too (pytest's addopts enforce fail_under).
+  python:
+    name: python ${{ matrix.python-version }}
+    if: ${{ !inputs.skip }}
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    strategy:
+      fail-fast: false
+      matrix:
+        python-version: ['3.11', '3.13', '3.14']
+    steps:
+      - name: Checkout
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          ref: ${{ inputs.ref || github.ref }}
+          persist-credentials: false
+          token: ${{ secrets.CI_REPO_READ_TOKEN || github.token }}
+
+      - name: Install uv
+        uses: astral-sh/setup-uv@c771a70e6277c0a99b617c7a806ffedaca235ff9 # v9.0.0
+        with:
+          # The uv the Dockerfile pins, so CI and the image resolve and build alike.
+          version: '0.13.1'
+          python-version: ${{ matrix.python-version }}
+
+      - name: Install dependencies (uv sync from uv.lock)
+        run: uv sync --locked
+
+      - name: Tests — unit · integration (coverage ≥ 90%)
+        run: uv run pytest tests/unit tests/integration
+
+      - name: Upload coverage report
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        if: always()
+        with:
+          name: coverage-report-py${{ matrix.python-version }}-${{ github.sha }}
+          path: coverage.xml
+          if-no-files-found: ignore
+          retention-days: 30
+
+  # The floors in pyproject.toml are a promise to every consumer: install every
+  # runtime dependency at the lowest version its range admits (fastapi,
+  # starlette, pydantic, structlog, prometheus-client, opentelemetry-*, ...),
+  # the dev tools resolved around them (lowest-deps.sh), and run the suites.
+  lowest-deps:
+    name: lowest direct dependencies
+    if: ${{ !inputs.skip }}
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - name: Checkout
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          ref: ${{ inputs.ref || github.ref }}
+          persist-credentials: false
+          token: ${{ secrets.CI_REPO_READ_TOKEN || github.token }}
+
+      - name: Install uv
+        uses: astral-sh/setup-uv@c771a70e6277c0a99b617c7a806ffedaca235ff9 # v9.0.0
+        with:
+          # The uv the Dockerfile pins, so CI and the image resolve and build alike.
+          version: '0.13.1'
+          python-version: '3.12'
+
+      - name: Install the runtime dependencies at their floors
+        run: bash .github/scripts/lowest-deps.sh
+
+      # --no-sync keeps the environment just installed; --no-cov: coverage is
+      # gated on the locked versions above.
+      - name: Test — unit · integration
+        run: uv run --no-sync pytest tests/unit tests/integration --no-cov

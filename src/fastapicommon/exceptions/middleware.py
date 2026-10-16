@@ -1,9 +1,15 @@
 from __future__ import annotations
 
+from opentelemetry import trace
 from starlette.requests import Request
 from starlette.types import ASGIApp, Message, Receive, Scope, Send
 
-from fastapicommon.exceptions.handlers import log_unclassified, unhandled_exception_handler
+from fastapicommon._scope import ABORTED, PANICKED
+from fastapicommon.exceptions.handlers import (
+    log_unclassified,
+    problem_trace_id,
+    unhandled_exception_handler,
+)
 
 
 class UnhandledErrorMiddleware:
@@ -21,6 +27,9 @@ class UnhandledErrorMiddleware:
     If the response had already started, the problem cannot be sent: the exception is
     logged the same way and the response is left incomplete (the server closes the
     connection), like gincommon's abort after a partial write.
+
+    The exception is also recorded on the active server span (``TracingMiddleware``) as an
+    ``exception`` event with its type only, as for a recovered panic in gincommon.
     """
 
     def __init__(self, app: ASGIApp) -> None:
@@ -43,7 +52,26 @@ class UnhandledErrorMiddleware:
         except Exception as exc:
             request = Request(scope)
             if started:
-                log_unclassified(request, exc, status=500, error_code="INTERNAL_ERROR", trace_id="")
+                # Go: re-panic with http.ErrAbortHandler; the access log and span record an
+                # aborted request with the status already sent, not a 200 success.
+                scope[ABORTED] = True
+                log_unclassified(
+                    request,
+                    exc,
+                    status=500,
+                    error_code="INTERNAL_ERROR",
+                    trace_id=problem_trace_id(request),
+                )
                 return
+            _record_on_span(exc)
+            scope[PANICKED] = True
             response = await unhandled_exception_handler(request, exc)
             await response(scope, receive, send)
+
+
+def _record_on_span(exc: Exception) -> None:
+    from fastapicommon.middleware.tracing import mark_span_panic  # avoid an import cycle
+
+    span = trace.get_current_span()
+    if span.is_recording():
+        mark_span_panic(span, exc)

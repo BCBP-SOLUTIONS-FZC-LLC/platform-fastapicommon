@@ -6,8 +6,8 @@ from fastapicommon.config import PlatformSettings
 def test_default_settings() -> None:
     settings = PlatformSettings(_env_file=None)
     assert settings.app_name == "platform-service"
-    assert settings.environment == "development"
-    assert settings.log_level == "INFO"
+    assert settings.environment == ""  # unset: production defaults; metrics reject it
+    assert settings.log_level == ""  # LOG_LEVEL unset: debug in dev / local, info otherwise
     assert settings.request_timeout_seconds == 30.0
     assert settings.enable_tracing is True
     assert settings.enable_metrics is True

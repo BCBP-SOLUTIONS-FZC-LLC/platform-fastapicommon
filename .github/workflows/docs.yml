@@ -1,0 +1,59 @@
+# Checks for documentation changes. ci.yml skips its build/test jobs when a
+# change touches only documentation (any *.md, docs/architecture/*.mmd; see
+# detect-changes.sh), so the architecture-diagram check runs here instead:
+#
+#   - diagram-sync: every docs/architecture/mermaid/*.mmd is embedded
+#     byte-identically in ARCHITECTURE.md (.github/scripts/docs-mermaid-sync.sh).
+#
+# docs/observability/** is NOT handled here: detect-changes.sh counts it as
+# code, so a change there runs the full ci.yml pipeline, whose required
+# validate-quality job runs `make metrics-lint` (the generated
+# metrics-registry.md in step with the registry) — a check that runs here
+# could not block a merge: this workflow is not a required check.
+#
+# Mixed code + docs changes are also checked by validate-quality.yml (make
+# docs-check). This workflow is not a required check, so the `paths` filter
+# cannot block a merge. Ported from platform-pgcommon-py (and its Go repo).
+name: Docs
+
+"on":
+  push:
+    branches: [main]
+    paths:
+      - 'ARCHITECTURE.md'
+      - 'docs/architecture/**'
+      - '.github/scripts/docs-mermaid-sync.sh'
+      - '.github/workflows/docs.yml'
+  pull_request:
+    branches: [main]
+    paths:
+      - 'ARCHITECTURE.md'
+      - 'docs/architecture/**'
+      - '.github/scripts/docs-mermaid-sync.sh'
+      - '.github/workflows/docs.yml'
+
+permissions:
+  contents: read
+
+# On a PR, a newer push supersedes the older run (cancelled); every push to
+# main is checked (one group per commit).
+concurrency:
+  group: docs-${{ github.workflow }}-${{ github.ref }}-${{ github.event_name == 'pull_request' && 'pr' || github.sha }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+
+env:
+  FORCE_JAVASCRIPT_ACTIONS_TO_NODE24: 'true'
+
+jobs:
+  diagram-sync:
+    name: Architecture diagram sync
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - name: Checkout
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          token: ${{ secrets.CI_REPO_READ_TOKEN || github.token }}
+          persist-credentials: false
+      - name: Diagrams embedded verbatim in ARCHITECTURE.md
+        run: bash .github/scripts/docs-mermaid-sync.sh

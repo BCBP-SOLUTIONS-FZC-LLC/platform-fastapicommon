@@ -1,167 +1,257 @@
-# fastapicommon
+# platform-fastapicommon
 
-Shared **FastAPI and gRPC** middleware library for platform services: authentication
-headers, tenant context propagation, request tracing, structured logging, Prometheus
-metrics (HTTP and gRPC), per-request timeouts, outbound header propagation, and optional
-RBAC.
+The platform's shared **FastAPI and gRPC middleware library** for Python services: the transport-layer system of record for how every Python service in the platform correlates requests, traces, logs, emits metrics, trusts gateway identity, builds tenant context, answers errors and checks roles. It is the Python port of [`platform-gincommon`](https://github.com/BCBP-SOLUTIONS-FZC-LLC/platform-gincommon) and implements the same contracts — the same `platform_*` metrics, OpenTelemetry spans, Zap-layout log lines and RFC 9457 error bodies — so Go and Python services read identically in Prometheus, Tempo, Loki and to API clients. It also implements the **Enterprise Platform Observability Standard** for Python: gincommon's metric registry, vendored byte for byte, the collectors built from it, and `fastapicommon-metricslint`.
 
 **Repository:** [github.com/BCBP-SOLUTIONS-FZC-LLC/platform-fastapicommon](https://github.com/BCBP-SOLUTIONS-FZC-LLC/platform-fastapicommon)
+**Package:** `pip install platform-fastapicommon` (import `fastapicommon`) · Python ≥ 3.11 (tested on 3.11, 3.13, 3.14) · **never deployed** — consumers import the package; `examples/` is a reference service whose image exists only for CI smoke tests
+**Design:** a framework-free core (`context`, `auth.validation`, `config`, `problem`) under FastAPI / gRPC / OpenTelemetry adapters and one composition function, `create_platform_app()` ([ARCHITECTURE.md](ARCHITECTURE.md), [LLD](docs/lld/platform-fastapicommon-lld.md)). The observability contract is [`docs/observability/`](docs/observability/README.md) with the generated [metric inventory](docs/observability/metric-registry.md); the registry is **gincommon's** (`src/fastapicommon/metrics/registry.json`, parity-checked in CI). Every HTTP error is an [RFC 9457](docs/problem-details.md) problem (`application/problem+json`) identical to gincommon `v2.0.0`'s.
 
-This project is consumed as a **Python package** by other services. Those services keep
-their own routers, repositories, use cases, and business logic and only import from
-`fastapicommon`. You do **not** need to deploy `examples/` in production — it exists to
-exercise this library's logging, metrics, and tracing locally (see [Local development](#local-development-this-repo)).
+---
 
 ## Mental model
 
-This library provides three layers your service sits on top of:
+| This library owns | It does NOT own |
+|---|---|
+| The middleware **order** and what each layer records — `Tracing → Context → Logging → UnhandledError → Prometheus → Timeout → routing`, plus the gRPC server interceptors | Authentication itself — JWT/OAuth/API keys are validated by the API gateway before headers reach a service |
+| Gateway-identity **validation**, on HTTP and gRPC: `x-user-id` / `x-tenant-id` (non-empty, ≤ 256 bytes, no control characters, **exactly one value**), `x-tenant-roles` (`[a-zA-Z0-9_-]+`, deduplicated, ≤ 4096 bytes, ≤ 64 roles) | Cryptographic identity verification — headers are trusted at the network layer |
+| `RequestContext{request_id, correlation_id, user, trace_id, client_ip, identity_rejection}` bound for the whole request | Business authorization policy — `RequireRole` & co. are coarse role checks; tenant / resource policy lives in the service |
+| The RFC 9457 error contract and `X-Trace-ID` / `X-Request-ID` response headers | Request-body models, business validation, domain error mapping |
+| `platform_http_*`, `platform_grpc_*`, `platform_build_info`, `platform_unclassified_errors_total` with `{domain, service, environment}` injected centrally | Service-specific (Tier 3) metric *definitions* — services declare them, this library validates them |
+| The vendored Platform Observability Registry and its Python enforcement (`metrics.compliance`, `fastapicommon-metricslint`) | The registry's content and ratification — platform-gincommon and observability governance |
+| OpenTelemetry setup: one delegating global `TracerProvider`, `ParentBased` sampling, OTLP/gRPC export, W3C propagation | The collector / Tempo / Prometheus / Loki infrastructure (the `docker-compose.yml` stack is dev-only) |
+| Outbound propagation: `create_platform_http_client()` (httpx) and `ContextClientInterceptor` (gRPC) | Retries, circuit breaking, rate limiting (gateway / mesh) |
+| Structured logging in gincommon's Zap layout, with sanitisation and redaction | Database access, pooling, RLS (platform-pgcommon-py); messaging (platform-eventcommon) |
 
-| Layer | What it does | Your responsibility |
-|-------|--------------|----------------------|
-| **Observability** | Request/correlation ID, tracing, Prometheus metrics, structured logging | Nothing on the HTTP side — `create_platform_app()` wires it automatically. On gRPC, add `ContextServerInterceptor` yourself (see [gRPC — quick start](#grpc--quick-start)) |
-| **Security** | Header-based identity extraction; RBAC role checks | Add `Depends(require_authenticated_user)` / `Depends(RequireRole(...))` per route — **nothing is enforced globally**, see [Important rules](#important-rules-for-handler-authors) |
-| **Context** | Builds `RequestContext{request_id, correlation_id, user: CurrentUser, trace_id, client_ip}` and binds it via `contextvars` | Read it via `fastapicommon.context.get_request_context()` / `fastapicommon.auth.get_current_user`; propagate outbound via `create_platform_http_client()` |
+Consuming services keep their own app factory, routers and business logic and import only the public names of each subpackage (`__all__`) — never underscore modules.
 
-Your service only implements **business logic** on top of these layers. Log format, span
-setup, error response shape, and metric names are standardised here.
-
-> **Tracing guarantee:** when `settings.enable_tracing` is true (the default), every
-> incoming request creates a root OTel span, or continues an existing distributed trace if
-> a `traceparent` header is provided, via `FastAPIInstrumentor`. Spans are only **exported**
-> when `PlatformSettings.otlp_endpoint` (env var `OTLP_ENDPOINT`) is set — otherwise they're
-> created (valid trace IDs) but never leave the process. See
-> [ARCHITECTURE.md § Tracing initialization](./ARCHITECTURE.md#tracing-initialization).
+**Tracing guarantee:** with tracing enabled (the default), every incoming request starts one server span named `METHOD route` (e.g. `GET /items/:item_id`), or continues the caller's trace when a valid `traceparent` is present. End-to-end traces hold as long as outbound calls use `create_platform_http_client()` (HTTP) or `instrument_grpc_client()` (gRPC).
 
 ---
 
 ## Why this library exists
 
-Every backend service in the platform needs the same cross-cutting infrastructure: request
-correlation, distributed tracing, structured logging, Prometheus metrics, identity
-extraction, and access control. Without a shared library each team re-implements these
-differently, leading to:
+Every backend service needs the same cross-cutting transport concerns — request correlation, distributed tracing, structured logs, Prometheus metrics, gateway-identity extraction, error bodies and access control. Centralising them in one library, and keeping it in parity with the Go one, means:
 
-- Inconsistent log formats that break cross-service queries
-- Missing trace context that breaks distributed traces
-- Auth bugs from hand-rolled header validation
-- Metrics with different label names that can't be aggregated
+- **One log schema, across languages.** Every Python service emits the same `http_request` / `grpc_request` entries as Go services (same keys — `msg`, `level`, `ts`, `caller` — same fields, `duration_ms` as float milliseconds, info / warn / error by outcome), so one Loki query covers the platform.
+- **One metric vocabulary.** `platform_http_requests_total{method, route, status_class, error_class}` means the same thing in a FastAPI service as in a Gin one, so dashboards and SLO burn-rate alerts aggregate across the whole platform. Label cardinality is bounded once (route templates, `OTHER` methods, bounded gRPC methods).
+- **One trust boundary.** Header validation, repeated-header ambiguity, role caps, trusted proxies and the `claimed_*` vs verified-identity split in logs are implemented and tested once, with gincommon's rules.
+- **One error contract.** Every error is the same RFC 9457 problem a Go service would send — same types, titles, codes, `traceId` order and validation messages — so clients branch on one shape (platform-interop-tests checks it on every PR).
+- **One governance gate.** The registry is the contract: a service cannot emit an unregistered shared metric, a prohibited label (`tenant_id`, `user_id`, ...) or a legacy name without the compliance check failing its CI.
 
-This library **standardises** these concerns once so every service gets:
-
-- A consistent structured log line with the same enrichment fields
-  (`request_id`, `correlation_id`, `tenant_id`, `user_id`)
-- OTel spans with the same instrumentation (`FastAPIInstrumentor`)
-- A `RequestContext`/`CurrentUser` available in every handler via one dependency
-- The same RFC 9457 Problem Details error contract (`application/problem+json`) across all
-  services — the same types, titles, error codes, trace ids and validation messages as the Go
-  `gincommon` v2 library (see [docs/problem-details.md](docs/problem-details.md))
+This is enforced structurally: the collectors are *built from* registry entries, the vendored registry cannot drift from gincommon's (`gincommon-parity.sh` in CI), and `make ci` (lint, mypy `--strict`, the observability gate, ≥ 90% coverage) runs on every PR.
 
 ---
 
-## Features
+## API overview
 
-| Capability | HTTP | gRPC |
-|------------|------|------|
-| **Request/correlation ID** | `ContextMiddleware` — reads `x-request-id`/`x-correlation-id` or generates a UUID; echoes both back | `ContextServerInterceptor` — reads from metadata or generates a UUID |
-| **Tracing** | `FastAPIInstrumentor` via `setup_tracing()`; OTel HTTP server spans | `instrument_grpc_server()` / `instrument_grpc_client()` (separate opt-in call) |
-| **Metrics** | `PrometheusMiddleware` — the `platform_http_*` metrics of the [observability standard](#platform-observability-standard-metrics); requires `OBSERVABILITY_DOMAIN` | `ContextServerInterceptor` — the `platform_grpc_*` metrics |
-| **Logging** | `fastapicommon.logging.get_logger()` — structlog JSON, enriched with context | Same `get_logger()`; `ContextServerInterceptor` logs `grpc_request_completed` after each call |
-| **Auth** | `Depends(require_authenticated_user)` — `401` if `x-user-id` unset (opt-in per route) | **Not provided** — no gRPC equivalent exists; check `get_request_context().user_id` yourself |
-| **Tenant context** | `RequestContext{request_id, correlation_id, user: CurrentUser, trace_id, client_ip}` via `get_request_context()` | Same struct, same accessor, bound by `ContextServerInterceptor` |
-| **RBAC** | `RequireRole` / `RequireAnyRole` / `RequireAllRoles` as FastAPI dependencies | **Not provided** — these are FastAPI `Depends`-based; there is no gRPC interceptor equivalent |
-| **Timeout** | `TimeoutMiddleware(timeout_seconds=...)` — `asyncio.wait_for` around the handler, a `503` `service-unavailable` problem (`REQUEST_TIMEOUT`) on expiry | **Not provided** — set a deadline on the gRPC channel/client call yourself |
-| **Health** | `health_router` — `/health`, `/live`, `/ready` (200 unless custom readiness checks fail) | — |
-| **Error type** | `PlatformException` hierarchy → RFC 9457 problems via `register_exception_handlers` | `ContextServerInterceptor` sanitizes every RPC (unary and streaming): a status the handler chose (`context.abort` / `set_code`) is kept; any other exception becomes `INTERNAL "internal server error"` and is logged as `unclassified error` (types and frames, never the message). Without it grpcio sends `UNKNOWN "Exception calling application: <message>"` and logs the message |
-| **Outbound propagation** | `create_platform_http_client()` — `httpx.AsyncClient` that stamps identity/trace headers on every request | `ContextClientInterceptor` — stamps identity metadata on outbound unary-unary calls |
-| **OpenTelemetry init** | `setup_tracing(app, service_name, exporter=None)` (called automatically by `create_platform_app`) | `instrument_grpc_server()` / `instrument_grpc_client()` (call explicitly) |
+Fourteen subpackages and one CLI. Source of truth: the docstrings (`make docs-serve`) and each subpackage's `__all__`, which is the stable surface covered by SemVer ([VERSIONING.md](VERSIONING.md)); underscore names, `examples/` and `tests/` are not. Full signatures: [LLD §5.3](docs/lld/platform-fastapicommon-lld.md#53-symbol-catalogue).
 
-**Not a 1:1 port of `platform-gincommon`.** The gRPC column above is intentionally
-thinner than the Go sibling's `grpccommon` package — there is no panic-recovery
-interceptor, no auth-rejection interceptor, and no RBAC interceptor for gRPC in this
-library today. See [Out of scope](#out-of-scope).
+**Default HTTP stack** (`create_platform_app`): `TracingMiddleware → ContextMiddleware → LoggingMiddleware → UnhandledErrorMiddleware → PrometheusMiddleware → TimeoutMiddleware → routing`, plus `/health`, `/live`, `/ready`, `/metrics` and the RFC 9457 exception handlers. Authentication and roles are **per-route dependencies**, not middleware. **gRPC:** `ContextServerInterceptor` (threaded server) / `AsyncContextServerInterceptor` (`grpc.aio`) do the span, context, metrics, `grpc_request` log and exception sanitizing in one interceptor.
+
+### `fastapicommon.bootstrap` / `fastapicommon.config` — the app
+
+| Group | Symbols | Purpose |
+|---|---|---|
+| App factory | `create_platform_app(app_name=None, settings=None, **fastapi_kwargs)` | Initialises metrics, logging and tracing; installs the stack, health router and exception handlers; your `lifespan`, `on_startup` / `on_shutdown` and `@app.on_event` handlers still run |
+| Configuration | `PlatformSettings` (`app_name`, `environment`, `observability_domain`, `build_version`, `log_level`, `request_timeout_seconds`, `trusted_proxies`, `enable_tracing`, `enable_metrics`, `otlp_endpoint`, `problem_type_base`) | Read from the environment / `.env`; a missing or invalid identity raises `ValueError` at startup |
+
+### `fastapicommon.context` / `fastapicommon.auth` / `fastapicommon.rbac` — identity
+
+| Group | Symbols | Purpose |
+|---|---|---|
+| Request context | `RequestContext`, `CurrentUser`, `get_request_context()`, `get_request_context_or_none()`, `get_request_id`, `get_correlation_id`, `get_tenant_id`, `get_user_id`, `get_roles`, `get_trace_id`, `get_client_ip`, `request_context_scope`, `bind_request_context`, `reset_request_context` | Validated identity and correlation ids anywhere in the request (contextvars) |
+| Authentication | `require_authenticated_user` (401 + audit entry), `get_current_user` | Per-route dependencies |
+| Authorization | `RequireRole(role)`, `RequireAnyRole(*roles)`, `RequireAllRoles(*roles)` | Per-route role checks (403 + `authz: access denied`) |
+| Validation | `normalize_header_value`, `normalize_request_id`, `parse_roles`, header constants and `MAX_*` limits; `fastapicommon.auth.validation` also has `resolve_identity`, `parse_roles_strict`, `InvalidRolesError`, `MAX_ROLES_HEADER_LEN`, `MAX_ROLES` (not re-exported from `fastapicommon.auth`) | gincommon's validation rules, for both transports |
+
+### `fastapicommon.exceptions` / `fastapicommon.problem` — RFC 9457 Problem Details
+
+| Group | Symbols | Purpose |
+|---|---|---|
+| Errors to raise | `PlatformException` (`BusinessException`), `ValidationException`, `UnauthorizedException`, `ForbiddenException`, `NotFoundException`, `ConflictException`, `BusinessRuleViolationException`, `RateLimitException`, `UnsupportedOperationException`, `ServiceUnavailableException` | What handlers raise; rendered as problems |
+| Domain types | `problem_type(domain, name, title, status, code)`, `ProblemType`, the 15 `TYPE_*` platform types, `type_for_status`, `type_uri` | `{base}/{domain}/{name}` URIs — same registry as gincommon's |
+| Rendering | `register_exception_handlers`, `problem_response`, `UnhandledErrorMiddleware`, `build_problem`, `Problem`, `FieldError` | Every error is `application/problem+json`; a 5xx never carries detail |
+| Correlation | `resolve_trace_id`, `trace_id_from_traceparent`, `sanitized_request_id`, `new_trace_id` | `traceparent` → `x-request-id` → span → generated (platform-pgcommon-py's order) |
+| Clients | `problem_from_response(resp)`, `parse_problem(body)`, `is_problem_content_type` | Parse problems; branch on `status` / `type` / `errorCode`, never on text |
+
+### `fastapicommon.grpc` — gRPC services (`grpc` extra)
+
+| Group | Symbols | Purpose |
+|---|---|---|
+| Servers | `ContextServerInterceptor(settings=None)`, `AsyncContextServerInterceptor(settings=None)` | Span, validated context, `platform_grpc_*` metrics, `grpc_request`, exception sanitizing; `settings` initialises metrics for a gRPC-only service |
+| Client | `ContextClientInterceptor()` | Outbound identity and ids on unary calls |
+
+### `fastapicommon.telemetry` / `fastapicommon.logging` / `fastapicommon.propagation`
+
+| Group | Symbols | Purpose |
+|---|---|---|
+| Tracing setup | `TracingConfig`, `ensure_tracing`, `init_tracing`, `init_tracing_from_env`, `flush_tracing`, `shutdown_tracing`, `setup_tracing` | `create_platform_app` does it; use these for gRPC-only services or apps built by hand |
+| Tracing outside handlers | `new_tracer(scope)`, `noop_tracer()`, `span_trace_id()`, `record_span_error(exc, description)`, `inject_trace_context(headers)`, `extract_trace_context(carrier)` | Child spans, trace ids for logs, propagation without a request |
+| Logging | `configure_logging(level=None, environment=None)`, `get_logger(name)` | gincommon's Zap layout; `LOG_LEVEL`, `LOG_SAMPLING`, `LOG_FILE` |
+| Outbound HTTP | `create_platform_http_client(**httpx_kwargs)` | `httpx.AsyncClient` stamping identity, ids and `traceparent` |
+
+### `fastapicommon.metrics` and `fastapicommon-metricslint` — observability governance
+
+| Symbol / command | Purpose |
+|---|---|
+| `PrometheusMiddleware`, `metrics_router`, `init_metrics`, `init_metrics_from_settings`, `metrics_registry()`, `PlatformMetrics` | The library's own `platform_*` metrics and `/metrics` |
+| `new_shared_counter / gauge / histogram(name)` | Tier 1/2 metrics from their registry entry |
+| `new_counter / gauge / histogram(name, documentation, labelnames)` | Tier 3 (`<domain>_<service>_*`), validated at construction |
+| `register_labeled(collector)` | Identity labels on a third-party collector |
+| `metrics.compliance.validate(registry)` | The standard's full rule set over a scrape (Go `obsregistry.Validate`) |
+| `fastapicommon-metricslint check [--url U \| files] [--strict]` · `refs <paths>` · `registry` · `inventory` | Validate a scrape; find legacy / unregistered names in dashboards and rules; self-check; render the inventory |
+
+Exit codes: `0` clean, `1` findings, `2` usage or I/O error.
 
 ---
 
-## Install (consumer services)
+## Input validation
 
-```bash
-pip install platform-fastapicommon
-# or, for gRPC support:
-pip install "platform-fastapicommon[grpc]"
+Every rejection the library produces is an RFC 9457 problem (`application/problem+json`), with `X-Trace-ID` / `X-Request-ID` response headers set. Internal error detail is never sent: a 5xx `internal-error` has no `detail`, and the exception's message goes nowhere — not to the client, a log or a span. Full contract: [docs/problem-details.md](docs/problem-details.md).
+
+```json
+{
+  "type": "https://errors.company.com/platform/unauthorized",
+  "title": "Unauthorized",
+  "status": 401,
+  "detail": "Ambiguous x-user-id header.",
+  "instance": "/tenders/7",
+  "traceId": "4bf92f3577b34da6a3ce929d0e0e4736",
+  "errorCode": "UNAUTHORIZED",
+  "timestamp": "2026-10-16T10:45:22.000Z"
+}
 ```
 
-The PyPI **distribution name** is `platform-fastapicommon` (matches the repo name), but the
-**importable package** stays `fastapicommon` — no code changes needed if you're already
-using it: `from fastapicommon.bootstrap import create_platform_app` still works exactly as
-shown throughout this README. (`fastapicommon` alone was rejected by PyPI as too similar to
-an existing unrelated package, `fastapi-common`.)
+### Notable validation rules
 
-**Python version:** 3.11+ (see `pyproject.toml`). Pin a release in production — see
-[Versioning & releases](#versioning--releases) below.
-
----
-
-## Versioning & releases
-
-This package follows **[Semantic Versioning](https://semver.org/)**. Git tags are the
-source of truth for releases. Full policy: **[VERSIONING.md](./VERSIONING.md)**. History:
-**[CHANGELOG.md](./CHANGELOG.md)**. Security policy and trust model:
-**[SECURITY.md](./SECURITY.md)**.
-
-### Release line
-
-| Version | Status | `pip install` | Python | Notes |
-|---------|--------|----------------|--------|-------|
-| *Unreleased* | — | from source / `main` | 3.11+ | Not yet tagged; pre-1.0, see the caveat below |
-
-### SemVer guarantees (public API: everything re-exported from a `fastapicommon.*` subpackage's `__all__`)
-
-| Change type | Version bump |
-|-------------|--------------|
-| Breaking change in the public API (removed/renamed export, incompatible defaults) | **MAJOR** |
-| New feature, optional `PlatformSettings` field, new middleware (backward compatible) | **MINOR** |
-| Bug fix, security fix | **PATCH** |
-
-**Not covered by SemVer:** any name prefixed with `_`, `examples/`, and `tests/` may change
-in any release. **Pre-1.0 caveat:** while the package is `0.y.z`, a MINOR bump may still
-include breaking changes per the SemVer spec — see [VERSIONING.md](./VERSIONING.md) for
-details.
+| Rule | Enforcement |
+|---|---|
+| `x-user-id` / `x-tenant-id` | Non-empty after trim, ≤ 256 bytes, no ASCII control characters / DEL / U+2028 / U+2029 → else the field is absent; a route with `Depends(require_authenticated_user)` answers `401` `Missing or invalid authentication headers.` with a warn `auth: request rejected` |
+| Repeated identity headers are ambiguous | More than one `x-user-id` or `x-tenant-id` value (HTTP header or gRPC metadata) → the **whole** identity is absent; authenticated routes answer `401` `Ambiguous x-user-id header.` / `Ambiguous x-tenant-id header.` — a gateway that appends rather than replaces can never let a client value win |
+| Roles are bounded and validated | Repeated `x-tenant-roles` values are joined; tokens must match `[a-zA-Z0-9_-]+` (≤ 64 bytes; invalid tokens dropped), deduplicated; a header over 4096 bytes or with more than 64 roles → identity absent, `401` `Invalid tenant roles.` |
+| `x-request-id` / `x-correlation-id` | `[A-Za-z0-9._-]`, ≤ 128 bytes; else a new UUID (request id) or the request id (correlation id) is used consistently for logs, spans, problems and propagation |
+| The client IP cannot be spoofed | `X-Forwarded-For` / `X-Real-IP` are believed only when the socket peer is in `TRUSTED_PROXIES` (Gin's `SetTrustedProxies` algorithm); otherwise the client IP is the peer |
+| Unverified identity is never logged as verified | `tenant_id` / `user_id` in `http_request` come only from the validated context; client-supplied values on anonymous or rejected requests appear as `claimed_tenant_id` / `claimed_user_id` |
+| Metric labels cannot explode | HTTP `route` is the Gin-syntax template or `unknown` (never the raw path); non-standard methods → `OTHER`; gRPC methods outside `/package.Service/Method` or over 256 bytes → `unknown` |
+| Observability identity fails fast | Missing domain, or a domain / service / environment the registry rejects (`production` and `development` included) → `ValueError` at startup |
+| Tier 3 metric names are validated at construction | `<domain>_<service>_` prefix, `_total` counters, `_seconds` histograms, no prohibited or centrally injected labels |
+| Legacy exception subclasses are rejected | A `PlatformException` subclass that sets `status_code` / `code` / `error_code` class attributes raises `TypeError` at definition (only `problem_type` selects the response) |
 
 ---
 
-## HTTP — quick start
+## Architecture
 
-### Middleware order
+A framework-free core under FastAPI / Starlette / gRPC / OpenTelemetry adapters and one composition function; dependencies point inward. Full flow diagrams, invariant tables and the threat model are in **[ARCHITECTURE.md](ARCHITECTURE.md)**; Mermaid sources live in **[`docs/architecture/`](docs/architecture/README.md)**; the low-level contract is the **[LLD](docs/lld/platform-fastapicommon-lld.md)**.
+
+```
+platform-fastapicommon/
+├── src/fastapicommon/                  # the package — public API is each subpackage's __all__
+│   ├── bootstrap/                      # create_platform_app(): the one-call composition
+│   ├── config/                         # PlatformSettings (pydantic-settings)
+│   ├── context/                        # CurrentUser, RequestContext, contextvars accessors — no framework deps
+│   ├── auth/                           # header constants, validation (resolve_identity, role caps), require_authenticated_user
+│   ├── rbac/                           # RequireRole / RequireAnyRole / RequireAllRoles
+│   ├── middleware/                     # Tracing, Context (trusted proxies), Logging, Timeout — pure ASGI
+│   ├── exceptions/                     # PlatformException hierarchy, RFC 9457 handlers, UnhandledErrorMiddleware
+│   ├── problem/                        # RFC 9457 model, type registry, builder, trace-id resolution, client parsing
+│   ├── logging/                        # Zap-layout structlog config, sanitisation, audit entries
+│   ├── metrics/                        # registry.json (VENDORED from gincommon), platform_* collectors, Prometheus middleware,
+│   │                                   #   Tier 1/2/3 constructors, compliance validator, metricslint CLI
+│   ├── telemetry/                      # delegating TracerProvider, TracingConfig, tracer helpers
+│   ├── grpc/                           # Context(Async)ServerInterceptor, ContextClientInterceptor (grpc extra)
+│   ├── health/                         # /health, /live, /ready
+│   ├── propagation/                    # create_platform_http_client (httpx)
+│   └── _errors.py · _scope.py          # internal: exception types / frames, per-request outcome flags
+├── examples/
+│   ├── fastapi_service/                # reference HTTP service (the image CI smoke-tests)
+│   └── grpc_service/                   # reference gRPC service (raw-bytes generic handler)
+├── docs/
+│   ├── lld/                            # low-level design
+│   ├── architecture/                   # Mermaid sources embedded in ARCHITECTURE.md
+│   ├── observability/                  # the standard as implemented, metric-registry.md (generated), migration, runbooks
+│   ├── adr/                            # ADR-001 logging · 002 tracing · 003 metrics · 004 context propagation
+│   └── problem-details.md · MigrationGuide.md
+├── docker/                             # local otel-collector, Tempo, Prometheus (+ vendored rules), Loki, Promtail, Grafana config
+├── .github/                            # workflows (ported from gincommon) + scripts
+├── .claude/                            # Claude Code context: CLAUDE.md + reference set, settings.json
+├── .pre-commit-config.yaml             # ruff, black, mypy, pytest, whitespace
+└── tests/                              # unit/ (mirrors src/), integration/, e2e/
+```
+
+### Dependency rules
+
+| Component | May depend on |
+|---|---|
+| `context`, `config`, `problem`, `health`, `_scope` | Nothing internal |
+| `auth` | `context`, `exceptions`, `logging` |
+| `metrics` | `_scope`, `config`, `logging` |
+| `middleware` | `auth`, `context`, `exceptions`, `logging`, `metrics`, `problem`, `_errors`, `_scope` |
+| `exceptions` | `context`, `logging`, `problem`, `_errors`, `_scope` (+ `metrics`, `middleware` lazily) |
+| `grpc` | `auth`, `config`, `context`, `logging`, `metrics`, `_errors` |
+| `bootstrap` | The composition layer; the only module `fastapicommon/__init__.py` imports, so `import fastapicommon` never imports `grpc` |
+
+Computed from the imports; the full graph is in [ARCHITECTURE.md](ARCHITECTURE.md#module-dependency-graph).
+
+### Runtime components
+
+| Concern | Technology | Notes |
+|---|---|---|
+| **HTTP framework** | FastAPI `≥ 0.115.10` / Starlette `≥ 0.46` (tested 0.140 / 1.3) | Pure-ASGI middleware; `TRUSTED_PROXIES` for services behind a proxy |
+| **gRPC** | `grpcio ≥ 1.62` (`grpc` extra; tested 1.83) | Threaded and `grpc.aio` interceptors of the library's own (no OpenTelemetry gRPC instrumentation on the server) |
+| **Metrics** | `prometheus-client ≥ 0.20` | `REGISTRY` unless an isolated registry is passed; `_created` timestamp samples dropped (Go emits none) |
+| **Tracing** | OpenTelemetry `≥ 1.28` (tested 1.44), OTLP/gRPC exporter | One delegating global provider (inner SDK provider swapped); in-process fallback when the exporter cannot be created |
+| **Logging** | `structlog ≥ 24.1` through the stdlib root logger | Zap's JSON layout on stderr, console layout in dev / local; sampling off unless `LOG_SAMPLING=true` |
+| **Registry** | Vendored `registry.json` | 115 entries: 6 `approved`, 52 `proposed`, 57 `removed` (legacy names kept so the lint can name their replacement) |
+
+### Sibling platform libraries
+
+| Library | Relationship |
+|---|---|
+| `platform-gincommon` (Go) | Source of truth for the registry, reference rules, problem-type registry and the log / trace contracts; this library vendors and mirrors them |
+| `platform-pgcommon-py` | Same RFC 9457 `traceId` order and vectors; traces through the global provider this library installs |
+| `platform-eventcommon` | Python messaging; its `platform_messages_*` metrics are entries of the same registry |
+| `platform-interop-tests` | Cross-language suite (its `python-probe` depends on this library), run by CI's `interop` job |
+
+---
+
+## Integrating into a consuming service
+
+### 1. Prerequisites
+
+```bash
+pip install "platform-fastapicommon==0.2.0"          # or [grpc] for the gRPC interceptors
+# uv: uv add "platform-fastapicommon[grpc]==0.2.0"
+```
+
+Python 3.11+. Pin an exact version — never unpinned in production, especially while `0.y.z` ([VERSIONING.md](VERSIONING.md#consume-a-release)). The PyPI distribution name is `platform-fastapicommon`; the import name is `fastapicommon` (`fastapicommon` alone was rejected by PyPI as too similar to an unrelated package). Requests must arrive through the trusted API gateway, which authenticates the caller and injects `x-user-id` / `x-tenant-id` / `x-tenant-roles`; the service must not be reachable around the gateway.
+
+### 2. HTTP service
 
 ```text
 Incoming request
-  → ContextMiddleware        (outermost — binds RequestContext for the whole request)
-  → UnhandledErrorMiddleware (unclassified exception → 500 problem; never re-raised to the server)
-  → PrometheusMiddleware     (records the platform_http_* metrics)
-  → TimeoutMiddleware        (innermost — asyncio.wait_for around the handler)
-  ╠═ always public (no auth) ══════════════════════════════════╗
-  ║   GET  /health, /live, /ready  → health_router               ║
-  ║   GET  /metrics                → metrics_router               ║
-  ╚═══════════════════════════════════════════════════════════════╝
-  ╠═ your routes ══════════════════════════════════════════════╗
-  ║   → [optional per route] Depends(require_authenticated_user) ║
-  ║   → [optional per route] Depends(RequireRole(...))            ║
+  → TracingMiddleware            (outermost — the OTel server span, route label)
+  → ContextMiddleware            (validated ids + identity → RequestContext; X-Trace-ID / X-Request-ID)
+  → LoggingMiddleware            (http_request after the response)
+  → UnhandledErrorMiddleware     (unclassified exception → 500 problem; never re-raised to the server)
+  → PrometheusMiddleware         (platform_http_* at the end of the request)
+  → TimeoutMiddleware            (innermost — 503 if no response has started in time)
+  ╠═ public routes (no auth) ═══════════════════════════════════╗
+  ║   GET /health, /live, /ready → health_router                 ║
+  ║   GET /metrics               → metrics_router                ║
+  ╚══════════════════════════════════════════════════════════════╝
+  ╠═ your routes ═══════════════════════════════════════════════╗
+  ║   → [per route] Depends(require_authenticated_user)  (401)    ║
+  ║   → [per route] Depends(RequireRole(...))            (403)    ║
   ║   → your handler                                              ║
-  ╚═══════════════════════════════════════════════════════════════╝
+  ╚══════════════════════════════════════════════════════════════╝
 ```
 
-`ContextMiddleware` is added *last* in `create_platform_app`, which makes it *outermost*
-(see [ARCHITECTURE.md § Execution model](./ARCHITECTURE.md#execution-model) for why). Unlike
-`platform-gincommon`'s `RequireAuth`, **there is no middleware that globally rejects
-unauthenticated requests** — every route is reachable anonymously unless it explicitly adds
-an auth or RBAC dependency.
-
-### Complete HTTP example
-
 ```python
-from fastapi import APIRouter, Depends
+from contextlib import asynccontextmanager
 
-from fastapicommon.auth import CurrentUser, get_current_user
+from fastapi import APIRouter, Depends, FastAPI
+
+from fastapicommon.auth import CurrentUser, require_authenticated_user
 from fastapicommon.bootstrap import create_platform_app
 from fastapicommon.config import PlatformSettings
 from fastapicommon.exceptions import NotFoundException
@@ -170,17 +260,25 @@ from fastapicommon.rbac import RequireRole
 
 logger = get_logger(__name__)
 
-# PlatformSettings() reads APP_NAME, APP_ENV, OBSERVABILITY_DOMAIN (required while metrics are
-# on), OTLP_ENDPOINT, etc. from the environment — see "Environment variables" below.
-app = create_platform_app(settings=PlatformSettings())
+
+@asynccontextmanager
+async def lifespan(app: FastAPI):
+    # open pools / clients here; create_platform_app flushes spans after this exits
+    yield
+
+
+# PlatformSettings() reads APP_NAME, APP_ENV, OBSERVABILITY_DOMAIN (required while metrics are on),
+# BUILD_VERSION, OTEL_*, LOG_*, TRUSTED_PROXIES ... — see "Environment variables".
+# A missing or invalid identity raises ValueError here, before the service serves traffic.
+app = create_platform_app(settings=PlatformSettings(), lifespan=lifespan)
 
 router = APIRouter(prefix="/widgets", tags=["widgets"])
 
 
 @router.get("/me")
-async def whoami(user: CurrentUser = Depends(get_current_user)) -> dict:
-    # user_id/tenant_id are None, roles is () if the caller sent no identity headers —
-    # this route has no auth dependency, so it never rejects anonymous callers.
+async def whoami(user: CurrentUser = Depends(require_authenticated_user)) -> dict:
+    # 401 problem (and an "auth: request rejected" audit entry) before this runs
+    # when the identity is missing, invalid, repeated or over the role caps.
     logger.info("whoami_requested", user_id=user.user_id)
     return {"user_id": user.user_id, "tenant_id": user.tenant_id, "roles": user.roles}
 
@@ -188,114 +286,50 @@ async def whoami(user: CurrentUser = Depends(get_current_user)) -> dict:
 @router.delete("/{widget_id}", dependencies=[Depends(RequireRole("tenant_admin"))])
 async def delete_widget(widget_id: str) -> dict:
     if widget_id == "missing":
-        raise NotFoundException(f"widget {widget_id} not found")
+        raise NotFoundException(f"Widget {widget_id} was not found.")  # 404 problem
     return {"status": "deleted"}
 
 
 app.include_router(router)
+# run: uvicorn myservice.main:app --host 0.0.0.0 --port 8080
 ```
 
-Run it: `uvicorn myservice:app --reload` (or see `examples/fastapi_service/main.py` and
-`make run` in this repo for a runnable copy of this exact pattern).
+**Nothing is enforced globally**: unlike gincommon's `ProtectedMiddlewares`, a route without an auth or role dependency is reachable anonymously (its handler still sees the validated, possibly empty, identity). `examples/fastapi_service/main.py` is a runnable copy (`make run`).
 
-### Outbound header propagation
-
-When a handler calls another platform service, use `create_platform_http_client()` so the
-receiving service can correlate the call:
-
-```python
-from fastapicommon.propagation import create_platform_http_client
-
-async def list_items_handler() -> dict:
-    async with create_platform_http_client() as client:
-        # Injects x-user-id, x-tenant-id, x-tenant-roles, x-request-id, x-correlation-id (from
-        # the bound RequestContext, only when set) and traceparent (via OTel propagation).
-        resp = await client.get("http://inventory-svc/internal/stock")
-    return resp.json()
-```
-
-### Error response shape
-
-Every error — `PlatformException` subclasses, request validation, `HTTPException`, unmatched
-routes, timeouts and the unhandled-exception fallback — is an RFC 9457 problem
-(`application/problem+json`), identical to `platform-gincommon` v2's:
-
-```json
-{
-  "type": "https://errors.company.com/platform/not-found",
-  "title": "Not Found",
-  "status": 404,
-  "detail": "Widget 42 was not found.",
-  "instance": "/widgets/42",
-  "traceId": "4bf92f3577b34da6a3ce929d0e0e4736",
-  "errorCode": "NOT_FOUND",
-  "timestamp": "2026-10-15T10:45:22Z"
-}
-```
-
-```python
-from fastapicommon.exceptions import NotFoundException, PlatformException
-from fastapicommon.problem import problem_type
-
-TENDER_NOT_FOUND = problem_type("tender", "not-found", "Tender not found", 404, "TENDER_NOT_FOUND")
-
-raise NotFoundException("Widget 42 was not found.")
-raise PlatformException("Tender 123 was not found.", problem_type=TENDER_NOT_FOUND)
-```
-
-Validation failures are `400 platform/validation-failed` with `validationErrors`
-(`[{"field": "items[0].sku", "message": "must be at most 8 characters"}]`), a 5xx never carries
-a `detail`, and `tenantId` is present only for an authenticated identity (never on a 401).
-Clients parse problems with `fastapicommon.problem.problem_from_response(resp)`. Full contract,
-mapping and migration: [docs/problem-details.md](docs/problem-details.md).
-
----
-
-## gRPC — quick start
-
-Requires the `grpc` extra: `pip install "platform-fastapicommon[grpc]"`.
-
-As the [Features](#features) table shows, gRPC support here is **context propagation +
-metrics + logging only** — there's no auth-rejection or RBAC interceptor to add. A
-protected gRPC service must check identity itself inside each handler.
-
-### Complete gRPC example
+### 3. gRPC service
 
 ```python
 from concurrent import futures
 
 import grpc
 
+from fastapicommon.config import PlatformSettings
+from fastapicommon.context import get_request_context
 from fastapicommon.grpc import ContextServerInterceptor
 from fastapicommon.logging import configure_logging, get_logger
-from fastapicommon.telemetry import instrument_grpc_server
+from fastapicommon.telemetry import init_tracing_from_env
 
-# your generated stubs:
-import my_service_pb2
-import my_service_pb2_grpc
+import my_service_pb2, my_service_pb2_grpc  # your generated stubs
 
 logger = get_logger(__name__)
 
 
 class ItemService(my_service_pb2_grpc.ItemServiceServicer):
     def GetItem(self, request, context):
-        from fastapicommon.context import get_request_context
-
-        rc = get_request_context()  # bound by ContextServerInterceptor
-        if not rc.user_id:
+        rc = get_request_context()  # bound and validated by the interceptor
+        if not rc.user_id:  # no gRPC auth interceptor: check identity yourself
             context.abort(grpc.StatusCode.UNAUTHENTICATED, "missing x-user-id")
-
         logger.info("get_item", user_id=rc.user_id, tenant_id=rc.tenant_id)
         return my_service_pb2.GetItemResponse(id=request.id)
 
 
 def serve() -> None:
-    configure_logging()
-    instrument_grpc_server()  # opt-in; not automatic like the HTTP side
-
+    settings = PlatformSettings()
+    configure_logging(settings.log_level or None, settings.environment or None)
+    init_tracing_from_env()  # OTEL_SERVICE_NAME → APP_NAME + OTEL_*; the interceptor starts the spans
     server = grpc.server(
         futures.ThreadPoolExecutor(max_workers=10),
-        interceptors=[ContextServerInterceptor()],
+        interceptors=[ContextServerInterceptor(settings)],  # settings: initialises platform_grpc_* metrics
     )
     my_service_pb2_grpc.add_ItemServiceServicer_to_server(ItemService(), server)
     server.add_insecure_port("[::]:50051")
@@ -303,534 +337,524 @@ def serve() -> None:
     server.wait_for_termination()
 ```
 
-This repo's own `examples/grpc_service/server.py` uses `grpc`'s generic-handler API with
-raw bytes instead of compiled `.proto` stubs, purely so the demo runs with no protoc build
-step — see that file for a runnable variant of the pattern above (`make run` runs the
-FastAPI example; run the gRPC one directly with
-`python -m examples.grpc_service.server`).
-
-To emit the `platform_grpc_*` metrics from a gRPC-only service (no `create_platform_app()`),
-pass the settings to the interceptor — `ContextServerInterceptor(PlatformSettings())` — which
-initializes metrics exactly like `create_platform_app()` does (and raises on the same missing
-domain or invalid identities). See [Platform Observability Standard metrics](#platform-observability-standard-metrics).
-
-### Required gRPC metadata
-
-| Metadata key | Enforced? | Notes |
-|-------------|-----------|-------|
-| `x-user-id` / `x-tenant-id` | **No** — `ContextServerInterceptor` never rejects a call for missing metadata | Check `get_request_context().user_id` yourself if the RPC must be authenticated |
-| `x-tenant-roles` | No | Comma-separated (e.g. `admin,user`); parsed the same way as the HTTP header |
-| `x-request-id` / `x-correlation-id` | No | Generated if absent |
-
-### Outbound propagation
+An **asyncio** server uses `AsyncContextServerInterceptor` — the same behaviour for `async def` handlers; sync handlers keep running in the server's migration thread pool:
 
 ```python
-channel = grpc.intercept_channel(
-    grpc.insecure_channel("inventory-svc:50051"),
-    ContextClientInterceptor(),
-)
+server = grpc.aio.server(interceptors=[AsyncContextServerInterceptor(PlatformSettings())])
 ```
 
----
+What the interceptors do on every RPC: a server span named after the bounded method (continuing `traceparent`, with baggage), a `RequestContext` validated exactly like HTTP, `platform_grpc_*` metrics, a `grpc_request` log, and exception sanitizing — a status the handler chose (`context.abort`, `set_code`) is kept; any other exception becomes `INTERNAL "internal server error"` and an `unclassified error` entry (types and frames, never the message), where grpcio alone would send `UNKNOWN "Exception calling application: <message>"`. On `grpc.aio`, a deadline or client cancel is recorded as `DeadlineExceeded` / `Canceled`. **Not provided on gRPC:** auth / role interceptors, request timeouts (clients set deadlines), and context / spans / metrics for streaming RPCs (they get sanitizing only; bind context with `request_context_scope`). `examples/grpc_service/server.py` is a runnable variant.
 
-## RequestContext
-
-Both HTTP and gRPC handlers read the same structure via
-`fastapicommon.context.get_request_context()`:
+### 4. Authorization
 
 ```python
-@dataclass(frozen=True, slots=True)
-class CurrentUser:
-    user_id: str | None = None
-    tenant_id: str | None = None
-    roles: tuple[str, ...] = ()
+from fastapi import Depends
+from fastapicommon.rbac import RequireAllRoles, RequireAnyRole, RequireRole
 
-@dataclass(frozen=True, slots=True)
-class RequestContext:
-    request_id: str
-    correlation_id: str
-    user: CurrentUser = field(default_factory=CurrentUser)
+@router.post("/tenders", dependencies=[Depends(RequireAnyRole("buyer", "admin"))])
+async def create_tender(...): ...
 ```
 
-**Unlike `platform-gincommon`'s `RequestContext`, there is no `TraceID` or `ClientIP`
-field.** If you need the active OTel trace ID in a log line, read it yourself from
-`opentelemetry.trace.get_current_span()` — `fastapicommon.logging` does not enrich log
-records with it automatically (see [Correlation ID vs Trace ID](#correlation-id-vs-trace-id)).
+The role dependencies check the **validated** roles (empty when the identity was rejected) and log `authz: access denied` before the 403. Tenant- or resource-scoped policy belongs in the service: decide with `get_request_context()` and raise `ForbiddenException("The identity is not allowed to perform this operation.")` (or a `PlatformException` with your own type).
 
-**HTTP:** `Depends(get_current_user)` for just the user, or
-`fastapicommon.context.get_request_context()` for the full context (raises `LookupError`
-if called outside a bound context — see
-[ARCHITECTURE.md § Failure domains](./ARCHITECTURE.md#failure-domains)).
-**gRPC:** same `get_request_context()`, valid inside a unary-unary handler wrapped by
-`ContextServerInterceptor`.
+### 5. Outbound calls
 
----
-
-## Platform Observability Standard metrics
-
-This library implements the Enterprise Platform Observability Standard the same way the Go
-original [`platform-gincommon`](https://github.com/BCBP-SOLUTIONS-FZC-LLC/platform-gincommon)
-does (Go is the source of truth — see its `docs/observability/`). Metric names, help text,
-label names and order, label vocabularies and histogram buckets come from the Platform
-Observability Registry, vendored byte-for-byte at
-[`src/fastapicommon/metrics/registry.json`](src/fastapicommon/metrics/registry.json) (a copy of
-gincommon's `internal/obsregistry/registry.json`; a test fails if the two drift).
-
-### Configuration
-
-The domain is **mandatory** while metrics are enabled (the default):
-
-```python
-settings = PlatformSettings(
-    app_name="event-consumer",     # service label: ^[a-z][a-z0-9_-]{0,62}$
-    observability_domain="iam",    # or OBSERVABILITY_DOMAIN
-    environment="prod",            # or APP_ENV, then ENVIRONMENT: local|dev|test|staging|prod
-    build_version="v1.2.3",        # or BUILD_VERSION; "unknown" when unset
-)
-app = create_platform_app(settings=settings)
-```
-
-- The `platform_*` metrics below — the only HTTP/gRPC metrics the library emits — carry the
-  const labels `domain`, `service` and `environment` on every series.
-- `create_platform_app()` (and `ContextServerInterceptor(settings)`) **raise `ValueError` at
-  startup** — where Go panics — when no domain is configured (neither `observability_domain`
-  nor `OBSERVABILITY_DOMAIN`; the message names `OBSERVABILITY_DOMAIN`), on a domain that is not
-  in the registry, an `app_name` that is not a valid service label, or an environment that is
-  missing or not one of
-  `local, dev, test, staging, prod`. There are no aliases: `production` and `development` are
-  rejected. `PlatformSettings.environment`'s `"development"` default does not count as an
-  environment; set `APP_ENV`/`ENVIRONMENT` or pass `environment=` explicitly.
-- With `enable_metrics=False` (`ENABLE_METRICS=false`) no domain is needed: no metrics are
-  initialized and `/metrics` is not mounted. A domain that is configured is still validated.
-- Initialization is process-wide and the first app/interceptor created in the process sets the
-  identity (like gincommon's `sync.Once`). In tests, call
-  `fastapicommon.metrics.init_metrics(options, registry=CollectorRegistry())` first to get an
-  isolated registry; `/metrics` then serves that registry.
-
-### Emitted metrics
-
-Const labels on every `platform_*` series: `domain`, `service`, `environment`.
-
-| Metric | Type | Labels | Recorded by |
+| Destination | HTTP | gRPC | Sends |
 |---|---|---|---|
-| `platform_build_info` | gauge (always 1) | `version` | initialization |
-| `platform_http_requests_total` | counter | `method`, `route`, `status_class`, `error_class` | `PrometheusMiddleware` |
-| `platform_http_request_duration_seconds` | histogram (`request_duration` buckets) | same | `PrometheusMiddleware` |
-| `platform_http_request_size_bytes` | histogram (`payload_size` buckets) | same | `PrometheusMiddleware` (Content-Length, 0 when unknown) |
-| `platform_http_response_size_bytes` | histogram (`payload_size` buckets) | same | `PrometheusMiddleware` (Content-Length, else bytes streamed) |
-| `platform_http_active_requests` | gauge | `route` | `PrometheusMiddleware` |
-| `platform_http_panics_total` | counter | `method`, `route` | `PrometheusMiddleware` — unhandled exceptions (also counted as 5xx above) |
-| `platform_http_rate_limited_requests_total` | counter | `method`, `route` | `PrometheusMiddleware` — any 429 response |
-| `platform_http_request_timeouts_total` | counter | `method`, `route` | `TimeoutMiddleware` — each 503 timeout problem it returns |
-| `platform_grpc_server_handled_total` | counter | `grpc_method`, `grpc_code`, `status_class`, `error_class` | `ContextServerInterceptor` (unary-unary) |
-| `platform_grpc_server_handling_seconds` | histogram (`request_duration` buckets) | `grpc_method`, `status_class`, `error_class` | same |
-| `platform_grpc_server_request_size_bytes` / `_response_size_bytes` | histogram (`payload_size` buckets) | same | same (protobuf `ByteSize()`, 0 for non-protobuf messages) |
-| `platform_grpc_server_inflight_requests` | gauge | `grpc_method` | same |
-| `platform_grpc_rate_limited_requests_total` | counter | `grpc_method` | same — RPCs ending `ResourceExhausted` |
-| `platform_grpc_panics_total` | counter | `grpc_method` | same — handler exceptions without an explicit status (client sees `INTERNAL "internal server error"`) |
-| `platform_unclassified_errors_total` | counter | `transport` (`http` \| `grpc`) | every exception nothing classified (`UnhandledErrorMiddleware` / the exception handler, and the gRPC interceptor); both series start at 0. Alert on it (gincommon's `PlatformUnclassifiedErrors`); diagnose with the `unclassified error` log event |
+| Trusted internal platform service | `create_platform_http_client()` | `grpc.intercept_channel(channel, ContextClientInterceptor())` + `instrument_grpc_client()` | HTTP: `traceparent` (+ baggage), `x-request-id`, `x-correlation-id`, `x-user-id`, `x-tenant-id`, `x-tenant-roles` · gRPC: the ids and identity (no roles); `traceparent` via `instrument_grpc_client()` |
+| Third parties (outside the trust boundary) | a plain `httpx` client + `inject_trace_context(headers)` if you want the trace | plain channel | only what you add |
+| No request (jobs, consumers) | `inject_trace_context(headers)` | — | `traceparent` (+ baggage when enabled) |
 
-Label values, all bounded:
+`create_platform_http_client()` forwards identity to **any** host it is given (LLD OQ-6) — use it only for internal platform services.
 
-- `method` — the standard HTTP methods; anything else (e.g. `PURGE`) is `OTHER`.
-- `route` — the route template in the registry's (Gin-style) syntax, so Go and Python services
-  report routes identically: `/items/{item_id}` → `/items/:item_id`, `{rest:path}` → `*rest`.
-  Unmatched requests, 405s and slash redirects are `unknown` — never the raw URL path.
-- `status_class` / `error_class` — `2xx`/`success` for HTTP 200-399, `4xx`/`client_error` for
-  400-499, else `5xx`/`server_error`; for gRPC, `OK` is 2xx, client-side codes (`Canceled`,
-  `InvalidArgument`, `NotFound`, `AlreadyExists`, `PermissionDenied`, `Unauthenticated`,
-  `FailedPrecondition`, `OutOfRange`, `Aborted`, `DeadlineExceeded`, `ResourceExhausted`) are 4xx,
-  the rest 5xx — identical to gincommon.
-- `grpc_code` — Go's code names (`NotFound`, `Canceled`, ...); `grpc_method` — the full method
-  (`/package.Service/Method`) or `unknown`.
+```python
+from fastapicommon.propagation import create_platform_http_client
 
-The `platform_*` collectors do not expose prometheus_client's `*_created` samples (Go's client
-has none, and Go's `metricslint check` would read them as unregistered `platform_*` families).
+async with create_platform_http_client() as client:
+    resp = await client.get("http://inventory-svc/internal/stock")
+```
 
-### Pre-standard metric names
+### 6. Custom metrics
 
-The library's pre-standard metric names were removed outright, with no compatibility period:
-neither this library nor gincommon was ever deployed, so nothing depended on them. See the
-[CHANGELOG](./CHANGELOG.md) for the list; Go's `metricslint check` reports them as errors.
+```python
+from fastapicommon.metrics import new_counter, new_shared_counter
 
-### Compliance test
+# after create_platform_app (before it they raise MetricsNotInitializedError)
+processed = new_shared_counter("platform_messages_processed_total")   # Tier 1/2: name, help, labels, buckets from the registry
+processed.labels(queue="iam.events", event_type="user.created").inc()
 
-`tests/integration/test_metrics_compliance.py` drives every instrumented code path through
-`create_platform_app()` and the gRPC interceptor, then asserts that only `platform_*` families
-are emitted and that every `platform_*` sample
-carries exactly the registry labels plus the const labels, with every value inside the
-vocabulary of the vendored registry. Consuming services can do the same against
-`fastapicommon.metrics.metrics_registry()` using `fastapicommon.metrics.default_registry()`.
+hmac_failures = new_counter(                                          # Tier 3: <domain>_<service>_*, checked at construction
+    "iam_event_consumer_hmac_failures_total", "HMAC verification failures", ["reason"]
+)
+```
+
+A new shared (`platform_*` or `<domain>_*`) metric is a **registry change in platform-gincommon first** (status `proposed`), then a re-vendor here (`make gincommon-parity`, `make metrics-inventory`), then `new_shared_*`. Add `fastapicommon.metrics.compliance.validate(metrics_registry())` to the service's tests:
+
+```python
+from fastapicommon.metrics import metrics_registry
+from fastapicommon.metrics.compliance import validate
+
+report = validate(metrics_registry())
+assert report.ok(), "\n".join(map(str, report.errors()))
+```
+
+### 7. Tracing and logging outside handlers
+
+| API | Use |
+|---|---|
+| `new_tracer(scope)` / `noop_tracer()` | Child spans in services, repositories and consumers — tracers (and `start_as_current_span` decorators) obtained before tracing is installed follow the active provider |
+| `span_trace_id()` | Trace id of the current span, for log correlation |
+| `record_span_error(exc, description)` | Mark the current span failed (type only — never the message) |
+| `inject_trace_context(headers)` / `extract_trace_context(carrier)` | Propagate W3C context without a request |
+| `get_logger(__name__)` | Entries carry `request_id`, `correlation_id`, `trace_id`, `tenant_id`, `user_id` automatically inside a request |
+
+### 8. Returning and handling errors
+
+Raise; the registered handlers render problems. Define domain types once:
+
+```python
+from fastapicommon.exceptions import NotFoundException, PlatformException
+from fastapicommon.problem import problem_type
+
+TENDER_NOT_FOUND = problem_type("tender", "not-found", "Tender not found", 404, "TENDER_NOT_FOUND")
+
+raise NotFoundException("Widget 42 was not found.")                                   # platform/not-found
+raise PlatformException("Tender 123 was not found.", problem_type=TENDER_NOT_FOUND)    # tender/not-found
+```
+
+Request-model validation failures are `400 platform/validation-failed` with `validationErrors` (`[{"field": "items[0].sku", "message": "..."}]`, never the rejected value); an unexpected exception is a `500 internal-error` with no detail and an `unclassified error` entry (alert on `platform_unclassified_errors_total`). Every platform 4xx/5xx from another service is a problem:
+
+```python
+from fastapicommon.problem import problem_from_response
+
+if (p := problem_from_response(resp)) is not None:
+    logger.warning("upstream_problem", status=p.status, type=p.type, error_code=p.error_code, trace_id=p.trace_id)
+```
+
+Branch on `status`, `type` and `errorCode`, never on `title` / `detail` text. Mapping table, validation and migration: [docs/problem-details.md](docs/problem-details.md).
+
+### 9. Rate limits
+
+The library implements no rate limiter — throttling belongs to the gateway / mesh. `PrometheusMiddleware` *observes* `429` responses (`platform_http_rate_limited_requests_total`) and logs at most one `rate limited` warn per route per second, with a `suppressed` count; gRPC counts `ResourceExhausted`.
+
+### 10. Upgrading to 0.3.0
+
+`0.3.0` (CHANGELOG `[Unreleased]`) aligns with platform-gincommon `v2.0.0` and is breaking. Before upgrading a service:
+
+- [ ] **Set the observability identity.** `OBSERVABILITY_DOMAIN` (a registry domain such as `iam`) and `APP_ENV` (`local|dev|test|staging|prod`; `PlatformSettings.environment` no longer defaults to `development`).
+- [ ] **Point traces at a collector.** The default endpoint is now `localhost:4317` (TLS outside dev/local, 10% sampling): set `OTEL_EXPORTER_OTLP_ENDPOINT`, or `OTEL_TRACES_EXPORTER=none`.
+- [ ] **Update log queries.** Logs are on **stderr** in Zap's layout: `event` → `msg`, `timestamp` → `ts`; `grpc_request_completed` → `grpc_request` (`grpc_code`, `duration_ms`).
+- [ ] **Set `TRUSTED_PROXIES`** behind a proxy / load balancer, or the recorded client IP is the proxy's.
+- [ ] **Make the gateway replace identity headers**, never append them: repeated identity headers and oversized role headers now make the request unauthenticated.
+- [ ] **Replace `status_code` / `code` class attributes** on `PlatformException` subclasses with `problem_type = ...` (else `TypeError` at import).
+- [ ] **Use `AsyncContextServerInterceptor`** on `grpc.aio` servers.
+- [ ] **Update dashboards and alerts** to the `platform_*` names (`fastapicommon-metricslint refs dashboards/ rules/`); HTTP latency now includes the body, cancelled requests count as 499 / `client_error`, and span `exception.type` is qualified (`module.Class`).
+
+Full list: CHANGELOG `[Unreleased]`; concept mapping from Go: [docs/MigrationGuide.md](docs/MigrationGuide.md).
 
 ---
 
-## Required HTTP headers
+## Local development
 
-| Header | Enforced? | Purpose |
-|--------|-----------|---------|
-| `x-user-id` | No | User identity — must be injected by a trusted API gateway; read verbatim, not cryptographically verified |
-| `x-tenant-id` | No | Tenant identity — same trust assumption |
-| `x-tenant-roles` | No | Comma-separated roles (e.g. `admin,user`); split and stripped, **not** format-validated or deduplicated |
-| `x-request-id` | No | Any non-empty value is accepted and echoed back verbatim; a UUID is generated only if absent |
-| `x-correlation-id` | No | Same as above |
-| `traceparent` | No | W3C trace context — continues an upstream OTel trace if present |
+### Prerequisites
 
-**No header is required or format-validated.** This is a real difference from
-`platform-gincommon`, which validates length/character-set on identity headers and
-request IDs. See [SECURITY.md § Trust model](./SECURITY.md#trust-model-and-known-limitations)
-for the full list of what this library does and doesn't guard against.
+- Python 3.11+ and [`uv`](https://docs.astral.sh/uv/) (`brew install uv`) — `uv.lock` pins every dependency
+- Docker — only for the image tests (`make test-e2e`, `make smoke-test`), the optional observability stack (`make docker-up`) and, without a local `promtool`, `make metrics-lint`'s rule tests
+- A platform-gincommon checkout next to this repo for `make gincommon-parity` (`GINCOMMON_DIR`, default `../../platform-gincommon`)
 
----
-
-## Correlation ID vs Trace ID
-
-`platform-gincommon` tracks a request ID and an OTel trace ID as two separate,
-purpose-built fields (`RequestContext.TraceID` plus a request ID helper). **This library
-only has one:** `request_id` / `correlation_id` on `RequestContext`, sourced from the
-`x-request-id` / `x-correlation-id` headers (or generated). OTel spans are created
-independently by `FastAPIInstrumentor` and have their own trace IDs, but **those trace IDs
-are not copied into `RequestContext` or into structlog's enrichment fields.**
-
-Practically: `request_id`/`correlation_id` is what you search logs by; the OTel trace ID
-(visible in Tempo/Jaeger, or via `opentelemetry.trace.get_current_span().get_span_context().trace_id`)
-is what you use to find the full distributed trace. The two are **not** correlated to each
-other out of the box in this library — if you need that, add a structlog processor that
-reads the active span's trace ID (see `fastapicommon/logging/config.py::_add_request_context`
-for the pattern to extend).
-
----
-
-## Calling the API (local testing)
+### Setup
 
 ```bash
-# Public route — no auth headers
-curl -i http://localhost:8080/health
-
-# Anonymous call — no auth enforced, no identity in the response
-curl -i http://localhost:8080/widgets/me
-
-# With identity headers
-curl -i http://localhost:8080/widgets/me \
-  -H "x-user-id: user-1" \
-  -H "x-tenant-id: tenant-1" \
-  -H "x-tenant-roles: tenant_admin" \
-  -H "x-request-id: my-req-001"
-
-# Admin delete (RequireRole("tenant_admin"))
-curl -i -X DELETE http://localhost:8080/widgets/42 \
-  -H "x-user-id: user-1" -H "x-tenant-id: tenant-1" -H "x-tenant-roles: tenant_admin"
-
-# Propagate an upstream trace
-curl -i http://localhost:8080/widgets/me \
-  -H "x-user-id: user-1" -H "x-tenant-id: tenant-1" \
-  -H "traceparent: 00-4bf92f3577b34da6a3ce929d0e0e4736-00f067aa0ba902b7-01"
+git clone https://github.com/BCBP-SOLUTIONS-FZC-LLC/platform-fastapicommon
+cd platform-fastapicommon
+make setup       # uv sync (dev group + grpc extra), .env from .env-example, logs/, pre-commit hook
+make test-unit   # no Docker needed
+make ci          # every gate CI runs (lint, mypy, metrics-lint, docs, build, tests + coverage)
+make run         # example service on :8080
 ```
 
-Successful and error responses alike include `x-request-id` and `x-correlation-id`
-headers.
+### Common commands
+
+| Command | Description |
+|---|---|
+| `make setup` / `make install` / `make install-hooks` | Everything for a fresh clone / `uv sync` only / the pre-commit hook |
+| `make format` (`fmt`) / `make format-check` (`fmt-check`) | ruff format + black + ruff `--fix` / the check-only variant CI runs |
+| `make lint` / `make typecheck` | ruff / mypy `--strict` |
+| `make lock-check` / `make pip-check` / `make vulncheck` | `uv.lock` in sync / consistent venv / pip-audit |
+| `make metrics-lint` / `make metrics-inventory` / `make gincommon-parity` | Registry self-check, rule references, promtool, inventory drift / regenerate the inventory / parity with gincommon |
+| `make test` (`test-all`) | unit + integration + e2e (requires Docker) |
+| `make test-unit` / `make test-int` / `make test-e2e` | One suite |
+| `make test-ci` / `make cover-check` / `make cover` / `make cover-func` | CI's test gate / + coverage gate (≥ 90%) / HTML report / per-file report |
+| `make smoke-test` | Build the image, `smoke-tests.sh` + `tests/e2e` against it (CI's "Smoke tests") |
+| `make scan` / `make lint-docker` | Trivy / hadolint (CI thresholds) |
+| `make build` | Wheel + sdist (hash-locked backend), `twine check --strict`, installed-wheel check |
+| `make api-compat` / `make release-guard TAG=vX.Y.Z` | griffe public-API diff / pre-tag version + CHANGELOG check |
+| `make run` / `make show-config` | Example service (`--reload`) / print the resolved settings and tracing config |
+| `make docker-up` / `make docker-down` / `make docker-reset` / `make docker-logs` / `make docker-ps` | The local observability stack |
+| `make docs-check` / `make docs-serve` | Diagram sync / pydoc on :8081 |
+| `make pin-base-images` | Re-pin the Dockerfile `FROM` digests |
+| `make ci` | `lock-check` + `pip-check` + `format-check` + `lint` + `typecheck` + `metrics-lint` + `docs-check` + `ci-scripts-test` + `vulncheck` + `build` + `test-ci` + coverage gate |
+| `make clean` / `make help` | Remove venv, caches, build output and logs / list every target |
+
+### Running a single test
+
+```bash
+uv run pytest tests/unit/middleware/test_context_middleware.py -k ambiguous --no-cov -v
+uv run pytest tests/integration/test_observability_signals.py::test_cancelled_request_is_aborted_not_a_panic --no-cov
+```
+
+`--no-cov`: a subset alone is below the 90% gate (`pyproject.toml`), which is meant for the whole suite.
+
+### Calling the example service locally
+
+```bash
+make run
+curl -i http://localhost:8080/health                       # 200 {"status":"ok"}, X-Request-ID + X-Trace-ID
+curl -s http://localhost:8080/metrics | grep '^platform_build_info'
+
+curl -i http://localhost:8080/widgets/me \
+  -H "x-user-id: user-1" -H "x-tenant-id: tenant-1" -H "x-tenant-roles: tenant_admin" \
+  -H "x-request-id: my-req-001"
+
+# RequireRole("tenant_admin"): 403 problem without the role
+curl -i -X DELETE http://localhost:8080/widgets/42 -H "x-user-id: user-1" -H "x-tenant-id: tenant-1"
+
+# Repeated identity → identity absent; on an authenticated route: 401 "Ambiguous x-user-id header."
+curl -i http://localhost:8080/widgets/me -H "x-user-id: alice" -H "x-user-id: mallory"
+
+# Continue an upstream trace — X-Trace-ID echoes 4bf92f35...
+curl -i http://localhost:8080/health -H "traceparent: 00-4bf92f3577b34da6a3ce929d0e0e4736-00f067aa0ba902b7-01"
+```
+
+(The example's `/widgets/me` uses `get_current_user`, so it answers anonymously; the 401 needs a route with `require_authenticated_user`, as in [§2](#2-http-service).)
+
+### Developer tools
+
+```bash
+uv run fastapicommon-metricslint check --url http://localhost:8080/metrics   # validate a live scrape
+uv run fastapicommon-metricslint refs docker/prometheus/rules                # legacy / unregistered names
+make show-config                                                             # what the library resolves from the environment
+make docs-serve                                                              # browse the public API (pydoc :8081)
+```
+
+---
+
+## Testing observability locally
+
+Every request through the stack produces a span, metric observations and a log line; the local stack shows all three.
+
+### How the pipeline works
+
+```
+example service / your service (make run)
+    │
+    ├── spans ──OTLP/gRPC :4317──▶ otel-collector ──▶ Tempo (:3200)
+    │
+    ├── /metrics ◀──scrape── Prometheus (:9090) ── vendored recording rules + SLO burn-rate alerts
+    │
+    └── JSON logs ──LOG_FILE──▶ Promtail ──▶ Loki (:3100)
+                                                   │
+                                 Grafana (:3000) ◀─┴─ Tempo · Prometheus · Loki datasources
+```
+
+### Step 1 — Start the stack
+
+```bash
+make docker-up
+```
+
+| Container | Image | Host port(s) | Purpose |
+|---|---|---|---|
+| `otel-collector` | `otel/opentelemetry-collector-contrib` | `4317`, `4318` | OTLP gRPC/HTTP receiver → Tempo |
+| `tempo` | `grafana/tempo:2.7.2` | `3200` | Trace store |
+| `prometheus` | `prom/prometheus` | `9090` | Scrapes `host.docker.internal:8080/metrics`; loads the reference rules |
+| `loki` | `grafana/loki` | `3100` | Log store |
+| `promtail` | `grafana/promtail` | — | Ships `logs/app.log` (`LOG_FILE`) into Loki |
+| `grafana` | `grafana/grafana` | `3000` | Dashboards / Explore (trace ↔ log correlation provisioned) |
+
+Ports are overridable (`OTEL_COLLECTOR_GRPC_PORT`, `TEMPO_HTTP_PORT`, `PROMETHEUS_HTTP_PORT`, `LOKI_HTTP_PORT`, `GRAFANA_HTTP_PORT`); the scrape target is `PROMETHEUS_SCRAPE_TARGET`.
+
+### Step 2 — Run the app and generate traffic
+
+```bash
+# make run sets APP_ENV=dev, OBSERVABILITY_DOMAIN=iam, LOG_FILE=logs/app.log, OTEL_EXPORTER_OTLP_ENDPOINT=localhost:4317
+make run
+for i in $(seq 1 20); do curl -s localhost:8080/health >/dev/null; done
+curl -s -X DELETE localhost:8080/widgets/missing -H "x-tenant-roles: tenant_admin" >/dev/null   # 404 problem
+```
+
+`APP_ENV=dev` gives plaintext OTLP, 100% sampling and the console log layout on stderr (`LOG_FILE` stays JSON).
+
+### Step 3 — Inspect each signal
+
+| Signal | Where | Query |
+|---|---|---|
+| Metrics | http://localhost:9090 | `sum by (route, status_class) (rate(platform_http_requests_total[1m]))`, `platform_unclassified_errors_total` |
+| Traces | Grafana → Explore → Tempo | Search by service name, or paste an `X-Trace-ID` from a response |
+| Logs | Grafana → Explore → Loki | `{job="platform-fastapicommon-example"} \|= "http_request"` — `trace_id` / `request_id` link a log line to its trace |
+| Rules | `make metrics-lint` | `promtool check rules` + `promtool test rules` over `docker/prometheus/rules` |
+
+### Troubleshooting observability
+
+| Symptom | Likely cause | Fix |
+|---|---|---|
+| `ValueError` naming `OBSERVABILITY_DOMAIN` at startup | No `observability_domain` and no `OBSERVABILITY_DOMAIN` | Set one — a registry domain such as `iam` |
+| `ValueError`: environment not in the vocabulary | `APP_ENV` / `ENVIRONMENT` unset, or `production` / `development` | Use `local\|dev\|test\|staging\|prod` |
+| Exporter retry warnings / no traces in Tempo | Collector unreachable, or TLS against a plaintext collector | `make docker-up`; outside dev set `OTEL_EXPORTER_OTLP_INSECURE=true` only for plaintext collectors; `OTEL_TRACES_EXPORTER=none` to switch export off |
+| Only ~10% of requests traced | Non-dev default ratio `0.1` | `OTEL_TRACES_SAMPLER_RATIO=1.0` locally |
+| Traces as `service.name=unknown_service` | `init_tracing_from_env()` without `OTEL_SERVICE_NAME` / `APP_NAME` | Set one, or use `create_platform_app` / `init_tracing(TracingConfig(...))` |
+| `client_ip` is the proxy's address | `TRUSTED_PROXIES` unset behind a proxy | List the proxy CIDRs |
+| Authenticated requests answer 401 `Ambiguous ... header.` | The gateway appends identity headers | Make it replace them |
+| No logs in Loki | `LOG_FILE` unset | `make run` sets it; otherwise `LOG_FILE=logs/app.log` |
+| `metricslint check --strict` fails on `proposed` | The `platform_*` entries await governance ratification | Run without `--strict` until ratification (LLD OQ-1) |
+
+---
+
+## Testing
+
+### Canonical tests (do not break)
+
+- **`tests/unit/metrics/test_compliance.py`**, **`tests/integration/test_metrics_compliance.py`** — the library's own scrape validates against the registry with 0 errors; **`tests/unit/metrics/test_metrics_registry.py`** (`test_vendored_registry_is_identical_to_gincommon`) pins the vendored copy.
+- **`tests/unit/exceptions/test_unclassified.py`**, **`tests/unit/grpc/test_grpc_errors.py`**, **`tests/unit/grpc/test_grpc_aio.py`** — no exception message reaches a client or a log, on HTTP, threaded gRPC and `grpc.aio` (unary and every streaming kind, and a context that cannot abort).
+- **`tests/integration/test_observability_signals.py`** — spans, logs and metrics for success, 404, 500, a stream that fails mid-body (aborted) and a cancelled request (499, never a panic).
+- **`tests/unit/middleware/test_context_middleware.py`**, **`tests/unit/grpc/test_grpc.py`** — identity validation on both transports: ambiguity, role caps, ids, trusted-proxy client IP (untrusted, non-IP and IPv6 peers).
+- **`tests/unit/middleware/test_tracing_middleware.py`** — the server span on its own: forwarding headers never believed without `ContextMiddleware`'s trusted proxies, span status per response class, an escaped exception as a `panic` span without its message.
+- **`tests/integration/test_bootstrap.py`** — `create_platform_app` wiring, lifespans and `on_event` handlers, rejected identities as 401 problems with their audit entries.
+- **`tests/unit/telemetry/test_tracing_contract.py`** — the delegating provider: captured tracers and decorators follow swaps, flush keeps the provider, a service-installed provider is never replaced.
+- **`tests/unit/middleware/test_timeout_cancellation.py`** — the server's own cancellation propagates through a timed-out request.
+- **`tests/unit/problem`** — the RFC 9457 model and the platform types against gincommon's `registry.md`.
+
+Full list with the invariants each pins: [LLD §14.5](docs/lld/platform-fastapicommon-lld.md#145-canonical-test-cases-do-not-break).
+
+### Coverage
+
+`make cover-check` (CI: `coverage-gate.sh`, `COVERAGE_THRESHOLD`) fails below **90%** (`pyproject.toml` `fail_under`) over unit + integration; the current total is **100%** (lines and branches) across 423 tests (388 unit, 29 integration, 6 e2e), with no `pragma: no cover` in `src/`. Keep new code at 100%: test a reachable path, restructure an unreachable one away. `tests/e2e` runs against the built image (`--no-cov`: it measures a container, not this process). The same suites also run on Python 3.11 / 3.13 / 3.14 and with every runtime dependency at its floor (`lowest-deps.sh`).
+
+---
+
+## Environment variables
+
+Read by `PlatformSettings` / the library at startup in a consuming service (`.env-example` documents the example's set):
+
+| Variable | Default | Purpose |
+|---|---|---|
+| `APP_NAME` | `platform-service` | FastAPI title, `service` label, OTel `service.name` |
+| `APP_ENV` / `ENVIRONMENT` | unset | `environment` label (`local\|dev\|test\|staging\|prod`, trimmed + lowercased; `APP_ENV` first; required while metrics are on). `dev` / `local` select the console log layout, debug level, plaintext OTLP and 100% sampling |
+| `OBSERVABILITY_DOMAIN` | — (**required** while `ENABLE_METRICS` is true) | `domain` label; OTel `service.namespace` |
+| `BUILD_VERSION` | `unknown` | `platform_build_info{version}`, OTel `service.version` |
+| `LOG_LEVEL` | `debug` dev/local, else `info` | `debug\|info\|warn\|error\|critical`; invalid → default + one warning |
+| `LOG_SAMPLING` | `false` | Zap sampling (100/s per message+level, then 1 in 100) |
+| `LOG_FILE` | — | Also write JSON logs to this file (same level and sampling) |
+| `REQUEST_TIMEOUT_SECONDS` | `30.0` | `TimeoutMiddleware`: 503 if no response has started in time |
+| `TRUSTED_PROXIES` | `""` | Comma-separated IPs / CIDRs whose `X-Forwarded-For` / `X-Real-IP` are believed (empty: the socket peer) |
+| `ENABLE_TRACING` / `ENABLE_METRICS` | `true` | Stack switches |
+| `PROBLEM_TYPE_BASE` | `https://errors.company.com` | Problem `type` URI base; the same for every service of an organisation |
+| `OTEL_EXPORTER_OTLP_ENDPOINT` | `localhost:4317` | OTLP/gRPC collector; `none` / `off` / `disabled` turns export off (spans stay in-process) |
+| `OTLP_ENDPOINT` | — | Overrides `OTEL_EXPORTER_OTLP_ENDPOINT` (same `none` values) |
+| `OTEL_TRACES_EXPORTER` | — | Only `none` is honoured: export off (also with an explicit endpoint) |
+| `OTEL_EXPORTER_OTLP_INSECURE` | `true` in dev/local, else `false` | Plaintext OTLP |
+| `OTEL_TRACES_SAMPLER_RATIO` / `OTEL_TRACES_SAMPLER_ARG` | `1.0` dev/local, `0.1` otherwise | Sampling ratio `0.0`–`1.0` (`_RATIO` first; invalid or NaN → default + warning) |
+| `OTEL_TRACES_IGNORE_REMOTE_PARENT_SAMPLED` | `false` | Re-sample remote-sampled parents at the ratio — enable on edge services |
+| `OTEL_PROPAGATOR_BAGGAGE` | `false` | W3C baggage propagation |
+| `OTEL_SERVICE_NAME` | — | `init_tracing_from_env()` only (then `APP_NAME`); unset → provisional `unknown_service` |
+| `APP_PORT` | `8080` | Example service only |
+
+Boolean values are case-insensitive (`true`/`1`/`yes`, `false`/`0`/`no`); anything else warns once and uses the default.
 
 ---
 
 ## Security
 
 | Topic | Guidance |
-|--------|----------|
-| **Trust boundary** | `x-user-id`, `x-tenant-id`, `x-tenant-roles` must be set by a **trusted API gateway**. `ContextMiddleware` reads them verbatim and does not verify or reject anything. |
-| **No global auth enforcement** | Every route is anonymous-reachable by default. Add `Depends(require_authenticated_user)` or an RBAC dependency per route that needs it. |
-| **Authorization** | `RequireRole`/`RequireAnyRole`/`RequireAllRoles` check roles already present on the bound `RequestContext` — they don't verify the roles weren't forged by the client. The gateway must not forward client-supplied role headers. |
-| **`/metrics`** | Served without authentication whenever `enable_metrics` is true. Restrict via network policy, an auth proxy, or a dedicated admin port in production. |
-| **OTLP** | Insecure (no TLS) by default when `environment` is `dev`/`development`/`local`; TLS required otherwise. See [ARCHITECTURE.md § Tracing initialization](./ARCHITECTURE.md#tracing-initialization). |
-| **Logging** | No sanitization — header values are copied into log fields and response headers verbatim. See [SECURITY.md](./SECURITY.md) for the full trust model. |
-
-Full policy: **[SECURITY.md](./SECURITY.md)**.
-
----
-
-## Important rules for handler authors
-
-| Rule | Why |
-|------|-----|
-| **Never read identity headers directly** (`request.headers["x-user-id"]`) in a handler | Bypasses nothing today (there's no validation to bypass), but breaks the moment this library adds validation. Always use `Depends(get_current_user)` or `get_request_context()`. |
-| **Never write identity headers in a service response** | Identity headers flow inbound from the gateway only. Use `create_platform_http_client()` for outbound calls instead of hand-copying headers. |
-| **Add RBAC/auth dependencies explicitly on every route that needs them** | Unlike `platform-gincommon`, nothing is enforced by middleware — a route with no `Depends(...)` is reachable anonymously, full stop. |
-| **Use `create_platform_http_client()` for all service-to-service calls** | Otherwise `traceparent`/`x-request-id`/`x-correlation-id` don't reach the next hop, and the distributed trace breaks at that boundary. |
-| **Don't add an auth dependency to `/health`, `/live`, `/ready`** | They're unauthenticated by design (`health_router` has no `Depends`) — load balancer and k8s probes don't send identity headers. Wrapping them in an auth check breaks liveness/readiness probing. |
-
-### Common mistakes
-
-**Reading identity headers directly (fragile):**
-
-```python
-# ❌ Bypasses get_current_user / RequestContext entirely
-user_id = request.headers.get("x-user-id")
-```
-
-**Using the dependency (correct):**
-
-```python
-# ✅ Consistent with everything else that reads identity
-async def handler(user: CurrentUser = Depends(get_current_user)) -> dict:
-    return {"user_id": user.user_id}
-```
-
-**Outbound call without propagation (breaks tracing):**
-
-```python
-# ❌ Downstream service gets no trace context or identity
-async with httpx.AsyncClient() as client:
-    await client.get("http://other-svc/data")
-```
-
-**Outbound call with propagation (correct):**
-
-```python
-# ✅ traceparent, x-request-id, x-correlation-id, x-user-id, x-tenant-id all forwarded
-async with create_platform_http_client() as client:
-    await client.get("http://other-svc/data")
-```
-
----
-
-## Public API
-
-See **[ARCHITECTURE.md § Public API](./ARCHITECTURE.md#public-api)** for the complete
-symbol table for every `fastapicommon.*` module — kept there rather than duplicated here
-so the two docs can't drift out of sync.
-
-| Module | Responsibility |
 |---|---|
-| `fastapicommon.auth` | Header constants, `CurrentUser`, `get_current_user`, `require_authenticated_user` |
-| `fastapicommon.context` | contextvars-based `RequestContext` propagation |
-| `fastapicommon.logging` | structlog JSON logging enriched with request context |
-| `fastapicommon.telemetry` | OpenTelemetry tracing setup for HTTP/gRPC |
-| `fastapicommon.metrics` | Prometheus HTTP/gRPC metrics + `/metrics` router; `init_metrics`, `MetricsOptions`, `metrics_registry`, `default_registry` (observability standard) |
-| `fastapicommon.middleware` | `ContextMiddleware`, `TimeoutMiddleware` |
-| `fastapicommon.rbac` | `RequireRole` / `RequireAnyRole` / `RequireAllRoles` dependencies |
-| `fastapicommon.exceptions` | `PlatformException` hierarchy + handlers |
-| `fastapicommon.health` | `/health`, `/live`, `/ready` router |
-| `fastapicommon.config` | `PlatformSettings` (pydantic-settings) |
-| `fastapicommon.bootstrap` | `create_platform_app()` |
-| `fastapicommon.propagation` | `create_platform_http_client()` |
-| `fastapicommon.grpc` | Server/client interceptors for gRPC services (requires the `grpc` extra) |
+| **Gateway trust boundary** | `x-user-id`, `x-tenant-id`, `x-tenant-roles` are trusted, not verified. The gateway must authenticate, strip client-supplied identity headers, and **replace** (not append) them; the service must be unreachable around the gateway |
+| **Ambiguous identity** | Repeated `x-user-id` / `x-tenant-id` make the identity absent on HTTP and gRPC; roles are joined then capped (4096 bytes, 64 roles) |
+| **No global auth** | Every route is anonymous unless it declares `Depends(require_authenticated_user)` or a role dependency; health and `/metrics` routes never should |
+| **Authorization** | The role dependencies check only the validated roles; tenant-scoped policy is the service's |
+| **Client IP** | The socket peer unless `TRUSTED_PROXIES` lists the proxy in front of the service |
+| **Outbound identity** | `create_platform_http_client()` forwards identity to any host — internal platform services only (LLD OQ-6) |
+| **Log injection and redaction** | The library's own entries strip control characters, cap values at 256 bytes and redact sensitive keys (`*_key`, `password`, `token`, ...); fields a service logs itself are not sanitized |
+| **Error leakage** | No exception message reaches a client, a log or a span — types and code locations only; 5xx problems carry no detail; `tenantId` only from verified identity, never on a 401 |
+| **Trace sampling abuse** | `ParentBased`; on edge services set `OTEL_TRACES_IGNORE_REMOTE_PARENT_SAMPLED=true` |
+| **OTLP** | TLS unless the environment is `dev` / `local` (`OTEL_EXPORTER_OTLP_INSECURE` overrides) |
+| **`/metrics`** | Served unauthenticated — restrict via network policy, an auth proxy or a dedicated port |
+| **Supply chain** | Actions pinned to commit SHAs, digest-pinned base images, hash-locked dependencies and build backend, pip-audit and Trivy gates, Cosign keyless signing, SBOM + SLSA provenance, PyPI Trusted Publishing. Vulnerability reporting: [SECURITY.md](SECURITY.md) |
 
 ---
 
-## Environment variables (consumer service)
+## Observability
 
-`PlatformSettings` (`fastapicommon.config`) reads these from the process environment /
-`.env`. Field names are matched case-insensitively; `environment` additionally accepts
-`APP_ENV` as an alias (see the field-by-field table):
+**SLOs.** The library defines no SLO of its own; it vendors gincommon's reference recording rules and multi-window burn-rate alerts over `platform_http_*` / `platform_grpc_*` (`docker/prometheus/rules/`, with `promtool` tests), including `PlatformUnclassifiedErrors`, which consuming services adopt.
 
-| Variable | Example | Default | `PlatformSettings` field |
-|----------|---------|---------|---------------------------|
-| `APP_NAME` | `my-service` | `platform-service` | `app_name` — FastAPI title + OTel `service.name` |
-| `APP_ENV` (or `ENVIRONMENT`) | `prod` | `development` | `environment` — controls OTLP insecure-mode default (`dev`/`development`/`local` → insecure) |
-| `LOG_LEVEL` | `DEBUG` | `INFO` | `log_level` — passed to `configure_logging()` |
-| `REQUEST_TIMEOUT_SECONDS` | `10` | `30.0` | `request_timeout_seconds` — `TimeoutMiddleware` deadline |
-| `ENABLE_TRACING` | `false` | `true` | `enable_tracing` — gates `setup_tracing()` entirely |
-| `ENABLE_METRICS` | `false` | `true` | `enable_metrics` — gates `PrometheusMiddleware` + `/metrics` |
-| `OTLP_ENDPOINT` | `otel-collector:4317` | unset | `otlp_endpoint` — when set, spans are exported via OTLP/gRPC; when unset, spans are recorded but never exported |
-| `OBSERVABILITY_DOMAIN` | `iam` | unset — **required** while `ENABLE_METRICS` is true | `observability_domain` — registry domain of the [`platform_*` metrics](#platform-observability-standard-metrics); startup raises `ValueError` without one |
-| `BUILD_VERSION` | `v1.2.3` | unset (`unknown`) | `build_version` — `version` label of `platform_build_info` |
+### Platform Observability Standard metrics
 
-While metrics are enabled, `APP_ENV` / `ENVIRONMENT` (or an explicit `environment=`) is also the
-`environment` label and must be one of `local, dev, test, staging, prod`.
+Per the [Enterprise Platform Observability Standard](docs/observability/README.md)'s three tiers, with `domain` / `service` / `environment` injected centrally as const labels — never declared at a call site — and `version` only on `platform_build_info`:
+
+- **Tier 1 — `platform_*`** (emitted by this library): `platform_http_requests_total`, `platform_http_request_duration_seconds`, `platform_http_request_size_bytes`, `platform_http_response_size_bytes`, `platform_http_active_requests`, `platform_http_panics_total`, `platform_http_rate_limited_requests_total`, `platform_http_request_timeouts_total`; `platform_grpc_server_handled_total`, `platform_grpc_server_handling_seconds`, `platform_grpc_server_request_size_bytes`, `platform_grpc_server_response_size_bytes`, `platform_grpc_server_inflight_requests`, `platform_grpc_panics_total`, `platform_grpc_rate_limited_requests_total`; `platform_unclassified_errors_total{transport}` (both series start at 0); `platform_build_info`. Messaging and DB metrics come from the sibling libraries under the same registry.
+- **Tier 2 — `<domain>_*`** (shared within a domain, e.g. the eight `iam_*` entries): registry entries, built with `new_shared_*`.
+- **Tier 3 — `<domain>_<service>_*`** (one service only): free to add, validated at construction and by the compliance check.
+
+Label values are bounded: `method` (standard methods, else `OTHER`), `route` (Gin-syntax template — `/items/{item_id}` → `/items/:item_id` — or `unknown`), `status_class` / `error_class` (2xx / success, 4xx / client_error, 5xx / server_error, as in gincommon), `grpc_code` (Go names, e.g. `NotFound`), `grpc_method` (`/package.Service/Method` or `unknown`). HTTP latency covers the whole request (body included) and the response size is the bytes sent; an exception after the response started, or a cancelled request (499), is never a panic. Full table: [ARCHITECTURE.md](ARCHITECTURE.md#registered-prometheus-metrics); inventory: [metric-registry.md](docs/observability/metric-registry.md); runbooks: [runbooks.md](docs/observability/runbooks.md).
+
+### Tracing and logs
+
+Server spans per request / RPC with W3C propagation: HTTP spans named `METHOD route` with gincommon's attributes, gRPC spans named after the bounded method with `rpc.response.status_code`, exceptions recorded by **type only**, and resources carrying `service.name`, `service.version`, `service.namespace` (domain) and `deployment.environment.name`. Logs are gincommon's Zap layout on stderr — `http_request` / `grpc_request` (info 2xx/OK, warn 4xx/client codes, error 5xx/server codes, debug when aborted), `auth: request rejected`, `authz: access denied`, `problem response`, `unclassified error`, `rate limited`, `otel_tracing_initialized` — and every entry written inside a request carries `request_id`, `correlation_id` and `trace_id`; identity fields are verified-only, with `claimed_*` for unverified values. Full catalogue: [LLD §7.3](docs/lld/platform-fastapicommon-lld.md#73-log-event-catalogue).
 
 ---
 
-## Project layout
+## Versioning & releases
 
-```
-platform-fastapicommon/
-├── src/fastapicommon/
-│   ├── context/        # RequestContext, CurrentUser — no framework deps
-│   ├── exceptions/      # PlatformException hierarchy — no framework deps
-│   ├── config/          # PlatformSettings — no framework deps
-│   ├── auth/            # header constants, get_current_user
-│   ├── middleware/      # ContextMiddleware, TimeoutMiddleware
-│   ├── logging/         # structlog JSON configuration
-│   ├── metrics/         # Prometheus definitions + middleware + /metrics router; platform_* metrics + vendored registry.json
-│   ├── telemetry/       # OpenTelemetry setup (HTTP + gRPC)
-│   ├── rbac/            # RequireRole / RequireAnyRole / RequireAllRoles
-│   ├── health/          # /health, /live, /ready router
-│   ├── propagation/     # create_platform_http_client
-│   ├── grpc/            # server/client interceptors (requires the grpc extra)
-│   └── bootstrap/       # create_platform_app() — the single entry point
-├── tests/
-│   ├── unit/             # mirrors src/fastapicommon/ one-to-one
-│   ├── integration/      # multi-module tests (create_platform_app() end-to-end)
-│   └── e2e/              # builds + runs the real Docker image, real HTTP calls (requires Docker)
-├── examples/
-│   ├── fastapi_service/  # reference HTTP service (this README's HTTP example, runnable)
-│   └── grpc_service/     # reference gRPC service (raw-bytes generic handler demo)
-├── docs/adr/             # ADRs for cross-cutting standards
-├── docs/architecture/mermaid/  # Mermaid diagram sources embedded in ARCHITECTURE.md
-├── ARCHITECTURE.md        # Module graph, flow diagrams, invariants, public API tables
-├── docker-compose.yml     # Local OTel Collector / Tempo / Prometheus / Grafana / Loki
-└── .env-example           # Local dev environment template
-```
+### Nothing is deployed
 
----
+This is a Python package. A release is a **git tag** whose wheel and sdist are published to PyPI; consumers pin it. There is no deployment or deploy gate. The example image exists to smoke-test the stack in CI and is never run in production.
 
-## Local development (this repo)
+| Artefact | Where | Purpose |
+|---|---|---|
+| Wheel + sdist (built once, reproducibly) | PyPI (Trusted Publishing, PEP 740 attestations) and the GitHub Release | What consuming services pin |
+| `SHA256SUMS` + `SHA256SUMS.sigstore.json` (Cosign-signed) | GitHub Release | Verify the files |
+| Example image (`X.Y.Z`, forward-only `X.Y` / `X`, no `latest`) | GHCR, Cosign-signed, SBOM + SLSA provenance | CI smoke target only |
 
-Dependency management uses [`uv`](https://docs.astral.sh/uv/) (matching
-`platform-pgcommon-py`'s convention) — `pyproject.toml`'s `[dependency-groups].dev`
-plus the `grpc`/`examples` extras are locked into `uv.lock`, committed to the repo for
-reproducible installs. Install `uv` yourself first (`brew install uv` or see uv's docs);
-`make install` assumes it's already on `PATH`.
+### Versioning
 
-### Setup
+SemVer over each subpackage's `__all__` ([VERSIONING.md](VERSIONING.md)); while `0.y.z`, a MINOR may break. History: [CHANGELOG.md](CHANGELOG.md).
 
-```bash
-make setup     # copies .env-example -> .env, creates logs/
-make install   # uv sync (dev group + grpc extra, from uv.lock) + install pre-commit hooks
-```
+| Version | Status | `pip install` | Notes |
+|---|---|---|---|
+| **0.3.0** | Next (`[Unreleased]`) | — | platform-gincommon `v2.0.0` alignment; breaking — follow [Upgrading to 0.3.0](#10-upgrading-to-030) |
+| **v0.2.0** | Current | `platform-fastapicommon==0.2.0` | Predates release signing and `SHA256SUMS` |
+| v0.1.0 – v0.1.1 | Superseded | `==0.1.1` | No further releases |
 
-### Common commands
+### Cutting a release
 
-| Command | Description |
-|---------|-------------|
-| `make lint` | ruff check |
-| `make typecheck` | mypy --strict |
-| `make format` | ruff format + black (rewrites files) |
-| `make format-check` | Same, but check-only — no changes; used in CI |
-| `make vulncheck` | pip-audit against locked dependencies |
-| `make test-unit` | `tests/unit` only — no Docker, no wired-up app |
-| `make test-int` | `tests/integration` only — `create_platform_app()` end-to-end |
-| `make test-e2e` | `tests/e2e` only — builds + runs the real Docker image, real HTTP calls (requires Docker) |
-| `make test-all` | All three tiers together (coverage gate ≥90%, enforced by `pyproject.toml`; requires Docker) |
-| `make cover` | `test-all`, then open an HTML coverage report |
-| `make build` | Build the wheel + sdist into `dist/` (`uv build`) |
-| `make run` | Run the example FastAPI service (`uvicorn --reload`) |
-| `make docker-build` | Build the example service Docker image locally |
-| `make docker-up` / `make docker-down` | Start/stop the local observability stack |
-| `make smoke-test` | Alias for `make test-e2e` (matches CI's "Smoke tests" check) |
-| `make ci` | `format-check` + `lint` + `typecheck` + `test-all` + `build` — the full local pipeline (requires Docker) |
+1. Bump `version` in `pyproject.toml` and rename `## [Unreleased]` to `## [X.Y.Z] - <date>` in `CHANGELOG.md` (`make release-guard TAG=vX.Y.Z` checks both).
+2. Merge to `main` — the tag must be reachable from `origin/main`.
+3. Tag `vX.Y.Z` (or `vX.Y.Z-rc.N`) and push; `release.yml` does the rest.
 
-### Example service (optional)
+`release.yml` runs the same job graph as platform-gincommon's (via platform-eventcommon's Python port):
 
-`examples/fastapi_service` is a **reference app** for local testing — the exact code shown
-in [Complete HTTP example](#complete-http-example) above.
+1. **Verify.** Tag, `pyproject.toml` version, dated CHANGELOG section, dispatch ref, which floating image tags may move.
+2. **Gates.** The `ci.yml` gates at the tag — tests (incl. lowest-deps and the Python matrix), quality, Hadolint, Trivy, smoke, interop — plus a **blocking** `api-compat`.
+3. **Dist.** Wheel + sdist built once, reproducibly, with `SHA256SUMS`.
+4. **Push.** The example image, only when its content fingerprint matches the image Trivy and smoke judged (checked before and after the push); Cosign signature, SBOM, SLSA provenance.
+5. **PyPI, then GitHub Release.** The same files go to PyPI (Trusted Publishing) and the GitHub Release (CHANGELOG notes, Cosign-signed `SHA256SUMS`). PyPI comes after the image push because a PyPI version can never be re-uploaded.
 
-```bash
-make run
-curl -H "x-user-id: user-1" -H "x-tenant-id: tenant-1" http://localhost:8080/widgets/me
-```
-
-### Observability stack (optional)
-
-```bash
-make docker-up
-```
-
-Trace flow: **app** → OTLP/gRPC `localhost:4317` → **otel-collector** → **Tempo**.
-Prometheus scrapes the app on `:8080/metrics`. Grafana is at `localhost:3000`
-(Prometheus/Loki/Tempo datasources pre-provisioned, trace↔log correlation wired up).
-
-**Logs:** the example service's structlog JSON output is duplicated to `logs/app.log`
-(via `make run`'s `tee`, since this library itself has no built-in file sink). Promtail
-ships that file into Loki. Run `make docker-up`, then `make run`, then generate traffic —
-in Grafana → Explore → Loki, try `{job="platform-fastapicommon-example"}`.
-
-This entire flow (metrics → Prometheus, traces → Tempo, logs → Loki) has been verified
-end-to-end against this exact `docker-compose.yml`.
-
----
-
-## Testing
-
-- Tests are tiered under `tests/unit/` (mirrors `src/fastapicommon/` one-to-one),
-  `tests/integration/` (multi-module, e.g. `create_platform_app()` end-to-end), and
-  `tests/e2e/` (builds and runs the real Docker image, makes real HTTP calls against it
-  over a real socket) — matching `platform-pgcommon-py`'s `unit`/`integration`/`e2e`
-  tiering. `tests/integration`'s `TestClient` runs the ASGI app in-process and
-  structurally cannot verify the packaged image actually works; `tests/e2e` is the one
-  tier that does.
-- **Coverage gate:** `pyproject.toml`'s `[tool.coverage.report].fail_under = 90` — enforced
-  automatically on `make test-all`/`make cover`/`make ci` (no separate flag needed).
-  Running `make test-unit` or `make test-int` alone will report below 90% since each only
-  covers part of the codebase — expected, not a regression. `make test-e2e` alone passes
-  `--no-cov`: it runs the app inside a separate Docker container process, so coverage.py
-  (instrumenting the pytest process) has nothing to measure.
-- `tests/e2e` requires Docker; it's skipped automatically if the `docker` CLI isn't on
-  `PATH`. All other tests run without a live server or Docker.
+**Verifying a release:** [VERSIONING.md § Verifying a release](VERSIONING.md#verifying-a-release) (cosign ≥ 2.4: the signed `SHA256SUMS`, the files against it, and the image). One-time PyPI setup: [§ Publishing to PyPI](VERSIONING.md#publishing-to-pypi).
 
 ---
 
 ## CI
 
-GitHub Actions runs on push/PR to `main`/`develop`. Job names below match the org's
-required-status-checks ruleset on `main` exactly:
+Six workflow files, ported from platform-gincommon; shell logic lives in `.github/scripts/` (shellcheck-clean); every third-party action is pinned to a full commit SHA.
 
-1. **Validate** — a reusable workflow fanning out into two required checks: **Quality**
-   (`uv sync` from `uv.lock`, `uv pip check`, format check, ruff lint, mypy --strict,
-   pip-audit) and **Test** (pytest, coverage gate) — shown as `Validate / Quality /
-   quality` and `Validate / Test / test`.
-2. **Coverage** — the same test suite again across the full Python version matrix (3.11,
-   3.12, 3.13, 3.14) — informational, not part of the required-checks ruleset.
-3. **Build** — wheel + sdist (`uv build`).
-4. **Lint Dockerfile** — hadolint against `Dockerfile`.
-5. **Build image (cache)** — builds the example service image (no push), using GHA cache.
-6. **Trivy CVE scan** — scans the built image; fails on HIGH/CRITICAL vulnerabilities that
-   have an available fix (`--ignore-unfixed`, since unfixed base-image CVEs aren't
-   actionable here — see `make scan` to run the same check locally).
-7. **Smoke tests** — runs `tests/e2e` (via pytest) against the already-built image from
-   step 5 — see `make smoke-test` to run the same check locally.
-8. **Docker image (example service)** — builds and pushes to GHCR (push events only).
-9. **PR summary** — posts/updates a single PR comment summarizing the checks above (PR
-   events only).
+- **`ci.yml`** — orchestrator (push / PR to `main`): `detect changes` (documentation-only changes skip the build and test jobs, which still report) → `validate-test` ∥ `validate-quality` ∥ `build-image` (Hadolint, `.dockerignore` check, cached amd64 build) ∥ `api-compat` (informational) → `trivy` (CRITICAL / HIGH / UNKNOWN with a fix fails; SARIF; CycloneDX SBOM) and `smoke` (image ≤ 170 MB uncompressed, startup failure on an invalid identity, `/health`, `platform_*` metrics, RFC 9457 not-found, non-root, pip absent, then `tests/e2e` against the image) → `interop` (platform-interop-tests) → `pr-summary` (one updated PR comment) → `push` (main only: image to GHCR, Cosign sign + verify).
+- **`validate-test.yml`** (reusable) — unit + integration with coverage on 3.12, the coverage gate (**≥ 90%**), the same suites on 3.11 / 3.13 / 3.14, and `lowest direct dependencies` (every runtime dependency at its floor).
+- **`validate-quality.yml`** (reusable) — lock check, `uv pip check`, HTML-entity guard on workflows, ruff format + black, ruff, mypy `--strict`, `make metrics-lint`, **gincommon parity** (at `GINCOMMON_REF`), diagram sync, CI script tests, pip-audit, digest-pinned `FROM` lines, `make build`.
+- **`docs.yml`** — diagram sync on documentation-only changes.
+- **`changelog-check.yml`** — PRs touching `src/`, `pyproject.toml`, `uv.lock`, `build-constraints.txt` or the `Dockerfile` must update `CHANGELOG.md` (Dependabot exempt).
+- **`release.yml`** (`v*` tags or manual) — see [Cutting a release](#cutting-a-release).
 
-Release (`v*` tags): validate → coverage → build (+ `twine check`) → **publish to PyPI**
-(Trusted Publishing / OIDC, no stored token) *and* docker (semver tags) run in parallel →
-GitHub Release (CHANGELOG excerpt), once both finish. See
-[VERSIONING.md § Publishing to PyPI](./VERSIONING.md#publishing-to-pypi) for the one-time
-account setup.
+**Required repository secret:** `CI_REPO_READ_TOKEN` — read access to platform-gincommon for the parity check (required on `main` and for releases).
 
 ---
 
-## Docker (example service only)
+## Docker
+
+The only image is the **example service** (`examples/fastapi_service`).
+
+### Building the example image
 
 ```bash
 make docker-build
-docker run --rm -p 8080:8080 -e APP_ENV=prod -e OBSERVABILITY_DOMAIN=iam platform-fastapicommon-example:local
+docker run --rm -p 8080:8080 -e APP_ENV=prod -e OBSERVABILITY_DOMAIN=iam -e OTEL_TRACES_EXPORTER=none \
+  platform-fastapicommon-example:local
 ```
 
-The image runs the **example** service. Consumer services do not deploy this image.
+Two-stage `Dockerfile`: digest-pinned `ghcr.io/astral-sh/uv:0.13.1` + `python:3.14-slim` builder installing exactly the locked, hash-checked requirements and the wheel; digest-pinned `python:3.14-slim` runtime without pip, ensurepip, IDLE, Tk or pydoc data, running as numeric `USER 10001:10001`, `EXPOSE 8080`, a Python `HEALTHCHECK` on `/health`, reproducible layers (`SOURCE_DATE_EPOCH`). Re-pin with `make pin-base-images`.
+
+### Health
+
+| Endpoint | Returns | Checks |
+|---|---|---|
+| `GET /health`, `GET /live` | `200 {"status":"ok"}` | Pure liveness — never inspects a dependency; no auth |
+| `GET /ready` | `200 {"status":"ok"}` or `503 {"status":"not_ready"}` | The service's readiness checks (`create_health_router(readiness_checks=[...])`) |
+
+### Minimum required environment variables
+
+```bash
+OBSERVABILITY_DOMAIN=iam
+APP_ENV=prod                                         # local|dev|test|staging|prod
+BUILD_VERSION=v0.3.0
+OTEL_EXPORTER_OTLP_ENDPOINT=otel-collector.observability:4317
+TRUSTED_PROXIES=10.0.0.0/8                           # behind a proxy / load balancer
+```
+
+---
+
+## Platform dependencies
+
+### 1. Consuming services (services → this library)
+
+No production Python service depends on the library yet in this workspace. The only consumer is `platform-interop-tests/python-probe` (editable path dependency), which exercises the HTTP surface against gincommon's in the cross-language suite. Services adopting it start at `0.3.0` ([§10](#10-upgrading-to-030)).
+
+### 2. Sibling libraries
+
+| Library | Direction | Contract |
+|---|---|---|
+| `platform-gincommon` | registry ←, error contract ← | Registry and reference rules vendored byte for byte (CI parity); same problem types, codes and messages; same log and trace contract |
+| `platform-pgcommon-py` | contract ↔ | Same RFC 9457 `traceId` order and vectors; uses the global tracer provider |
+| `platform-eventcommon` | registry ↔ | Messaging metrics under the same registry |
+| `platform-interop-tests` | CI → | Cross-language suite run by the `interop` job (`error_shape`: a Go and a Python 401 are the same problem) |
+
+### 3. Infrastructure dependencies
+
+| System | Role | On failure |
+|---|---|---|
+| **OTel collector** (OTLP/gRPC) | Span export | Exporter creation failure → warning + in-process provider (valid trace ids, nothing exported); runtime export errors are logged; requests unaffected; shutdown flush ≤ 5 s off the event loop |
+| **Prometheus** | Scrapes `/metrics` | No effect on request handling; a failing collector costs only its own series |
+| **Log pipeline** | Ships stderr / `LOG_FILE` | No effect on request handling |
+| **API gateway** | Authenticates and replaces identity headers | Without it, authenticated routes return `401` — never trust a request that bypassed it |
 
 ---
 
 ## Out of scope
 
-This library does **not** handle:
-
 | Concern | Where it lives |
-|---------|----------------|
-| JWT validation, OAuth, API key auth | API gateway — identity is trusted and pre-validated before headers reach this library |
-| Database access, connection pooling, retry logic | Your service's own data-access layer |
-| Business validation logic | Your service's handlers |
-| Rate limiting, circuit breaking | Infrastructure layer (API gateway, service mesh) |
-| Request body parsing and binding | FastAPI's own `pydantic` models |
-| gRPC panic recovery, auth rejection, or RBAC interceptors | Not implemented — see the [Features](#features) table |
+|---|---|
+| JWT validation, OAuth, API keys, MFA | API gateway / Keycloak |
+| Business authorization policy | Each service (the role dependencies are coarse checks) |
+| Database access, pooling, RLS, migrations | `platform-pgcommon-py` |
+| Messaging, outbox, schema registry | `platform-eventcommon`, `platform-schemagov` |
+| Rate limiting, circuit breaking, retries | API gateway / service mesh |
+| Request body models and business validation | Your service (FastAPI / pydantic) |
+| gRPC auth / role interceptors, gRPC request timeouts | Not implemented — handlers check identity; clients set deadlines (LLD OQ-12) |
+| Collector, Tempo, Prometheus, Loki, Grafana in production | Platform observability infrastructure |
+| Metric governance decisions | platform-gincommon + observability governance |
 
-This library only standardises **transport, observability, and identity context
-propagation**. Keeping this scope narrow ensures it stays safe to upgrade across all
-services without risk of business logic changes.
+Keeping scope to **transport, observability and identity context** keeps the library safe to upgrade across every service without business-logic risk.
+
+---
+
+## Contributing
+
+See [CONTRIBUTING.md](CONTRIBUTING.md) for setup, extending the library (new middleware, new metrics, new problem types) and the PR checklist.
+
+| Document | Description |
+|---|---|
+| [ARCHITECTURE.md](ARCHITECTURE.md) | Layer model, module graph, public API, every request / error / tracing / metrics flow (16 diagrams), concurrency, failure domains, invariants, threat model, conformance checklist |
+| [`docs/lld/platform-fastapicommon-lld.md`](docs/lld/platform-fastapicommon-lld.md) | Low-level design — API contract, limits, algorithms, error taxonomy, open questions |
+| [`docs/architecture/`](docs/architecture/README.md) | Mermaid sources |
+| [`docs/problem-details.md`](docs/problem-details.md) | The RFC 9457 contract as implemented |
+| [`docs/observability/README.md`](docs/observability/README.md) | The observability standard as implemented, CI enforcement |
+| [`docs/observability/metric-registry.md`](docs/observability/metric-registry.md) | Generated registry inventory (`make metrics-inventory`) |
+| [`docs/observability/migration.md`](docs/observability/migration.md) · [`runbooks.md`](docs/observability/runbooks.md) | Legacy → `platform_*` mapping · alert runbooks |
+| [`docs/adr/`](docs/adr/) · [`docs/MigrationGuide.md`](docs/MigrationGuide.md) | Decision records · Go → Python concept mapping |
+| [VERSIONING.md](VERSIONING.md) | SemVer rules, supported releases, release process, verifying a release |
+| [CHANGELOG.md](CHANGELOG.md) | Per-version changes and migration steps |
+| [SECURITY.md](SECURITY.md) | Vulnerability reporting and trust model |
+| [`.claude/CLAUDE.md`](.claude/CLAUDE.md) | Context for Claude Code sessions: critical rules, commands, and the `.claude/` reference set |
 
 ---
 
 ## License / ownership
 
-BCBP Solutions FZC LLC — internal platform shared library.
-
----
-
-## See also
-
-| Document | Description |
-|----------|-------------|
-| [ARCHITECTURE.md](./ARCHITECTURE.md) | Module graph, flow diagrams, key invariants, full public API tables |
-| [VERSIONING.md](./VERSIONING.md) | SemVer rules, supported versions, release process |
-| [CHANGELOG.md](./CHANGELOG.md) | Per-version changes |
-| [CONTRIBUTING.md](./CONTRIBUTING.md) | Development setup, adding capabilities, PR checklist |
-| [SECURITY.md](./SECURITY.md) | Vulnerability reporting, trust model, supported versions |
+Owned by BCBP Solutions FZC LLC (platform team). Licensed under Apache-2.0 (`pyproject.toml`) and published publicly on PyPI; the repository itself is private ([VERSIONING.md § Publishing to PyPI](VERSIONING.md#publishing-to-pypi)).

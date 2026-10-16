@@ -1,15 +1,16 @@
+import pytest
 from fastapi import FastAPI
 from fastapi.testclient import TestClient
 from opentelemetry import trace as otel_trace
-from opentelemetry.sdk.trace import TracerProvider
 
 from fastapicommon.context import get_request_context
 from fastapicommon.middleware import ContextMiddleware
+from fastapicommon.telemetry import TracingConfig, init_tracing
 
 
-def _build_app() -> FastAPI:
+def _build_app(trusted_proxies: str | None = None) -> FastAPI:
     app = FastAPI()
-    app.add_middleware(ContextMiddleware)
+    app.add_middleware(ContextMiddleware, trusted_proxies=trusted_proxies)
 
     @app.get("/whoami")
     async def whoami() -> dict[str, object]:
@@ -22,6 +23,7 @@ def _build_app() -> FastAPI:
             "roles": list(context.roles),
             "trace_id": context.trace_id,
             "client_ip": context.client_ip,
+            "identity_rejection": context.identity_rejection,
         }
 
     return app
@@ -112,18 +114,83 @@ def test_duplicate_role_tokens_are_deduplicated() -> None:
 # --- client_ip ---
 
 
-def test_client_ip_prefers_x_forwarded_for() -> None:
-    client = TestClient(_build_app())
-    response = client.get(
-        "/whoami", headers={"x-forwarded-for": "203.0.113.5, 70.41.3.18, 150.172.238.178"}
+XFF = {"x-forwarded-for": "203.0.113.5, 70.41.3.18, 10.0.0.7"}
+PROXY_PEER = ("10.0.0.2", 50000)
+
+
+def test_client_ip_ignores_forwarding_headers_from_an_untrusted_peer() -> None:
+    """Regression: X-Forwarded-For / X-Real-IP from any client became the client IP (spoofable).
+    Without trusted proxies (the default) the client IP is the socket peer."""
+    client = TestClient(_build_app(), client=PROXY_PEER)
+    assert client.get("/whoami", headers=XFF).json()["client_ip"] == "10.0.0.2"
+    assert client.get("/whoami", headers={"x-real-ip": "6.6.6.6"}).json()["client_ip"] == "10.0.0.2"
+    other = TestClient(_build_app("10.0.0.0/8"), client=("198.51.100.4", 1))
+    assert other.get("/whoami", headers=XFF).json()["client_ip"] == "198.51.100.4"
+
+
+def test_client_ip_walks_x_forwarded_for_from_a_trusted_proxy() -> None:
+    """Gin ClientIP with SetTrustedProxies: from the right, the first hop that is not a trusted
+    proxy (10.0.0.7 is one, so 70.41.3.18 is the client)."""
+    client = TestClient(_build_app("10.0.0.0/8"), client=PROXY_PEER)
+    assert client.get("/whoami", headers=XFF).json()["client_ip"] == "70.41.3.18"
+    every_hop_trusted = {"x-forwarded-for": "10.1.1.1, 10.2.2.2"}
+    assert client.get("/whoami", headers=every_hop_trusted).json()["client_ip"] == "10.1.1.1"
+    assert client.get("/whoami", headers={"x-real-ip": "203.0.113.9"}).json()["client_ip"] == (
+        "203.0.113.9"
     )
-    assert response.json()["client_ip"] == "203.0.113.5"
+    garbage = {"x-forwarded-for": "not-an-ip"}
+    assert client.get("/whoami", headers=garbage).json()["client_ip"] == "10.0.0.2"
 
 
-def test_client_ip_falls_back_to_x_real_ip() -> None:
+def test_invalid_trusted_proxy_fails_at_startup() -> None:
+    with pytest.raises(ValueError):
+        TestClient(_build_app("10.0.0.0/33")).get("/whoami")
+
+
+def test_forwarding_headers_ignored_when_the_peer_is_not_an_ip() -> None:
+    """A peer that is not an IP address (a Unix socket, TestClient's "testclient") is never a
+    trusted proxy, even with every address trusted: the forwarding headers are not believed."""
+    client = TestClient(_build_app("0.0.0.0/0,::/0"))
+    assert client.get("/whoami", headers=XFF).json()["client_ip"] == "testclient"
+
+
+def test_client_ip_from_an_ipv6_trusted_proxy() -> None:
+    client = TestClient(_build_app("fd00::/8"), client=("fd00::2", 50000))
+    headers = {"x-forwarded-for": "2001:db8::7, fd00::9"}
+    assert client.get("/whoami", headers=headers).json()["client_ip"] == "2001:db8::7"
+    untrusted = TestClient(_build_app("fd00::/8"), client=("2001:db8::1", 1))
+    assert untrusted.get("/whoami", headers=headers).json()["client_ip"] == "2001:db8::1"
+
+
+@pytest.mark.parametrize("header", ["x-user-id", "x-tenant-id"])
+def test_repeated_identity_header_is_ambiguous(header: str) -> None:
+    """Regression: the first value won. gincommon rejects a repeated identity header (SEC-3); the
+    whole identity is absent here and require_authenticated_user answers 401."""
     client = TestClient(_build_app())
-    response = client.get("/whoami", headers={"x-real-ip": "203.0.113.9"})
-    assert response.json()["client_ip"] == "203.0.113.9"
+    headers = [("x-user-id", "alice"), ("x-tenant-id", "t1"), (header, "mallory")]
+    body = client.get("/whoami", headers=headers).json()
+    assert body["user_id"] is None and body["tenant_id"] is None and body["roles"] == []
+    assert body["identity_rejection"] == f"ambiguous {header} header"
+
+
+def test_roles_over_the_caps_reject_the_identity() -> None:
+    """Regression: no caps. gincommon: header > 4096 bytes or > 64 distinct roles is invalid."""
+    client = TestClient(_build_app())
+    too_many = ",".join(f"r{i}" for i in range(65))
+    body = client.get("/whoami", headers={"x-user-id": "u1", "x-tenant-roles": too_many}).json()
+    assert body["user_id"] is None and body["identity_rejection"] == "invalid tenant roles"
+    too_long = "a" * 4097
+    body = client.get("/whoami", headers={"x-user-id": "u1", "x-tenant-roles": too_long}).json()
+    assert body["identity_rejection"] == "invalid tenant roles"
+    at_the_cap = ",".join(f"r{i}" for i in range(64))
+    body = client.get("/whoami", headers={"x-user-id": "u1", "x-tenant-roles": at_the_cap}).json()
+    assert body["user_id"] == "u1" and len(body["roles"]) == 64
+
+
+def test_repeated_roles_headers_are_joined() -> None:
+    client = TestClient(_build_app())
+    headers = [("x-user-id", "u1"), ("x-tenant-roles", "admin"), ("x-tenant-roles", "viewer,admin")]
+    assert client.get("/whoami", headers=headers).json()["roles"] == ["admin", "viewer"]
 
 
 def test_client_ip_falls_back_to_direct_peer() -> None:
@@ -143,8 +210,7 @@ def test_trace_id_is_empty_string_when_no_active_span() -> None:
 
 
 def test_trace_id_echoed_when_a_real_span_is_active() -> None:
-    if not isinstance(otel_trace.get_tracer_provider(), TracerProvider):
-        otel_trace.set_tracer_provider(TracerProvider())
+    init_tracing(TracingConfig(service_name="test-caller", endpoint=""))
     tracer = otel_trace.get_tracer("test-caller")
     client = TestClient(_build_app())
 
@@ -155,3 +221,23 @@ def test_trace_id_echoed_when_a_real_span_is_active() -> None:
     assert body["trace_id"]
     assert len(body["trace_id"]) == 32
     assert response.headers["X-Trace-ID"] == body["trace_id"]
+
+
+@pytest.mark.parametrize(
+    "bad", ["has a space", "a" * 129, "<script>", "idé".encode(), "   ", "x;y=z"]
+)
+def test_invalid_correlation_id_falls_back_to_request_id(bad: str | bytes) -> None:
+    """Regression: x-correlation-id was echoed on the response and logged verbatim; it is
+    validated like x-request-id now, and an invalid one falls back to the request id."""
+    client = TestClient(_build_app())
+    response = client.get("/whoami", headers={"x-request-id": "req-1", "x-correlation-id": bad})
+    assert response.json()["correlation_id"] == "req-1"
+    assert response.headers["x-correlation-id"] == "req-1"
+
+
+def test_valid_correlation_id_is_kept_with_an_invalid_request_id() -> None:
+    client = TestClient(_build_app())
+    body = client.get(
+        "/whoami", headers={"x-request-id": "bad id", "x-correlation-id": "corr-7"}
+    ).json()
+    assert body["correlation_id"] == "corr-7" and body["request_id"] not in ("bad id", "corr-7")

@@ -1,23 +1,30 @@
 sequenceDiagram
     participant Client
+    participant TR as TracingMiddleware
     participant CM as ContextMiddleware
+    participant LM as LoggingMiddleware
     participant UE as UnhandledErrorMiddleware
     participant PM as PrometheusMiddleware
     participant TM as TimeoutMiddleware
     participant H as Route handler
 
-    Note over CM,TM: Added last, so ContextMiddleware is outermost,<br/>added first, so TimeoutMiddleware is innermost.
+    Note over TR,TM: Added last, so TracingMiddleware is outermost,<br/>added first, so TimeoutMiddleware is innermost.
 
-    Client ->>+ CM: HTTP request
-    Note over CM: read + validate x-user-id, x-tenant-id, x-tenant-roles,<br/>x-request-id, x-correlation-id (Go gincommon validation rules)<br/>generate request_id/correlation_id if absent<br/>compute trace_id from the active OTel span, client_ip from X-Forwarded-For/X-Real-IP/peer<br/>bind_request_context(...)
+    Client ->>+ TR: HTTP request
+    Note over TR: extract traceparent (W3C), start SERVER span named after the method
 
-    CM ->>+ PM: call_next(request)
+    TR ->>+ CM: app(scope)
+    Note over CM: read + validate x-user-id, x-tenant-id, x-tenant-roles,<br/>x-request-id, x-correlation-id (Go gincommon validation rules)<br/>generate request_id/correlation_id if absent<br/>repeated x-user-id / x-tenant-id or roles over 4096 bytes / 64 → identity absent (identity_rejection)<br/>compute trace_id from the active OTel span, client_ip = peer (X-Forwarded-For/X-Real-IP only from TRUSTED_PROXIES)<br/>bind_request_context(...)
+
+    CM ->>+ LM: app(scope)
+    LM ->>+ UE: app(scope)
+    UE ->>+ PM: app(scope)
     Note over PM: start = time.perf_counter()
 
-    PM ->>+ TM: call_next(request)
-    Note over TM: asyncio.wait_for(call_next(request), timeout_seconds)
+    PM ->>+ TM: app(scope)
+    Note over TM: run the app, 503 if no response has started within timeout_seconds
 
-    TM ->>+ H: call_next(request)
+    TM ->>+ H: app(scope)
     H -->>- TM: response
 
     alt handler exceeded timeout_seconds
@@ -28,7 +35,13 @@ sequenceDiagram
 
     Note over PM: duration = perf_counter() - start<br/>route = http_route_label(scope) (Gin-style template or "unknown")<br/>platform_http_requests_total{method, route, status_class, error_class}.inc()<br/>platform_http_request_duration_seconds{...}.observe(duration)
 
-    PM -->>- CM: response
+    PM -->>- UE: response (or an unclassified exception, counted as 500)
+    Note over UE: on an exception before the response started:<br/>"unclassified error" log (types + frames, never the message),<br/>platform_unclassified_errors_total{transport="http"}.inc(),<br/>exception event (type only) on the server span,<br/>answer 500 internal-error problem — not re-raised
+    UE -->>- LM: response
+    Note over LM: http_request log: trace_id, request_id, method, path (route template),<br/>status, duration_ms, tenant_id / user_id (or claimed_*)<br/>info 2xx/3xx · warn 4xx · error 5xx
+    LM -->>- CM: response
     Note over CM: response.headers[x-request-id] = request_id<br/>response.headers[x-correlation-id] = correlation_id<br/>response.headers[X-Request-ID] = request_id<br/>response.headers[X-Trace-ID] = trace_id (if set)<br/>reset_request_context(token) in finally
 
-    CM -->>- Client: HTTP response
+    CM -->>- TR: HTTP response
+    Note over TR: rename span METHOD route, set http.route, url.path,<br/>http.response.status_code, Error status for 5xx / exception
+    TR -->>- Client: HTTP response

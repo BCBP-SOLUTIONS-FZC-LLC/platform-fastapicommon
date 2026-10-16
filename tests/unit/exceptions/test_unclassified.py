@@ -1,6 +1,5 @@
 from __future__ import annotations
 
-import json
 import logging
 from collections.abc import AsyncIterator
 
@@ -76,9 +75,8 @@ def _app(*, middleware: bool = True) -> FastAPI:
 def _entries(caplog: pytest.LogCaptureFixture) -> list[tuple[logging.LogRecord, dict[str, object]]]:
     out = []
     for r in caplog.records:
-        msg = r.getMessage()
-        if "unclassified error" in msg:
-            out.append((r, json.loads(msg)))
+        if isinstance(r.msg, dict) and r.msg.get("event") == "unclassified error":
+            out.append((r, dict(r.msg)))
     return out
 
 
@@ -146,7 +144,8 @@ def test_response_already_started_is_logged_not_reraised(caplog: pytest.LogCaptu
         except Exception as exc:  # pragma: no cover - the failure being asserted
             pytest.fail(f"exception reached the server: {exc!r}")
     ((_, f),) = _entries(caplog)
-    assert f["error_type"] == "RuntimeError" and f["traceId"] == ""
+    # Regression: the traceId was hard-coded "" here, so the entry could not be joined.
+    assert f["error_type"] == "RuntimeError" and f["traceId"]
     assert all(SECRET not in r.getMessage() for r in caplog.records)
 
 

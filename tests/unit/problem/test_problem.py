@@ -163,6 +163,8 @@ def test_resolve_trace_id_order() -> None:
 def test_validation_mapping() -> None:
     assert field_path(("body", "items", 0, "sku")) == "items[0].sku"
     assert field_path(("query", "page")) == "page"
+    assert field_path(("items", 0, "sku")) == "items[0].sku"  # no location prefix to drop
+    assert field_path(()) == ""
     cases = [
         ({"type": "string_too_short", "ctx": {"min_length": 3}}, "must be at least 3 characters"),
         ({"type": "too_short", "ctx": {"min_length": 1}}, "must be at least 1 items"),

@@ -1,0 +1,14 @@
+flowchart TD
+    A(["TimeoutMiddleware(timeout_seconds) — innermost, inside metrics and logging"]) --> B["task = app(scope, receive, send_wrapper) as an asyncio task<br/>send_wrapper sets 'started' on http.response.start"]
+    B --> C{"asyncio.wait({task, started}, timeout)"}
+    C -- "response started in time" --> S(["await the task — a streaming body is NOT cut off"])
+    C -- "task finished in time" --> F(["its result / exception propagates"])
+    C -- "this request cancelled while waiting" --> X(["cancel the handler task, re-raise CancelledError"])
+    C -- "timeout, nothing sent" --> T["task.cancel(); await it"]
+    T --> T1{"our own task cancelled meanwhile?<br/>(server shutdown, client gone)"}
+    T1 -- yes --> X2(["re-raise — no 503 to a gone client"])
+    T1 -- no --> T2["platform_http_request_timeouts_total{method, route} +1<br/>503 service-unavailable problem, errorCode REQUEST_TIMEOUT,<br/>detail The request timed out."]
+    T2 --> T3(["Prometheus / Logging / Tracing are OUTSIDE it:<br/>they record the same 503 the client receives"])
+
+    coop["Cancellation is cooperative: a sync handler running in a worker thread<br/>keeps running after the 503 (LLD OQ-17)"]
+    T -.-> coop

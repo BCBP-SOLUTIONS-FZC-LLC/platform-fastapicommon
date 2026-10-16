@@ -7,7 +7,7 @@ from typing import Any
 import anyio
 import grpc
 import pytest
-from fastapi import FastAPI
+from fastapi import FastAPI, Response
 from fastapi.responses import StreamingResponse
 from fastapi.testclient import TestClient
 from prometheus_client import REGISTRY, CollectorRegistry
@@ -363,22 +363,36 @@ def test_platform_http_metrics(monkeypatch: pytest.MonkeyPatch) -> None:
     assert not any(line.startswith("http_request") for line in scrape.splitlines())
 
 
-def test_streaming_response_without_body_iterator_observes_zero(
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    from starlette.responses import Response
+def test_bodyless_and_failed_streams_are_measured_as_sent(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Pure ASGI recording (Go: at the end of the request, the bytes written). A stream that
+    fails after it started keeps the status already sent and is not a panic (Go: an
+    http.ErrAbortHandler abort)."""
+    _clear_identity_env(monkeypatch)
+    registry = CollectorRegistry()
+    init_metrics(IAM, registry=registry)
+    app = FastAPI()
+    app.add_middleware(PrometheusMiddleware)
 
-    from fastapicommon.metrics.middleware import _content_length, _count_body
+    @app.get("/empty")
+    async def empty() -> Response:
+        return Response(status_code=204)
 
-    observed: list[float] = []
-    response = Response(status_code=204)
-    del response.headers["content-length"]
-    assert _content_length(response) is None
-    _count_body(response, observed.append)
-    assert observed == [0.0]
+    @app.get("/broken")
+    async def broken() -> StreamingResponse:
+        async def body() -> AsyncIterator[bytes]:
+            yield b"abc"
+            raise RuntimeError("mid-stream")
 
-    response.headers["content-length"] = "nan"
-    assert _content_length(response) is None
+        return StreamingResponse(body())
+
+    client = TestClient(app, raise_server_exceptions=False)
+    assert client.get("/empty").status_code == 204
+    client.get("/broken")
+    ok = {"method": "GET", "status_class": "2xx", "error_class": "success"}
+    assert _value(registry, "platform_http_response_size_bytes_sum", route="/empty", **ok) == 0
+    assert _value(registry, "platform_http_requests_total", route="/broken", **ok) == 1
+    assert _value(registry, "platform_http_response_size_bytes_sum", route="/broken", **ok) == 3
+    assert not _value(registry, "platform_http_panics_total", method="GET", route="/broken")
 
 
 # --------------------------------------------------------------------------------------- gRPC
@@ -526,3 +540,110 @@ def test_platform_metrics_require_their_registry_entries() -> None:
         {"name": "platform_grpc_panics_total", "tier": "platform", "type": "counter", "help": "h"}
     )
     PlatformMetrics(identity, load_registry(json.dumps(document)))
+
+
+def test_route_label_resolves_included_routers() -> None:
+    """FastAPI keeps included routers as lazy entries (no ``path``); their routes must still get
+    their full, prefixed template, not ``unknown`` (they did not on FastAPI 0.140)."""
+    from fastapi import APIRouter, FastAPI
+
+    from fastapicommon.metrics.platform import http_route_label
+
+    app = FastAPI()
+    outer, inner = APIRouter(prefix="/widgets"), APIRouter(prefix="/v1")
+
+    @inner.get("/{widget_id}")
+    async def widget(widget_id: str) -> dict[str, str]:
+        return {}
+
+    @outer.get("/me")
+    async def me() -> dict[str, str]:
+        return {}
+
+    outer.include_router(inner)
+    app.include_router(outer)
+
+    def label(path: str) -> str:
+        return http_route_label(
+            {
+                "type": "http",
+                "path": path,
+                "method": "GET",
+                "app": app,
+                "root_path": "",
+                "headers": [],
+                "query_string": b"",
+            }
+        )
+
+    assert label("/widgets/me") == "/widgets/me"
+    assert label("/widgets/v1/42") == "/widgets/v1/:widget_id"
+    assert label("/widgets/v2/42") == "unknown"
+
+
+def test_route_table_matched_once_per_request(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Tracing, logging and metrics all need the route label; it is resolved once and kept in
+    the scope instead of re-running the route table in each middleware."""
+    from fastapicommon.metrics import platform as platform_module
+
+    calls = 0
+    real = platform_module._match_routes
+
+    def counting(routes: Any, scope: Any, prefix: str) -> str | None:
+        nonlocal calls
+        if prefix == "":
+            calls += 1
+        return real(routes, scope, prefix)
+
+    monkeypatch.setattr(platform_module, "_match_routes", counting)
+    app = create_platform_app(
+        settings=PlatformSettings(_env_file=None, observability_domain="iam", environment="test")
+    )
+
+    @app.get("/items/{item_id}")
+    async def item(item_id: str) -> dict[str, str]:
+        return {"id": item_id}
+
+    assert TestClient(app).get("/items/1").status_code == 200
+    assert calls == 1
+
+
+async def test_response_size_counts_body_bytes_only() -> None:
+    """Messages other than the start and body (HTTP trailers) pass through and add nothing to
+    the response size, which is the body bytes sent (Go ``c.Writer.Size()``)."""
+    registry = CollectorRegistry()
+    init_metrics(IAM, registry=registry)
+
+    async def app(scope: Any, receive: Any, send: Any) -> None:
+        await send({"type": "http.response.start", "status": 200, "trailers": True})
+        await send({"type": "http.response.body", "body": b"abc", "more_body": False})
+        await send({"type": "http.response.trailers", "headers": [], "more_trailers": False})
+
+    sent: list[str] = []
+
+    async def receive() -> dict[str, Any]:
+        return {"type": "http.request", "body": b"", "more_body": False}
+
+    async def send(message: Any) -> None:
+        sent.append(message["type"])
+
+    scope = {"type": "http", "method": "GET", "path": "/x", "headers": []}
+    await PrometheusMiddleware(app)(scope, receive, send)
+    assert sent == ["http.response.start", "http.response.body", "http.response.trailers"]
+    labels = {"method": "GET", "route": "unknown", "status_class": "2xx", "error_class": "success"}
+    assert _value(registry, "platform_http_response_size_bytes_sum", **labels) == 3.0
+
+
+def test_route_label_without_iter_route_contexts(monkeypatch: pytest.MonkeyPatch) -> None:
+    """FastAPI before ``iter_route_contexts`` (the lowest-deps floor) keeps routes flat on the
+    app's router; the label is still the template."""
+    from fastapicommon.metrics import platform as platform_module
+
+    monkeypatch.setattr(platform_module, "_iter_route_contexts", None)
+    app = FastAPI()
+
+    @app.get("/items/{item_id}")
+    async def item(item_id: str) -> None: ...
+
+    scope = {"type": "http", "method": "GET", "path": "/items/7", "app": app}
+    assert http_route_label(scope) == "/items/:item_id"

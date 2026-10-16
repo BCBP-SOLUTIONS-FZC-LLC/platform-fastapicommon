@@ -1,26 +1,27 @@
 sequenceDiagram
-    participant H as Route handler
-    participant Dep as FastAPI Depends()
+    participant FA as FastAPI dependency resolution
     participant RBAC as RequireRole / RequireAnyRole / RequireAllRoles
     participant Ctx as fastapicommon.context
+    participant Log as fastapicommon.logging.audit
+    participant H as Route handler
 
-    H ->>+ Dep: request dependencies resolved
-    Dep ->>+ RBAC: __call__()
+    FA ->>+ RBAC: __call__()
     RBAC ->>+ Ctx: get_roles()
-    Ctx -->>- RBAC: current roles (tuple, () if unbound/anonymous)
+    Ctx -->>- RBAC: validated roles (a tuple, empty when anonymous or the identity was rejected)
 
     alt RequireRole(role)
-        RBAC ->> RBAC: role in current?
+        RBAC ->> RBAC: role in roles?
     else RequireAnyRole(*roles)
-        RBAC ->> RBAC: any(r in current for r in roles)?
+        RBAC ->> RBAC: any role present?
     else RequireAllRoles(*roles)
-        RBAC ->> RBAC: all(r in current for r in roles)?
+        RBAC ->> RBAC: every role present?
     end
 
     alt check fails
-        RBAC -->> Dep: raise ForbiddenException(...)
-        Dep -->> H: 403 forbidden problem (detail "Requires role '...'")
+        RBAC ->> Log: warn authz: access denied<br/>tenant_id · user_id · roles · action · resource (route template)
+        RBAC -->> FA: raise ForbiddenException
+        FA -->> H: 403 forbidden problem (detail names the missing role(s) — LLD OQ-8)
     else check passes
-        RBAC -->>- Dep: None (dependency satisfied)
-        Dep -->>- H: handler executes
+        RBAC -->>- FA: None
+        FA ->> H: handler runs
     end

@@ -58,6 +58,7 @@ services:
       - "${PROMETHEUS_HTTP_PORT:-9090}:9090"
     volumes:
       - ./docker/prometheus/prometheus.yml:/etc/prometheus/prometheus.yml:ro
+      - ./docker/prometheus/rules:/etc/prometheus/rules:ro
       - prometheus-data:/prometheus
 
   grafana:

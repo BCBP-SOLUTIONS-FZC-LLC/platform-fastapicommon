@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import contextlib
 from types import SimpleNamespace
 from typing import Any
 
@@ -152,3 +153,108 @@ def test_context_client_interceptor_no_headers_when_unbound() -> None:
 
     ContextClientInterceptor().intercept_unary_unary(continuation, details, "request")
     assert captured["metadata"] == []
+
+
+def test_failing_metric_still_resets_context_and_ends_span(monkeypatch: Any) -> None:
+    """Regression: finish() ran metrics, log, context reset and span end in sequence, so a
+    failing step left the RequestContext / OTel context bound on the reused worker thread."""
+    from opentelemetry import trace
+
+    from fastapicommon.grpc import server as server_module
+
+    class _Broken:
+        def grpc_inflight_inc(self, method: str) -> None:
+            pass
+
+        def grpc_inflight_dec(self, method: str) -> None:
+            self.decremented = True
+
+        def record_grpc(self, *args: Any) -> None:
+            raise RuntimeError("bad label")
+
+    broken = _Broken()
+    monkeypatch.setattr(server_module, "platform_metrics", lambda: broken)
+    handler = grpc.unary_unary_rpc_method_handler(lambda request, context: "ok")
+    wrapped = ContextServerInterceptor().intercept_service(
+        lambda details: handler, SimpleNamespace(method="/svc/Method")
+    )
+    outer_span = trace.get_current_span()
+    with contextlib.suppress(RuntimeError):
+        wrapped.unary_unary("request", _FakeServicerContext((("x-user-id", "u1"),)))
+    assert get_request_context_or_none() is None
+    assert trace.get_current_span() is outer_span
+    assert broken.decremented
+
+
+def test_context_from_metadata_skips_binary_values() -> None:
+    """``-bin`` metadata arrives as bytes: it is never read as an id or identity value."""
+    context = _context_from_metadata(
+        (("x-user-id-bin", b"\x00admin"), ("x-user-id", "u1"), ("x-tenant-id", "t1"))  # type: ignore[arg-type]
+    )
+    assert (context.user_id, context.tenant_id, context.identity_rejection) == ("u1", "t1", None)
+
+
+def test_context_from_metadata_validates_ids() -> None:
+    """Regression: gRPC used x-request-id / x-correlation-id verbatim (Go's request_id
+    interceptor applies NormalizeRequestID); invalid ones are replaced like on HTTP."""
+    context = _context_from_metadata(
+        (("x-request-id", "bad id\n"), ("x-correlation-id", "<script>"))
+    )
+    assert context.request_id != "bad id\n" and len(context.request_id) == 36  # a new UUID
+    assert context.correlation_id == context.request_id
+    kept = _context_from_metadata((("x-request-id", "req-9"), ("x-correlation-id", "corr-9")))
+    assert (kept.request_id, kept.correlation_id) == ("req-9", "corr-9")
+
+
+def test_context_from_metadata_validates_identity_like_http() -> None:
+    """Regression: gRPC took x-user-id / x-tenant-id raw and split roles without validation, so
+    an identity the HTTP path rejects was authenticated (and logged as verified) on gRPC."""
+    context = _context_from_metadata(
+        (
+            ("x-user-id", "u" * 300),  # > 256 bytes
+            ("x-tenant-id", "t1\x00"),  # control character
+            ("x-tenant-roles", "admin;drop, operator, admin, " + "r" * 65),
+        )
+    )
+    assert context.user_id is None and context.tenant_id is None
+    assert not context.user.is_authenticated
+    assert context.roles == ("operator", "admin")
+
+
+def test_inbound_baggage_reaches_the_handler() -> None:
+    """Regression: the gRPC span was attached on the current context instead of the extracted
+    one, so W3C baggage was dropped (it worked on HTTP)."""
+    from opentelemetry import baggage
+
+    from fastapicommon.telemetry import TracingConfig, init_tracing
+
+    init_tracing(TracingConfig(service_name="svc", endpoint="", enable_baggage=True))
+    seen: dict[str, object] = {}
+
+    def behavior(request: Any, context: Any) -> Any:
+        seen["tenant"] = baggage.get_baggage("tenant")
+        return "ok"
+
+    handler = grpc.unary_unary_rpc_method_handler(behavior)
+    wrapped = ContextServerInterceptor().intercept_service(
+        lambda details: handler, SimpleNamespace(method="/svc/Method")
+    )
+    wrapped.unary_unary("request", _FakeServicerContext((("baggage", "tenant=acme"),)))
+    assert seen["tenant"] == "acme"
+
+
+def test_context_from_metadata_rejects_ambiguous_identity_and_role_caps() -> None:
+    """Regression (OQ-2 / OQ-3): gRPC metadata was read last-value-wins and roles uncapped."""
+    ambiguous = _context_from_metadata(
+        (("x-user-id", "alice"), ("x-user-id", "mallory"), ("x-tenant-id", "t1"))
+    )
+    assert ambiguous.user_id is None and ambiguous.tenant_id is None
+    assert ambiguous.identity_rejection == "ambiguous x-user-id header"
+    too_many = _context_from_metadata(
+        (("x-user-id", "u1"), ("x-tenant-roles", ",".join(f"r{i}" for i in range(65))))
+    )
+    assert too_many.user_id is None and too_many.identity_rejection == "invalid tenant roles"
+    joined = _context_from_metadata(
+        (("x-user-id", "u1"), ("x-tenant-roles", "a"), ("x-tenant-roles", "b,a"))
+    )
+    assert joined.roles == ("a", "b") and joined.identity_rejection is None

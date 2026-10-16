@@ -82,6 +82,11 @@ _GRPC_CLIENT_CODES = frozenset(
     }
 )
 
+try:  # FastAPI ≥ 0.12x: included routers are lazy; see _flatten_routes.
+    from fastapi.routing import iter_route_contexts as _iter_route_contexts
+except ImportError:  # pragma: no cover - older FastAPI (exercised by the lowest-deps job)
+    _iter_route_contexts = None  # type: ignore[assignment]
+
 #: FastAPI/Starlette path parameter, e.g. ``{item_id}``, ``{item_id:int}``, ``{rest:path}``.
 _PATH_PARAM = re.compile(r"\{([^}:]+)(?::([^}]*))?\}")
 
@@ -132,8 +137,22 @@ def grpc_error_class(code: str) -> str:
     return "client_error" if code in _GRPC_CLIENT_CODES else "server_error"
 
 
+#: Go ``label.GRPCMethod``: ``/package.Service/Method``, at most 256 bytes.
+_GRPC_METHOD = re.compile(r"/[A-Za-z0-9_.]+/[A-Za-z0-9_]+")
+MAX_GRPC_METHOD_LEN = 256
+
+
 def grpc_method_label(full_method: str | None) -> str:
-    return full_method or UNKNOWN
+    """``full_method`` when it is a well-formed ``/package.Service/Method`` of at most 256
+    bytes, else ``"unknown"`` (Go ``label.GRPCMethod``), so client-chosen method names cannot
+    explode label or span-name cardinality."""
+    if (
+        not full_method
+        or len(full_method.encode()) > MAX_GRPC_METHOD_LEN
+        or not _GRPC_METHOD.fullmatch(full_method)
+    ):
+        return UNKNOWN
+    return full_method
 
 
 def route_template_label(path: str) -> str:
@@ -148,10 +167,21 @@ def route_template_label(path: str) -> str:
     return _PATH_PARAM.sub(_replace, path)
 
 
+def _flatten_routes(routes: Sequence[Any]) -> Iterable[Any]:
+    """FastAPI ≥ 0.12x keeps included routers as lazy entries without a ``path``; its public
+    ``iter_route_contexts`` (what FastAPI's OpenAPI generation uses) yields each effective
+    route with its full, prefixed template. Older versions copy the routes into the app's
+    router, so they are already flat."""
+    if _iter_route_contexts is None:
+        return routes
+    # Lazily: matching stops at the first full match instead of wrapping every route first.
+    return _iter_route_contexts(routes)
+
+
 def _match_routes(
     routes: Sequence[Any], scope: MutableMapping[str, Any], prefix: str
 ) -> str | None:
-    for route in routes:
+    for route in _flatten_routes(routes):
         match, child_scope = route.matches(scope)
         if match is not Match.FULL:
             continue
@@ -159,9 +189,10 @@ def _match_routes(
         if not isinstance(path, str):
             return None
         full_path = prefix + path
-        if isinstance(route, Mount):
-            if route.routes:
-                return _match_routes(route.routes, {**scope, **child_scope}, full_path)
+        original = getattr(route, "original_route", route)
+        if isinstance(original, Mount):
+            if original.routes:
+                return _match_routes(original.routes, {**scope, **child_scope}, full_path)
             # An opaque mounted ASGI app (e.g. StaticFiles): its mount prefix is the template.
             return full_path or None
         return full_path
@@ -172,13 +203,25 @@ def http_route_label(scope: MutableMapping[str, Any]) -> str:
     """The route template a request will be dispatched to, or ``"unknown"`` — never the raw URL
     path (mirrors Go ``label.HTTPRoute``). Resolved before the handler runs, like Gin's
     ``FullPath()``, so the in-flight gauge and the request counters share one label. Method
-    mismatches (405) and redirects count as ``unknown``, as in Gin."""
+    mismatches (405) and redirects count as ``unknown``, as in Gin.
+
+    Matched once per request: the result is kept in the scope (shared by the ASGI layers), so
+    the tracing, logging and metrics middleware do not each re-run the route table."""
+    cached = scope.get(_ROUTE_SCOPE_KEY)
+    if isinstance(cached, str):
+        return cached
     router = getattr(scope.get("app"), "router", None)
     routes = getattr(router, "routes", None)
     if not routes:
-        return UNKNOWN
+        return UNKNOWN  # not cached: no app yet (a bare scope), so a later call may resolve
     path = _match_routes(routes, scope, "")
-    return route_template_label(path) if path else UNKNOWN
+    label = route_template_label(path) if path else UNKNOWN
+    scope[_ROUTE_SCOPE_KEY] = label
+    return label
+
+
+#: Scope key of the request's resolved route label (see :func:`http_route_label`).
+_ROUTE_SCOPE_KEY = "fastapicommon.route"
 
 
 def request_body_size(content_length: str | None) -> float:
@@ -220,15 +263,12 @@ class MetricsOptions:
 
     @classmethod
     def from_settings(cls, settings: PlatformSettings) -> MetricsOptions:
-        # PlatformSettings.environment defaults to "development" for the OTLP-insecure decision;
-        # only an explicitly provided value (kwarg, APP_ENV, ENVIRONMENT, .env) is an environment
-        # label, so an unset environment still fails at startup.
-        environment = settings.environment if "environment" in settings.model_fields_set else ""
+        # An unset environment is "" (PlatformSettings' default), so it still fails at startup.
         return cls(
             service_name=settings.app_name,
             build_version=settings.build_version,
             domain=settings.observability_domain,
-            environment=environment,
+            environment=settings.environment,
         )
 
 
@@ -285,6 +325,17 @@ def configured_domain(options: MetricsOptions) -> str:
 # --------------------------------------------------------------------------------------------
 
 
+#: Families for which prometheus_client adds a ``<family>_created`` timestamp sample.
+_CREATED_TYPES = frozenset({"counter", "histogram", "summary"})
+
+
+def is_created_sample(family: Metric, sample_name: str) -> bool:
+    """Whether ``sample_name`` is prometheus_client's ``<family>_created`` timestamp sample of
+    ``family`` (Go's client emits none). A metric that is merely *named* ``..._created`` (a
+    gauge ``iam_orders_api_items_created``) is not one."""
+    return family.type in _CREATED_TYPES and sample_name == f"{family.name}_created"
+
+
 class _WithoutCreatedSeries(Collector):
     """Exposes the wrapped collectors without prometheus_client's ``*_created`` samples.
 
@@ -302,7 +353,9 @@ class _WithoutCreatedSeries(Collector):
     def collect(self) -> Iterator[Metric]:
         for metric in self._metrics:
             for family in metric.collect():
-                family.samples = [s for s in family.samples if not s.name.endswith("_created")]
+                family.samples = [
+                    s for s in family.samples if not is_created_sample(family, s.name)
+                ]
                 yield family
 
 
@@ -398,10 +451,10 @@ class PlatformMetrics:
         status_code: int,
         seconds: float,
         request_size: float,
-        response_size: float | None,
+        response_size: float,
     ) -> None:
-        """One completed request. ``response_size=None`` defers that observation to
-        :meth:`observe_http_response_size` (body still streaming)."""
+        """One completed request; ``response_size`` is the body bytes sent (Go's
+        ``c.Writer.Size()``)."""
         labels = (
             *self._const,
             http_method_label(method),
@@ -412,21 +465,9 @@ class PlatformMetrics:
         self.http_requests.labels(*labels).inc()
         self.http_duration.labels(*labels).observe(seconds)
         self.http_request_size.labels(*labels).observe(request_size)
-        if response_size is not None:
-            self.http_response_size.labels(*labels).observe(response_size)
+        self.http_response_size.labels(*labels).observe(response_size)
         if status_code == 429:
             self.record_http_rate_limited(method, route)
-
-    def observe_http_response_size(
-        self, method: str, route: str, status_code: int, size: float
-    ) -> None:
-        self.http_response_size.labels(
-            *self._const,
-            http_method_label(method),
-            route,
-            http_status_class(status_code),
-            http_error_class(status_code),
-        ).observe(size)
 
     def record_http_panic(self, method: str, route: str) -> None:
         self.http_panics.labels(*self._const, http_method_label(method), route).inc()

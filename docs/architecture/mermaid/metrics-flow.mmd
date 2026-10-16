@@ -1,29 +1,30 @@
 flowchart TD
-    subgraph init["Startup — init_metrics (create_platform_app / ContextServerInterceptor(settings))"]
-        A0{"enable_metrics?"} -->|no| A1["nothing initialized\n(no domain needed)"]
-        A0 -->|yes| A2{"domain set?\n(observability_domain or OBSERVABILITY_DOMAIN)"}
-        A2 -->|no| AX["raise ValueError\n(names OBSERVABILITY_DOMAIN)"]
-        A2 -->|yes| A3["resolve + validate identity against registry.json\n(domain, service, environment)"]
-        A3 --> A["PlatformMetrics: platform_* collectors\nregistered on REGISTRY (first call wins)"]
+    subgraph init["Startup — init_metrics_from_settings (create_platform_app / Context(Async)ServerInterceptor(settings))"]
+        A0{"enable_metrics?"} -->|no| A1["nothing initialised<br/>(a configured identity is still validated)"]
+        A0 -->|yes| A2["resolve_metrics_options<br/>service ← app_name: ^[a-z][a-z0-9_-]{0,62}$<br/>domain ← observability_domain ← OBSERVABILITY_DOMAIN (required)<br/>environment ← APP_ENV ← ENVIRONMENT (registry vocabulary, no aliases)<br/>version ← BUILD_VERSION ← unknown"]
+        A2 -- invalid --> AX(["ValueError at startup — nothing published"])
+        A2 --> L["_lock"]
+        L --> I{"already initialised?"}
+        I -- yes --> W(["return — first identity wins (a different one is silently ignored, LLD OQ-9)"])
+        I -- no --> PM["PlatformMetrics: every platform_* collector built from its registry entry<br/>const labels domain · service · environment<br/>platform_build_info{version} = 1 · unclassified_errors{http, grpc} = 0"]
     end
 
-    subgraph http["Per HTTP request — PrometheusMiddleware"]
-        B([call_next request]) --> C["route = http_route_label(scope)\n(Gin-style template or 'unknown')"]
-        C --> D["platform_http_active_requests +1\nawait call_next request"]
-        D --> F["platform_http_requests_total / _request_duration_seconds\n_request_size_bytes / _response_size_bytes\n{method, route, status_class, error_class}"]
-        D -.->|exception| P["recorded as 500 + platform_http_panics_total, re-raised"]
+    subgraph http["Per HTTP request — PrometheusMiddleware (pure ASGI)"]
+        B(["request"]) --> C["route = http_route_label(scope) — once per request (Mounts included)"]
+        C --> D["active_requests +1 · await app"]
+        D --> F["at the END of the request: requests_total · duration (body included)<br/>request size (Content-Length) · response size (bytes sent)<br/>429 → rate_limited +1 + rate limited log"]
+        D -.->|"exception, nothing sent"| P["500 + panics_total +1"]
+        D -.->|"exception after start / cancelled"| Q["sent status (else 499), not a panic"]
     end
 
-    subgraph grpcflow["Per gRPC unary-unary call — ContextServerInterceptor"]
-        H([wrapped_behavior request, context]) --> I["original_behavior(request, context)"]
-        I --> K["platform_grpc_server_handled_total / _handling_seconds\n_request_size_bytes / _response_size_bytes\n{grpc_method, ...}"]
+    subgraph grpcflow["Per unary RPC — _UnaryRpc.finish()"]
+        G(["RPC"]) --> K["handled_total{grpc_method, grpc_code, status_class, error_class}<br/>handling_seconds · request / response sizes (proto ByteSize)<br/>ResourceExhausted → rate_limited · unclassified → panics + unclassified_errors{grpc}"]
     end
 
     subgraph expose["Exposition"]
-        M["GET /metrics — metrics_router\n(registered only if settings.enable_metrics)"]
-        M --> N["generate_latest(metrics_registry())\nContent-Type: CONTENT_TYPE_LATEST"]
+        M["GET /metrics — metrics_router (enable_metrics only)"] --> N["generate_latest(metrics_registry())<br/>prometheus_client <family>_created samples dropped (Go emits none)"]
     end
 
-    A -.-> F
-    A -.-> K
-    A -.-> N
+    PM -.-> F
+    PM -.-> K
+    PM -.-> N

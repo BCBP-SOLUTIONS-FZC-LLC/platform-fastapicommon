@@ -33,6 +33,20 @@ class PlatformException(Exception):
     problem_type: ProblemType = TYPE_INTERNAL_ERROR
     default_message: str | None = None
 
+    #: Pre-RFC 9457 class attributes that no longer affect the response: a subclass setting
+    #: them would silently answer 500 internal-error, so it is rejected instead.
+    _REMOVED_CLASS_ATTRS = ("status_code", "code", "error_code")
+
+    def __init_subclass__(cls, **kwargs: object) -> None:
+        super().__init_subclass__(**kwargs)
+        for name in cls._REMOVED_CLASS_ATTRS:
+            if name in cls.__dict__:
+                raise TypeError(
+                    f"{cls.__qualname__} sets the class attribute {name!r}, which no longer "
+                    "selects the response: set problem_type = problem_type(...) instead (see "
+                    "docs/problem-details.md)"
+                )
+
     def __init__(
         self,
         message: str | None = None,

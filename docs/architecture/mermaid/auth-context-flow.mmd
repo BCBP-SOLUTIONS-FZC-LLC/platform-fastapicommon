@@ -1,0 +1,22 @@
+flowchart TD
+    A(["HTTP request (ContextMiddleware) / unary RPC (_context_from_metadata)"]) --> I["resolve_ids(x-request-id, x-correlation-id)<br/>[A-Za-z0-9._-], ≤ 128 bytes<br/>invalid request id → UUID · invalid correlation id → request id"]
+    I --> R{"x-user-id or x-tenant-id<br/>received more than once?"}
+    R -- yes --> AMB["identity ABSENT<br/>identity_rejection = ambiguous x-user-id / x-tenant-id header"]
+    R -- no --> RL["join every x-tenant-roles value with ','<br/>parse_roles_strict: tokens [a-zA-Z0-9_-]+ ≤ 64 bytes,<br/>invalid tokens dropped, deduplicated"]
+    RL --> CAP{"joined header > 4096 bytes<br/>or > 64 distinct roles?"}
+    CAP -- yes --> BADR["identity ABSENT<br/>identity_rejection = invalid tenant roles"]
+    CAP -- no --> V["normalize_header_value(x-user-id / x-tenant-id)<br/>trimmed, ≤ 256 bytes, no ASCII controls / DEL / U+2028 / U+2029<br/>invalid → that field absent"]
+    V --> IP["client_ip: socket peer<br/>X-Forwarded-For (from the right) / X-Real-IP only when the peer is in TRUSTED_PROXIES"]
+    AMB --> IP
+    BADR --> IP
+    IP --> BIND["RequestContext{request_id, correlation_id, user, trace_id, client_ip, identity_rejection}<br/>bound (contextvars) for the whole request / RPC"]
+    BIND --> ROUTE{"route declares Depends(require_authenticated_user)?"}
+    ROUTE -- no --> ANON(["handler runs — anonymous or not (every route is anonymous by default)"])
+    ROUTE -- yes --> REJ{"identity_rejection set?"}
+    REJ -- yes --> R401A["401 unauthorized problem<br/>Ambiguous x-user-id header. · Ambiguous x-tenant-id header. · Invalid tenant roles."]
+    REJ -- no --> U{"user_id present?"}
+    U -- no --> R401["401 unauthorized problem<br/>Missing or invalid authentication headers."]
+    U -- yes --> OK(["handler runs with CurrentUser · optional RequireRole / Any / All"])
+    R401A --> AUDIT
+    R401 --> AUDIT
+    AUDIT["warn auth: request rejected<br/>reason · method · route · status · client_ip · trace_id · request_id<br/>claimed_user_id · claimed_tenant_id (sanitized) — never as verified fields"]

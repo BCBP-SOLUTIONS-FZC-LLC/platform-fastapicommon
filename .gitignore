@@ -219,3 +219,9 @@ __marimo__/
 
 # Local observability stack (docker-compose)
 logs/
+
+# Claude Code: the .claude/*.md reference set and .claude/settings.json are tracked; personal
+# settings, agent worktrees and scheduler state are not.
+.claude/settings.local.json
+.claude/worktrees/
+.claude/scheduled_tasks.lock

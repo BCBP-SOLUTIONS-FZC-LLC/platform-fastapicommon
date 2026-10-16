@@ -28,6 +28,7 @@ from fastapicommon.exceptions import (
 from fastapicommon.middleware import ContextMiddleware
 from fastapicommon.problem import (
     PROBLEM_MEDIA_TYPE,
+    TYPE_NOT_FOUND,
     TYPE_VALIDATION_FAILED,
     FieldError,
     problem_type,
@@ -247,18 +248,18 @@ def test_problem_is_logged(caplog: pytest.LogCaptureFixture) -> None:
     client = TestClient(_build_app(service="orders-api"), raise_server_exceptions=False)
     with caplog.at_level("WARNING", logger="fastapicommon.problem"):
         client.get("/boom/tender", headers=IDENTITY)
-    line = next(r.getMessage() for r in caplog.records if "problem response" in r.getMessage())
-    assert (
-        next(r for r in caplog.records if "problem response" in r.getMessage()).levelname
-        == "WARNING"
+    record = next(
+        r
+        for r in caplog.records
+        if isinstance(r.msg, dict) and r.msg["event"] == "problem response"
     )
-    for want in (
-        '"errorCode": "TENDER_NOT_FOUND"',
-        '"service": "orders-api"',
-        '"tenantId": "tenant-001"',
-        '"status": 404',
-    ):
-        assert want in line, line
+    assert record.levelname == "WARNING"
+    entry = record.msg
+    assert entry["errorCode"] == "TENDER_NOT_FOUND"
+    assert entry["service"] == "orders-api"
+    assert entry["tenantId"] == "tenant-001"
+    assert entry["status"] == 404
+    line = str(entry)
     assert "Tender 123" not in line
 
 
@@ -271,3 +272,18 @@ def test_exception_classes() -> None:
     assert exc.status_code == 409 and exc.code == "TENDER_LOCKED" and str(exc) == "Locked."
     assert str(ConflictException()) == "Conflict"
     assert ValidationException().status_code == 400
+
+
+@pytest.mark.parametrize("attr", ["status_code", "code", "error_code"])
+def test_legacy_class_attributes_are_rejected(attr: str) -> None:
+    """Regression: `class X(PlatformException): status_code = 404` used to be accepted and then
+    silently answered 500 internal-error, because only problem_type selects the response."""
+    with pytest.raises(TypeError, match=f"'{attr}'.*problem_type"):
+        type("TenderNotFound", (PlatformException,), {attr: 404})
+
+
+def test_problem_type_subclass_still_allowed() -> None:
+    class Gone(PlatformException):
+        problem_type = TYPE_NOT_FOUND
+
+    assert Gone().status_code == 404 and Gone().code == TYPE_NOT_FOUND.code

@@ -31,6 +31,7 @@ from fastapicommon.bootstrap import create_platform_app
 from fastapicommon.config import PlatformSettings
 from fastapicommon.grpc import ContextServerInterceptor
 from fastapicommon.metrics import MetricsOptions, init_metrics
+from fastapicommon.metrics.compliance import Options, validate, validate_text
 from fastapicommon.metrics.registry import default_registry
 
 pytestmark = pytest.mark.integration
@@ -264,6 +265,21 @@ def _assert_no_legacy_families(scrape: str) -> None:
         assert name not in REMOVED_LEGACY_METRICS, line
         family = name.removesuffix("_bucket").removesuffix("_sum").removesuffix("_count")
         assert family not in REMOVED_LEGACY_METRICS, line
+
+
+def test_scrape_passes_the_full_standard() -> None:
+    """The rule set consuming services run (Go ``obsregistry.Validate``): 0 errors; the only
+    warnings are the registry's ``proposed`` statuses, which ``allow_proposed_owners`` exempts."""
+    registry = _init()
+    client = _exercise(_settings())
+    report = validate(registry)
+    assert report.ok(), str(report)
+    assert {f.rule for f in report.warnings()} == {"status"}
+    assert set(report.tiers) == EXPECTED_PLATFORM_METRICS
+    strict = Options(strict=True, allow_proposed_owners=("platform-gincommon",))
+    assert validate(registry, strict).ok()
+    # The served /metrics page itself (prometheus_client's default registry included).
+    assert validate_text(client.get("/metrics").text, strict).ok()
 
 
 def test_only_platform_metrics_are_emitted() -> None:

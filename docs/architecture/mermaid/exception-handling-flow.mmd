@@ -1,28 +1,28 @@
 flowchart TD
-    A(["Exception raised while handling a request"]) --> B{"Exception type"}
+    A(["Exception while handling a request"]) --> B{"Type (FastAPI exception handlers,<br/>registered by register_exception_handlers)"}
 
-    B -->|"PlatformException subclass"| C["platform_exception_handler\nassert isinstance(exc, PlatformException)"]
-    C --> D["problem_response(exc.problem_type, detail=exc.message)\n= RFC 9457 problem (same as gincommon v2)"]
+    B -->|"PlatformException subclass"| C["platform_exception_handler"]
+    C --> D["problem_response(exc.problem_type, detail=exc.message, error_code=exc.code)"]
 
-    B -->|"RequestValidationError\n(pydantic/FastAPI validation)"| E["request_validation_exception_handler"]
-    E --> F["problem_response(400 validation-failed,\nvalidationErrors from exc.errors())"]
+    B -->|"RequestValidationError"| E["request_validation_exception_handler"]
+    E --> F["400 validation-failed + validationErrors<br/>(field paths; the rejected value is never echoed)"]
 
-    B -->|"StarletteHTTPException\n(e.g. 404 no matching route)"| G["http_exception_handler\nassert isinstance(exc, StarletteHTTPException)"]
-    G --> H["problem_response(type_for_status(exc.status_code))\nunmatched route → ROUTE_NOT_FOUND; 5xx detail dropped"]
+    B -->|"Starlette HTTPException"| G["http_exception_handler"]
+    G --> G1{"status?"}
+    G1 -->|"404, no route matched"| G2["404 not-found · ROUTE_NOT_FOUND<br/>No route matches the request path."]
+    G1 -->|"405"| G3["405 method-not-allowed<br/>The route does not support the request method."]
+    G1 -->|"other"| G4["type_for_status(status)<br/>a 4xx detail the service wrote is kept; a 5xx detail never"]
 
-    B -->|"any other Exception\n(caught by UnhandledErrorMiddleware,\nnot re-raised to the server)"| I["unhandled_exception_handler"]
-    I --> J["ERROR 'unclassified error' (structlog)\nroute · operation · ids · error_type / error_chain · stack frames\nnever the exception message"]
-    J --> K["problem_response(500 internal-error) — no detail"]
+    B -->|"NotImplementedError"| N["501 not-implemented"]
 
-    subgraph reg["register_exception_handlers(app) — called once by create_platform_app"]
-        R1["add_exception_handler(PlatformException, ...)"]
-        R2["add_exception_handler(RequestValidationError, ...)"]
-        R3["add_exception_handler(StarletteHTTPException, ...)"]
-        R4["add_exception_handler(NotImplementedError, ...) → 501"]
-        R5["add_exception_handler(Exception, ...)"]
-    end
+    B -->|"any other Exception"| I["UnhandledErrorMiddleware → unhandled_exception_handler<br/>(see Unhandled exceptions and aborts)"]
+    I --> J["500 internal-error, no detail<br/>unclassified error log + platform_unclassified_errors_total{http}"]
 
-    R1 -.->|"registers"| C
-    R2 -.->|"registers"| E
-    R3 -.->|"registers"| G
-    R5 -.->|"registers"| I
+    D --> P
+    F --> P
+    G2 --> P
+    G3 --> P
+    G4 --> P
+    N --> P
+    J --> P
+    P["problem_response → build_problem<br/>application/problem+json · type {base}/{domain}/{name} · traceId (traceparent → x-request-id → span → generated)<br/>instance without query · tenantId only verified, never on 401 · timestamp<br/>warn problem response {traceId, type, status, errorCode, service, tenantId}"]

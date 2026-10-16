@@ -1,29 +1,36 @@
 sequenceDiagram
-    participant Client as gRPC Client
+    participant Client as gRPC client
     participant CCI as ContextClientInterceptor
-    participant Chan as grpc Channel
-    participant CSI as ContextServerInterceptor
-    participant H as Service handler (unary-unary)
+    participant Srv as grpc / grpc.aio server
+    participant CSI as Context(Async)ServerInterceptor
+    participant H as Handler
 
-    Note over Client,CCI: Outbound call made from code running inside\na bound RequestContext (e.g. a client call made from an HTTP handler)
+    Note over Client,CCI: outbound call made inside a bound RequestContext
+    Client ->>+ CCI: intercept_unary_unary
+    Note over CCI: append x-user-id, x-tenant-id, x-request-id, x-correlation-id (if set)<br/>no roles, no traceparent (instrument_grpc_client() for that)
+    CCI ->>+ Srv: RPC + metadata
+    Srv ->>+ CSI: intercept_service(continuation, details)
 
-    Client ->>+ CCI: intercept_unary_unary(continuation, details, request)
-    CCI ->> CCI: read get_user_id/get_tenant_id/get_request_id/get_correlation_id()
-    CCI ->> CCI: append (x-user-id, x-tenant-id, x-request-id,\nx-correlation-id) to metadata, only if set
-    CCI ->>+ Chan: continuation(new_details, request)
-    Chan ->>+ CSI: intercept_service(continuation, handler_call_details)
-
-    CSI ->> CSI: handler = continuation(handler_call_details)
-    alt handler is None or not unary_unary
-        CSI -->> Chan: return handler unchanged (streaming RPCs pass through)
-    else unary_unary handler
-        CSI ->> CSI: _context_from_metadata(invocation_metadata)\ngenerates request_id/correlation_id if absent
-        CSI ->> CSI: bind_request_context(rpc_context)
-        CSI ->>+ H: original_behavior(request, context)
-        H -->>- CSI: response (or raises)
-        Note over CSI: finally: platform_grpc_* recorded (handled, handling_seconds, sizes, inflight)<br/>logger.info("grpc_request_completed", ...)<br/>reset_request_context(token)
-        CSI -->>- Chan: response
+    alt streaming arity
+        Note over CSI: exception sanitizing only (no context, span or metrics)
+    else aio server, sync handler
+        Note over CSI: wrapped like the threaded interceptor, runs in the migration thread pool
+    else unary-unary
+        Note over CSI: span from traceparent, named after the bounded grpc_method,<br/>attached on the EXTRACTED context (baggage reaches the handler)<br/>RequestContext from metadata (resolve_identity: ambiguous ids / role caps)<br/>platform_grpc_server_inflight_requests +1
+        CSI ->>+ H: behavior(request, context)
+        alt returns
+            H -->> CSI: response
+        else handler's own abort / set_code
+            H -->> CSI: status kept (aio AbortError passed through untouched)
+        else plain exception (unclassified)
+            H -->> CSI: exception
+            Note over CSI: unclassified error log (types + frames, never the message)<br/>platform_unclassified_errors_total{transport="grpc"} +1, panics +1<br/>abort INTERNAL "internal server error"
+        else aio CancelledError (deadline / client cancel)
+            H -->>- CSI: CancelledError
+            Note over CSI: recorded as DeadlineExceeded / Canceled, never OK
+        end
+        Note over CSI: finish() — each step guarded:<br/>handled_total{grpc_method, grpc_code, status_class, error_class} · seconds · sizes<br/>grpc_request log (verified identity only) · context reset<br/>span rpc.response.status_code + rpc.grpc.status_code, Error for non-OK, end
     end
-
-    Chan -->>- CCI: response
+    CSI -->>- Srv: response / status
+    Srv -->>- CCI: response
     CCI -->>- Client: response

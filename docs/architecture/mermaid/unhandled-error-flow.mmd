@@ -1,0 +1,43 @@
+sequenceDiagram
+    participant Srv as ASGI server (uvicorn)
+    participant TR as TracingMiddleware
+    participant LM as LoggingMiddleware
+    participant UE as UnhandledErrorMiddleware
+    participant PM as PrometheusMiddleware
+    participant H as Handler / streaming body
+
+    Srv ->>+ TR: request
+    TR ->>+ LM: app(scope)
+    LM ->>+ UE: app(scope)
+    UE ->>+ PM: app(scope)
+    PM ->>+ H: app(scope)
+
+    alt exception BEFORE any response
+        H --x PM: raise
+        Note over PM: 500 + platform_http_panics_total +1 → re-raise
+        PM --x UE: exception
+        Note over UE: span: exception event (type only) + status panic (PANICKED flag)<br/>unclassified error (types + frames) · unclassified_errors{http} +1<br/>500 internal-error problem — NOT re-raised
+        UE -->> LM: 500 response
+        Note over LM: http_request error, status 500
+    else exception AFTER the response started (streaming body)
+        H --x PM: raise mid-body
+        Note over PM: recorded with the status sent, bytes sent — not a panic
+        PM --x UE: exception
+        Note over UE: ABORTED flag · unclassified error (real traceId) · metric +1<br/>return WITHOUT completing the body
+        UE -->> LM: incomplete response
+        Note over LM: http_request DEBUG, aborted=true, status sent
+        Note over TR: span http.aborted, not Error
+        Note over Srv: "ASGI callable returned without completing response"<br/>connection dropped — the client sees truncation, never a complete 200
+    else request CANCELLED (client disconnect, graceful shutdown)
+        H --x PM: CancelledError
+        Note over PM: 499 (or the status sent), client_error — not a panic
+        Note over UE: BaseException: passes through
+        Note over LM: http_request DEBUG, aborted=true, 499
+        Note over TR: span http.aborted, status_code 499, not Error
+    else no exception
+        H -->>- PM: response
+        PM -->>- UE: response
+        UE -->>- LM: response
+    end
+    LM -->>- TR: response
+    TR -->>- Srv: response

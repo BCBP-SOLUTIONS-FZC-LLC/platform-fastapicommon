@@ -7,6 +7,7 @@ import pytest
 from prometheus_client import REGISTRY
 
 from fastapicommon.metrics import platform
+from fastapicommon.telemetry import shutdown_tracing
 
 
 @pytest.fixture(autouse=True)
@@ -22,3 +23,12 @@ def _isolate_metrics_state() -> Iterator[None]:
             REGISTRY.unregister(collector)
     for field in dataclasses.fields(saved):
         setattr(platform._state, field.name, getattr(saved, field.name))
+
+
+@pytest.fixture(autouse=True)
+def _isolate_tracing(monkeypatch: pytest.MonkeyPatch) -> Iterator[None]:
+    """Tracing defaults to exporting to localhost:4317 (as in gincommon); keep spans in-process
+    unless a test opts in, and stop the provider a test installed."""
+    monkeypatch.setenv("OTEL_TRACES_EXPORTER", "none")
+    yield
+    shutdown_tracing()

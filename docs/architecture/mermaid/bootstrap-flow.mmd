@@ -1,28 +1,18 @@
 flowchart TD
-    A([create_platform_app called]) --> B[settings = settings or PlatformSettings]
-    B --> C{app_name given?}
-    C -- yes --> D[settings = settings.model_copy\nupdate app_name]
-    C -- no --> E
-    D --> E[configure_logging settings.log_level]
-    E --> F[app = FastAPI title=settings.app_name]
+    A(["create_platform_app(app_name, settings, **fastapi_kwargs)"]) --> B["settings = settings or PlatformSettings()<br/>app_name given → settings.model_copy(app_name)"]
+    B --> C["init_metrics_from_settings(settings)<br/>enable_metrics: domain required, identity in the registry vocabulary<br/>first successful init in the process wins"]
+    C -- invalid --> CX(["ValueError at startup<br/>(names OBSERVABILITY_DOMAIN / the vocabulary)"])
+    C --> D["configure_logging(log_level, environment)<br/>Zap layout on stderr; console in dev / local"]
+    D --> T{"enable_tracing?"}
+    T -- yes --> T1["ensure_tracing(TracingConfig.from_env(...))<br/>install unless a configured provider (ours or the service's) exists"]
+    T -- no --> F
+    T1 --> F["app = FastAPI(title=app_name, **fastapi_kwargs)"]
+    F --> LS{"enable_tracing?"}
+    LS -- yes --> L1["app.router.lifespan_context wrapped AFTER FastAPI normalised it<br/>any lifespan form, on_startup / on_shutdown, @app.on_event still run<br/>on exit: flush_tracing() in a worker thread (≤ 5 s)"]
+    LS -- no --> M
+    L1 --> M["add_middleware, innermost first:<br/>TimeoutMiddleware(request_timeout_seconds)<br/>PrometheusMiddleware + /metrics (enable_metrics)<br/>UnhandledErrorMiddleware<br/>LoggingMiddleware<br/>ContextMiddleware(trusted_proxies)<br/>TracingMiddleware (enable_tracing) — outermost"]
+    M --> H["include_router(health_router)<br/>register_exception_handlers(app, type_base, service)"]
+    H --> R(["return app — the service adds its routers"])
 
-    F --> G["add_middleware TimeoutMiddleware\ntimeout_seconds=settings.request_timeout_seconds"]
-    G --> H{settings.enable_metrics?}
-    H -- yes --> I["add_middleware PrometheusMiddleware\ninclude_router metrics_router"]
-    H -- no --> J
-    I --> J["add_middleware ContextMiddleware"]
-
-    J --> K[include_router health_router]
-    K --> L[register_exception_handlers app]
-    L --> M{settings.enable_tracing?}
-    M -- yes --> N["_build_span_exporter settings"]
-    N --> O{settings.otlp_endpoint set?}
-    O -- yes --> P["OTLPSpanExporter\ninsecure = environment in dev/development/local"]
-    O -- no --> Q["exporter = None\nspans recorded, not exported"]
-    P --> R[setup_tracing app, service_name, exporter]
-    Q --> R
-    M -- no --> S
-    R --> S([return app])
-
-    Note1["Middleware added LAST runs OUTERMOST.\nAdd order here is Timeout, Prometheus, Context —\nso the real request-time order is\nContext (outer) -> Prometheus -> Timeout (inner) -> route handler.\nContext is bound before metrics/timeout run."]
-    J -.-> Note1
+    N["Request-time order (last added runs outermost):<br/>Tracing → Context → Logging → UnhandledError → Prometheus → Timeout → routing<br/>platform-gincommon's ObservabilityMiddlewares order"]
+    M -.-> N

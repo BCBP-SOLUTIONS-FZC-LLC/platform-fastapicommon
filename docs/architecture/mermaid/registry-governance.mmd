@@ -1,0 +1,37 @@
+graph LR
+    subgraph upstream["Source of truth — platform-gincommon"]
+        greg["internal/obsregistry/registry.json<br/>(imports platform-events + platform-pgcommon verbatim)"]
+        grules["docker/prometheus/rules/*<br/>recording rules · SLO burn-rate alerts · promtool tests"]
+        ginv["docs/observability/metric-registry.md"]
+    end
+
+    subgraph vendored["Vendored here — byte-identical"]
+        reg["src/fastapicommon/metrics/registry.json<br/>115 entries: 6 approved · 52 proposed · 57 removed<br/>26 labels · 8 bucket presets"]
+        rules["docker/prometheus/rules/*"]
+        inv["docs/observability/metric-registry.md (generated)"]
+    end
+
+    subgraph runtime["Runtime (in every consuming service)"]
+        pm["PlatformMetrics → platform_* collectors<br/>(code cannot drift from the contract)"]
+        shared["new_shared_counter / gauge / histogram(name)<br/>Tier 1/2 from the entry"]
+        custom["new_counter / gauge / histogram — Tier 3<br/>check_custom: domain_service_ prefix, suffixes,<br/>no prohibited / injected labels, not a registry or legacy name"]
+    end
+
+    subgraph ci["Enforcement"]
+        parity["gincommon-parity.sh (CI, GINCOMMON_REF=v2.0.0)<br/>registry · rules · inventory identical"]
+        lint["make metrics-lint<br/>metricslint registry · refs --deny-deprecated rules<br/>promtool check + test rules · inventory drift"]
+        validate["metrics.compliance.validate(scrape) in service tests<br/>fastapicommon-metricslint check / refs"]
+    end
+
+    greg -.->|"copied on every change"| reg
+    grules -.->|"copied"| rules
+    ginv -.->|"must match"| inv
+    reg --> pm
+    reg --> shared
+    reg --> custom
+    reg --> lint
+    reg --> validate
+    reg --> inv
+    parity --- reg
+    parity --- rules
+    parity --- inv
