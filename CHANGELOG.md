@@ -7,6 +7,109 @@ pre-1.0 caveat on what SemVer guarantees currently apply.
 
 ## [Unreleased]
 
+### Security
+
+- Locked dependency upgrades for the `pip-audit` gate: `cryptography` 50.0.2 (PYSEC-2026-3552), `urllib3` 2.8.0 (PYSEC-2026-4175/4176/4177), `virtualenv` 21.14.5 (PYSEC-2026-4011–4014) and `pip` 26.2.1 (PYSEC-2026-3721).
+- The example service image removes `pip` from its runtime stage. pip's vendored `urllib3`, `msgpack` and `setuptools` were what Trivy flagged, even with the base image's current pip, and nothing runs pip at runtime.
+
+### Changed (breaking) — RFC 9457 Problem Details (parity with `platform-gincommon` v2.0.0)
+
+- Every HTTP error is an RFC 9457 problem (`application/problem+json`) instead of
+  `{error, status, trace_id, request_id}`: `type`, `title`, `status`, `detail`, `instance`,
+  `traceId`, `errorCode`, `tenantId`, `timestamp`, `validationErrors`. The types, titles, error
+  codes, trace-id resolution and validation messages are gincommon v2's; see
+  [docs/problem-details.md](docs/problem-details.md).
+- `ValidationException` and `RequestValidationError` are **400** `platform/validation-failed`
+  (was 422), with `validationErrors` carrying JSON field paths and gincommon's fixed messages.
+- `TimeoutMiddleware` answers **503** `platform/service-unavailable` with `errorCode`
+  `REQUEST_TIMEOUT` (was 504), the response gincommon's `TimeoutMiddleware` sends.
+- `PlatformException.code` is now the upper-snake `errorCode` (`NOT_FOUND`); `status_code` derives
+  from the new `problem_type`. Default messages of `UnauthorizedException` and
+  `ForbiddenException` are gincommon's details. A 5xx never carries a detail.
+
+### Added
+
+- `fastapicommon.problem`: `ProblemType`, the 15 platform types, `problem_type(...)` for domain
+  types, `build_problem`, `resolve_trace_id`, `problem_from_response` / `parse_problem` for
+  clients.
+- Exceptions `BusinessException` (alias of `PlatformException`, which now takes
+  `problem_type=`, `code=` and `validation_errors=`), `ResourceNotFoundException`,
+  `BusinessRuleViolationException` (422), `RateLimitException` (429),
+  `UnsupportedOperationException` (501), `ServiceUnavailableException` (503); `NotImplementedError`
+  maps to 501. Unmatched routes are `ROUTE_NOT_FOUND`; 405 is `method-not-allowed`.
+- `PlatformSettings.problem_type_base` (`PROBLEM_TYPE_BASE`) and
+  `register_exception_handlers(app, type_base=, service=)`; `problem_response(request, type, ...)`.
+- One WARN `problem response` log line per problem (`traceId`, `type`, `status`, `errorCode`,
+  `service`, `tenantId`).
+
+### Fixed
+
+- Re-vendored `src/fastapicommon/metrics/registry.json` from gincommon (it had drifted behind
+  gincommon v1.5.0's four Tier 2 `iam_*` metrics).
+
+### Added — Enterprise Platform Observability Standard (parity with `platform-gincommon`)
+
+- `platform_*` metrics — now the only HTTP/gRPC metrics the library emits — for the registry
+  domain (`PlatformSettings.observability_domain` / `OBSERVABILITY_DOMAIN`), with the const labels
+  `domain`, `service` (`app_name`) and `environment` on every series:
+  `platform_build_info{version}`, `platform_http_requests_total`,
+  `platform_http_request_duration_seconds`, `platform_http_request_size_bytes`,
+  `platform_http_response_size_bytes` (all `{method, route, status_class, error_class}`),
+  `platform_http_active_requests{route}`, `platform_http_panics_total`,
+  `platform_http_rate_limited_requests_total`, `platform_http_request_timeouts_total` (all
+  `{method, route}`), `platform_grpc_server_handled_total{grpc_method, grpc_code, status_class,
+  error_class}`, `platform_grpc_server_handling_seconds`,
+  `platform_grpc_server_request_size_bytes`, `platform_grpc_server_response_size_bytes` (all
+  `{grpc_method, status_class, error_class}`), `platform_grpc_server_inflight_requests`,
+  `platform_grpc_rate_limited_requests_total` and `platform_grpc_panics_total` (all
+  `{grpc_method}`). Names, help, label order and buckets come from the Platform Observability
+  Registry, vendored byte-for-byte from gincommon at `src/fastapicommon/metrics/registry.json`.
+- The platform `method` label is bounded (standard methods, else `OTHER`); `route` is the
+  Gin-style route template (`/items/:item_id`) or `unknown`, never the raw path.
+- New `PlatformSettings` fields `observability_domain` (required while `enable_metrics` is on)
+  and `build_version` (`BUILD_VERSION`). The environment label is the explicitly provided `environment`
+  (`APP_ENV`, then `ENVIRONMENT`), trimmed and lowercased, and must be one of
+  `local, dev, test, staging, prod` (no aliases).
+- `create_platform_app()` raises `ValueError` at startup on a missing domain (the message names
+  `OBSERVABILITY_DOMAIN`), an unknown domain, an invalid service label
+  (`^[a-z][a-z0-9_-]{0,62}$`), or a missing/out-of-vocabulary environment. With
+  `enable_metrics=False` no domain is needed; a configured one is still validated.
+- `ContextServerInterceptor(settings=None)`: pass `PlatformSettings` to initialize metrics in a
+  gRPC-only service (same validation; nothing is initialized with `enable_metrics=False`).
+- `fastapicommon.metrics`: `MetricsOptions`, `MetricsIdentity`, `init_metrics`,
+  `init_metrics_from_settings`, `resolve_metrics_options`, `platform_metrics`,
+  `platform_metrics_enabled`, `metrics_identity`, `metrics_registry`, `http_method_label`,
+  `PlatformMetrics`, `ObservabilityRegistry`, `default_registry`.
+- Compliance test `tests/integration/test_metrics_compliance.py` checks every emitted
+  `platform_*` sample against the vendored registry's labels and vocabularies.
+
+### Changed
+
+- `metrics_router` serves `metrics_registry()` (prometheus_client's default `REGISTRY` unless
+  `init_metrics(..., registry=...)` was given one) instead of always the default registry.
+- **Breaking:** `OBSERVABILITY_DOMAIN` (or `PlatformSettings.observability_domain`) is now
+  mandatory whenever metrics are enabled (the default). `create_platform_app()`,
+  `init_metrics()`, `init_metrics_from_settings()` and `ContextServerInterceptor(settings)` raise
+  `ValueError` without one; set `enable_metrics=False` to run without metrics.
+- `init_metrics_from_settings()` honours `settings.enable_metrics` (initializes nothing when it
+  is false). `PrometheusMiddleware` is a pass-through until metrics are initialized.
+
+### Removed
+
+- **Breaking:** the legacy metrics `http_requests_total`, `http_request_duration_seconds`,
+  `grpc_requests_total` and `grpc_request_duration_seconds` are no longer defined or emitted
+  (status `removed` in the registry). Use the `platform_*` equivalents.
+- **Breaking:** the `fastapicommon.metrics` exports `HTTP_REQUESTS_TOTAL`,
+  `HTTP_REQUEST_DURATION_SECONDS`, `GRPC_REQUESTS_TOTAL`, `GRPC_REQUEST_DURATION_SECONDS` and
+  `record_grpc_request`, and the `fastapicommon.metrics.definitions` module.
+- The `disable_legacy_metrics` setting (`DISABLE_LEGACY_METRICS`) and
+  `MetricsOptions.disable_legacy_metrics` / `MetricsIdentity.disable_legacy_metrics` /
+  `MetricsIdentity.platform_enabled`.
+- There is **no compatibility period**: the Enterprise Platform Observability Standard's
+  parallel-emission window is unnecessary because neither `platform-fastapicommon` nor
+  `platform-gincommon` was ever deployed to production or dev, so no dashboard, alert or
+  recording rule depends on the legacy names.
+
 ## [0.2.0] - 2026-07-27
 
 ### Added

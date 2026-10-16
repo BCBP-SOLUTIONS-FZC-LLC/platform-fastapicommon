@@ -39,7 +39,7 @@ graph TD
 
     subgraph http["HTTP integration"]
         middleware["fastapicommon.middleware\nContextMiddleware · TimeoutMiddleware"]
-        metrics["fastapicommon.metrics\nPrometheusMiddleware · metrics_router\nHTTP_REQUESTS_TOTAL · HTTP_REQUEST_DURATION_SECONDS\nGRPC_REQUESTS_TOTAL · GRPC_REQUEST_DURATION_SECONDS\nrecord_grpc_request"]
+        metrics["fastapicommon.metrics\nPrometheusMiddleware · metrics_router\ninit_metrics · PlatformMetrics\nObservabilityRegistry (registry.json)"]
         health["fastapicommon.health\nhealth_router · create_health_router · ReadinessCheck"]
         telemetry["fastapicommon.telemetry\nsetup_tracing · instrument_grpc_server\ninstrument_grpc_client"]
     end
@@ -130,7 +130,7 @@ dependency.
 | Symbol | Description |
 |--------|-------------|
 | `ContextMiddleware` | Reads auth/tracing headers, generates `request_id`/`correlation_id` if absent, binds `RequestContext`, echoes both ids back on the response |
-| `TimeoutMiddleware(timeout_seconds=30.0)` | Wraps `call_next` in `asyncio.wait_for`; returns 504 JSON on timeout |
+| `TimeoutMiddleware(timeout_seconds=30.0)` | Wraps `call_next` in `asyncio.wait_for`; returns a 503 `service-unavailable` problem (`REQUEST_TIMEOUT`) on timeout |
 
 ### fastapicommon.logging
 
@@ -143,11 +143,13 @@ dependency.
 
 | Symbol | Description |
 |--------|-------------|
-| `HTTP_REQUESTS_TOTAL` / `HTTP_REQUEST_DURATION_SECONDS` | Counter/Histogram, labels `method, path, status_code` / `method, path` |
-| `GRPC_REQUESTS_TOTAL` / `GRPC_REQUEST_DURATION_SECONDS` | Counter/Histogram, labels `method, status_code` / `method` |
-| `record_grpc_request(method, status_code, duration_seconds)` | Records one gRPC call — called by `ContextServerInterceptor` |
-| `PrometheusMiddleware` | Records the two HTTP metrics per request |
-| `metrics_router` | `GET /metrics` — Prometheus exposition format |
+| `PrometheusMiddleware` | Records the `platform_http_*` metrics per request; a pass-through until `init_metrics` has run |
+| `metrics_router` | `GET /metrics` — Prometheus exposition format of `metrics_registry()` (the default `REGISTRY` unless a test passed its own) |
+| `MetricsOptions` / `init_metrics(options, *, registry=None)` / `init_metrics_from_settings(settings)` | Observability-standard initialization (Go `metrics.MustInitFromConfig`): env fallbacks, identity validation (`ValueError`, including a missing domain), first call in the process wins; `registry=` bypasses that for tests. `init_metrics_from_settings` does nothing when `settings.enable_metrics` is false |
+| `resolve_metrics_options(options)` | Validation only — returns the resolved `MetricsIdentity` |
+| `platform_metrics()` / `platform_metrics_enabled()` / `metrics_identity()` / `metrics_registry()` | Active collectors / identity / registry |
+| `http_method_label(method)` | Standard HTTP method, else `OTHER` (platform label only) |
+| `default_registry()` / `ObservabilityRegistry` | The vendored Platform Observability Registry (`metrics/registry.json`, byte-identical to gincommon's) |
 
 ### fastapicommon.telemetry
 
@@ -168,8 +170,8 @@ dependency.
 
 | Symbol | Description |
 |--------|-------------|
-| `PlatformException(message=None)` | Base class; `status_code=500`, `code="internal_error"` (Python-side categorization only, not on the wire); serialized via `exceptions.handlers._error_response` → `{error, status, trace_id, request_id}` |
-| `UnauthorizedException` / `ForbiddenException` / `ValidationException` / `ConflictException` / `NotFoundException` | 401 / 403 / 422 / 409 / 404 subclasses |
+| `PlatformException(message=None, *, problem_type=None, code=None, validation_errors=())` (alias `BusinessException`) | Base class: `problem_type` fixes title/status (default `platform/internal-error`), `message` is the `detail`, `code` the `errorCode`; rendered by `exceptions.handlers.problem_response` as an RFC 9457 problem |
+| `ValidationException` / `UnauthorizedException` / `ForbiddenException` / `ResourceNotFoundException` (= `NotFoundException`) / `ConflictException` / `BusinessRuleViolationException` / `RateLimitException` / `UnsupportedOperationException` / `ServiceUnavailableException` | 400 / 401 / 403 / 404 / 409 / 422 / 429 / 501 / 503 subclasses |
 | `register_exception_handlers(app)` | Registers handlers for `PlatformException`, `RequestValidationError`, `StarletteHTTPException`, and generic `Exception` |
 
 ### fastapicommon.health
@@ -184,7 +186,7 @@ dependency.
 
 | Symbol | Description |
 |--------|-------------|
-| `PlatformSettings` | `pydantic-settings` `BaseSettings`: `app_name`, `environment` (accepts `APP_ENV` or `ENVIRONMENT` env vars via `AliasChoices`), `log_level`, `request_timeout_seconds`, `enable_tracing`, `enable_metrics`, `otlp_endpoint` |
+| `PlatformSettings` | `pydantic-settings` `BaseSettings`: `app_name`, `environment` (accepts `APP_ENV` or `ENVIRONMENT` env vars via `AliasChoices`), `log_level`, `request_timeout_seconds`, `enable_tracing`, `enable_metrics`, `otlp_endpoint`, `observability_domain` (`OBSERVABILITY_DOMAIN`), `build_version` (`BUILD_VERSION`) |
 
 ### fastapicommon.bootstrap
 
@@ -276,12 +278,12 @@ sequenceDiagram
     H -->>- TM: response
 
     alt handler exceeded timeout_seconds
-        TM -->> Client: 504 {"error":"...", "status":504, "trace_id":"...", "request_id":"..."}
+        TM -->> Client: 503 application/problem+json (service-unavailable, REQUEST_TIMEOUT)
     else within timeout
         TM -->>- PM: response
     end
 
-    Note over PM: duration = perf_counter() - start<br/>route = request.scope["route"] (path template)<br/>HTTP_REQUESTS_TOTAL.labels(method, path, status_code).inc()<br/>HTTP_REQUEST_DURATION_SECONDS.labels(method, path).observe(duration)
+    Note over PM: duration = perf_counter() - start<br/>route = http_route_label(scope) (Gin-style template or "unknown")<br/>platform_http_requests_total{method, route, status_class, error_class}.inc()<br/>platform_http_request_duration_seconds{...}.observe(duration)
 
     PM -->>- CM: response
     Note over CM: response.headers[x-request-id] = request_id<br/>response.headers[x-correlation-id] = correlation_id<br/>response.headers[X-Request-ID] = request_id<br/>response.headers[X-Trace-ID] = trace_id (if set)<br/>reset_request_context(token) in finally
@@ -307,23 +309,24 @@ flowchart TD
     A(["Exception raised while handling a request"]) --> B{"Exception type"}
 
     B -->|"PlatformException subclass"| C["platform_exception_handler\nassert isinstance(exc, PlatformException)"]
-    C --> D["_error_response(exc.status_code, exc.message)\n= {error, status, trace_id, request_id}\n(matches Go gincommon's ErrorResponse exactly)"]
+    C --> D["problem_response(exc.problem_type, detail=exc.message)\n= RFC 9457 problem (same as gincommon v2)"]
 
     B -->|"RequestValidationError\n(pydantic/FastAPI validation)"| E["request_validation_exception_handler"]
-    E --> F["_error_response(422, str(exc))"]
+    E --> F["problem_response(400 validation-failed,\nvalidationErrors from exc.errors())"]
 
     B -->|"StarletteHTTPException\n(e.g. 404 no matching route)"| G["http_exception_handler\nassert isinstance(exc, StarletteHTTPException)"]
-    G --> H["_error_response(exc.status_code, str(exc.detail))"]
+    G --> H["problem_response(type_for_status(exc.status_code))\nunmatched route → ROUTE_NOT_FOUND; 5xx detail dropped"]
 
     B -->|"any other Exception"| I["unhandled_exception_handler"]
     I --> J["logging.getLogger('fastapicommon.exceptions')\n.exception(...)"]
-    J --> K["_error_response(500, 'An unexpected error occurred')"]
+    J --> K["problem_response(500 internal-error) — no detail"]
 
     subgraph reg["register_exception_handlers(app) — called once by create_platform_app"]
         R1["add_exception_handler(PlatformException, ...)"]
         R2["add_exception_handler(RequestValidationError, ...)"]
         R3["add_exception_handler(StarletteHTTPException, ...)"]
-        R4["add_exception_handler(Exception, ...)"]
+        R4["add_exception_handler(NotImplementedError, ...) → 501"]
+        R5["add_exception_handler(Exception, ...)"]
     end
 
     R1 -.->|"registers"| C
@@ -366,7 +369,7 @@ sequenceDiagram
 
     alt check fails
         RBAC -->> Dep: raise ForbiddenException(...)
-        Dep -->> H: 403 {"error":"Requires role '...'","status":403,"trace_id":"...","request_id":"..."}
+        Dep -->> H: 403 forbidden problem (detail "Requires role '...'")
     else check passes
         RBAC -->>- Dep: None (dependency satisfied)
         Dep -->>- H: handler executes
@@ -423,60 +426,66 @@ process. This is a common source of "why don't I see any traces" confusion — c
 
 ```mermaid
 flowchart TD
-    subgraph init["Module import (once per process — no explicit Init call needed)"]
-        A["fastapicommon.metrics.definitions\nmodule-level Counter/Histogram objects\nregistered on prometheus_client's default REGISTRY at import time"]
+    subgraph init["Startup — init_metrics (create_platform_app / ContextServerInterceptor(settings))"]
+        A0{"enable_metrics?"} -->|no| A1["nothing initialized\n(no domain needed)"]
+        A0 -->|yes| A2{"domain set?\n(observability_domain or OBSERVABILITY_DOMAIN)"}
+        A2 -->|no| AX["raise ValueError\n(names OBSERVABILITY_DOMAIN)"]
+        A2 -->|yes| A3["resolve + validate identity against registry.json\n(domain, service, environment)"]
+        A3 --> A["PlatformMetrics: platform_* collectors\nregistered on REGISTRY (first call wins)"]
     end
 
     subgraph http["Per HTTP request — PrometheusMiddleware"]
-        B([call_next request]) --> C["start = time.perf_counter()"]
-        C --> D[await call_next request]
-        D --> E["route = request.scope.get('route')\npath = route.path if route else request.url.path"]
-        E --> F["HTTP_REQUESTS_TOTAL.labels(method, path, status_code).inc()"]
-        F --> G["HTTP_REQUEST_DURATION_SECONDS.labels(method, path).observe(duration)"]
+        B([call_next request]) --> C["route = http_route_label(scope)\n(Gin-style template or 'unknown')"]
+        C --> D["platform_http_active_requests +1\nawait call_next request"]
+        D --> F["platform_http_requests_total / _request_duration_seconds\n_request_size_bytes / _response_size_bytes\n{method, route, status_class, error_class}"]
+        D -.->|exception| P["recorded as 500 + platform_http_panics_total, re-raised"]
     end
 
     subgraph grpcflow["Per gRPC unary-unary call — ContextServerInterceptor"]
         H([wrapped_behavior request, context]) --> I["original_behavior(request, context)"]
-        I --> J["record_grpc_request(method, status_code, duration_seconds)"]
-        J --> K["GRPC_REQUESTS_TOTAL.labels(method, status_code).inc()"]
-        J --> L["GRPC_REQUEST_DURATION_SECONDS.labels(method).observe(duration_seconds)"]
+        I --> K["platform_grpc_server_handled_total / _handling_seconds\n_request_size_bytes / _response_size_bytes\n{grpc_method, ...}"]
     end
 
     subgraph expose["Exposition"]
         M["GET /metrics — metrics_router\n(registered only if settings.enable_metrics)"]
-        M --> N["generate_latest()\nContent-Type: CONTENT_TYPE_LATEST"]
+        M --> N["generate_latest(metrics_registry())\nContent-Type: CONTENT_TYPE_LATEST"]
     end
 
     A -.-> F
-    A -.-> G
     A -.-> K
-    A -.-> L
     A -.-> N
 ```
 
-#### Registered Prometheus metrics
+#### Platform Observability Standard metrics (`fastapicommon.metrics.platform`)
 
-| Metric | Type | Labels |
-|--------|------|--------|
-| `http_requests_total` | Counter | method, path, status_code |
-| `http_request_duration_seconds` | Histogram | method, path |
-| `grpc_requests_total` | Counter | method, status_code |
-| `grpc_request_duration_seconds` | Histogram | method |
+These are the only HTTP/gRPC metrics the library emits. The domain (`observability_domain` /
+`OBSERVABILITY_DOMAIN`) is mandatory while metrics are enabled: without one `init_metrics`
+raises `ValueError` naming `OBSERVABILITY_DOMAIN`; with `enable_metrics=False` none is needed.
+`init_metrics` (called by `create_platform_app()` and `ContextServerInterceptor(settings)`)
+builds the `platform_*`
+collectors from their entries in the vendored registry (`src/fastapicommon/metrics/registry.json`
+— names, help, label order, buckets) with the registry's const labels `domain`, `service`,
+`environment` prepended to each label list (prometheus_client has no const-label support), and
+registers them behind a collector that drops prometheus_client's `*_created` samples. The full
+list and label semantics are in the README's *Platform Observability Standard metrics* section;
+in short: `platform_build_info{version}`; `platform_http_requests_total`,
+`platform_http_request_duration_seconds`, `platform_http_request_size_bytes`,
+`platform_http_response_size_bytes`, `platform_http_active_requests`,
+`platform_http_panics_total`, `platform_http_rate_limited_requests_total`,
+`platform_http_request_timeouts_total`; and `platform_grpc_server_handled_total`,
+`platform_grpc_server_handling_seconds`, `platform_grpc_server_request_size_bytes`,
+`platform_grpc_server_response_size_bytes`, `platform_grpc_server_inflight_requests`,
+`platform_grpc_rate_limited_requests_total`, `platform_grpc_panics_total`.
 
-Unlike `platform-gincommon`, these metrics carry **no built-in `service`/`version` const
-label** — `fastapicommon` has no equivalent of the Go library's `Config.ServiceName`
-applied as a const label at registration time. If you run several `fastapicommon` services
-behind one Prometheus, rely on Prometheus's own `job`/`instance` labels (one scrape target
-per service) to distinguish them, not a label emitted by this library.
+The platform `route` label is resolved *before* the handler runs by matching the request
+against the app's routes (recursing into `Mount`s), like Gin's `FullPath()`, so the in-flight
+gauge and the counters share one value; it is rendered Gin-style (`/items/:item_id`) and is
+`unknown` for unmatched requests. An exception escaping `call_next` (Go: a recovered panic) is
+recorded as a 500 plus `platform_http_panics_total`, then re-raised. Because the raw URL path
+is never a label value, scanner probes and typos cannot grow label cardinality.
 
-**Cardinality caveat:** `PrometheusMiddleware` uses the matched route's path *template*
-(e.g. `/widgets/{id}`) when a route matches, which keeps cardinality bounded for real
-traffic. When no route matches at all (404s from scanner probes, typos, etc.),
-`request.scope.get("route")` is `None` and the middleware falls back to the **raw URL
-path** — so arbitrary unmatched paths each get their own `http_requests_total` label
-combination. `platform-gincommon` explicitly normalizes this case to a constant
-`"unknown"` label; `fastapicommon` does not (yet) do the same. If you expose a service to
-untrusted traffic, be aware this can grow the `path` label's cardinality over time.
+The pre-standard metric names were removed without a compatibility period (nothing had been
+deployed); see the CHANGELOG.
 
 ---
 
@@ -508,7 +517,7 @@ sequenceDiagram
         CSI ->> CSI: bind_request_context(rpc_context)
         CSI ->>+ H: original_behavior(request, context)
         H -->>- CSI: response (or raises)
-        Note over CSI: finally: record_grpc_request(method, status_code, duration)<br/>logger.info("grpc_request_completed", ...)<br/>reset_request_context(token)
+        Note over CSI: finally: platform_grpc_* recorded (handled, handling_seconds, sizes, inflight)<br/>logger.info("grpc_request_completed", ...)<br/>reset_request_context(token)
         CSI -->>- Chan: response
     end
 
@@ -691,7 +700,7 @@ from *any* dependency or handler, as well as from inside `PrometheusMiddleware` 
 **Cooperative cancellation caveat:** `TimeoutMiddleware` cancels the `call_next(request)`
 task via `asyncio.wait_for`. Python cancellation is cooperative — if the handler is
 executing a long synchronous, blocking call with no `await` point, cancellation only takes
-effect the next time the handler actually yields control. The client still receives a 504
+effect the next time the handler actually yields control. The client still receives the 503
 promptly; a slow handler is not guaranteed to stop executing instantly.
 
 **gRPC** — `ContextServerInterceptor` wraps `unary_unary` handlers directly (no interceptor
@@ -710,10 +719,10 @@ not provided by this library today — see [Platform contract](#platform-contrac
 | **OTLP tracing export** | Collector unreachable | `BatchSpanProcessor` retries asynchronously in a background thread; logs `Transient error ... retrying` | Request handling is never blocked or failed by export failures |
 | **OTLP tracing export** | `otlp_endpoint` unset | No error, no warning | Spans created with valid trace IDs but never exported |
 | **Structured logging** | N/A | `get_logger()` always returns a usable logger; there is no "nil logger" failure mode in this library | — |
-| **RBAC** | `RequireRole`/`RequireAnyRole`/`RequireAllRoles` check fails | `ForbiddenException` → `403 {"error":"...", "status":403, "trace_id":"...", "request_id":"..."}` via the registered exception handler | Does not affect other routes or middleware |
+| **RBAC** | `RequireRole`/`RequireAnyRole`/`RequireAllRoles` check fails | `ForbiddenException` → `403` `platform/forbidden` problem via the registered exception handler | Does not affect other routes or middleware |
 | **Missing/unbound context** | Code calls `get_request_context()` outside `ContextMiddleware` or `request_context_scope` (e.g. a detached background task) | Raises `LookupError` | Use `get_request_context_or_none()` or the individual `get_*` accessors, which return `None`/`()`/`""` instead |
-| **Request timeout** | Handler exceeds `request_timeout_seconds` | `504 {"error":"...", "status":504, "trace_id":"...", "request_id":"..."}` | Server continues serving other requests; see cooperative-cancellation caveat above |
-| **Unhandled exception** | Any exception not a `PlatformException`/`RequestValidationError`/`StarletteHTTPException` | Logged via stdlib `logging`, then `500 {"error":"...", "status":500, "trace_id":"...", "request_id":"..."}` | Does not crash the process |
+| **Request timeout** | Handler exceeds `request_timeout_seconds` | `503` `platform/service-unavailable` problem, `errorCode` `REQUEST_TIMEOUT` | Server continues serving other requests; see cooperative-cancellation caveat above |
+| **Unhandled exception** | Any exception not a `PlatformException`/`RequestValidationError`/`StarletteHTTPException` | Logged via stdlib `logging`, then a `500` `platform/internal-error` problem without `detail` | Does not crash the process |
 
 No external dependency — OTLP collector, Prometheus scrape, or log sink — can cause request
 handling to fail; all are either in-process (metric counters), async (OTLP batched
@@ -748,5 +757,5 @@ anything, but produces broken tracing, misleading metrics, or an unintended trus
 | `PrometheusMiddleware` labels by the matched route's path *template*, not the raw URL, when a route matches | `metrics/middleware.py` — keeps cardinality bounded for real traffic; see the caveat above for the unmatched-route (404) case |
 | `ContextServerInterceptor` passes through any handler where `handler.unary_unary` is falsy | `grpc/server.py` — streaming RPCs are never wrapped, never double-instrumented |
 | `TimeoutMiddleware(timeout_seconds=...)` always wraps `call_next` in `asyncio.wait_for`, even for very large timeouts | `middleware/timeout.py` — there's no "disabled" sentinel value; set a large `request_timeout_seconds` to effectively disable it |
-| Every registered exception handler serializes through the same `_error_response(status, error)` helper, always producing exactly `{"error": ..., "status": ..., "trace_id": ..., "request_id": ...}` — matching Go `gincommon`'s `ErrorResponse` field-for-field | `exceptions/handlers.py` — API consumers (Go or Python) can parse errors uniformly regardless of which handler fired or which language served the response |
+| Every registered exception handler (and `TimeoutMiddleware`) renders through `problem_response`, producing an RFC 9457 problem identical to gincommon v2's (types, titles, error codes, traceId order, validation messages) | `exceptions/handlers.py`, `problem/` — `tests/unit/problem` checks the platform types against gincommon's `docs/problem-details/registry.md` |
 | `fastapicommon.grpc` is never imported by `fastapicommon/__init__.py` | Base install has no `grpcio` dependency; only importing `fastapicommon.grpc` directly requires the `grpc` extra |

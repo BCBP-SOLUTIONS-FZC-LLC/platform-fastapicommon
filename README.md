@@ -52,9 +52,9 @@ This library **standardises** these concerns once so every service gets:
   (`request_id`, `correlation_id`, `tenant_id`, `user_id`)
 - OTel spans with the same instrumentation (`FastAPIInstrumentor`)
 - A `RequestContext`/`CurrentUser` available in every handler via one dependency
-- The same error JSON shape (`{"error": ..., "status": ..., "trace_id": ..., "request_id": ...}`)
-  across all services — matching the Go `gincommon` library's `ErrorResponse` exactly, so a Go
-  client parsing either language's error body succeeds unchanged
+- The same RFC 9457 Problem Details error contract (`application/problem+json`) across all
+  services — the same types, titles, error codes, trace ids and validation messages as the Go
+  `gincommon` v2 library (see [docs/problem-details.md](docs/problem-details.md))
 
 ---
 
@@ -64,14 +64,14 @@ This library **standardises** these concerns once so every service gets:
 |------------|------|------|
 | **Request/correlation ID** | `ContextMiddleware` — reads `x-request-id`/`x-correlation-id` or generates a UUID; echoes both back | `ContextServerInterceptor` — reads from metadata or generates a UUID |
 | **Tracing** | `FastAPIInstrumentor` via `setup_tracing()`; OTel HTTP server spans | `instrument_grpc_server()` / `instrument_grpc_client()` (separate opt-in call) |
-| **Metrics** | `PrometheusMiddleware` — `http_requests_total`, `http_request_duration_seconds` | `record_grpc_request()` via `ContextServerInterceptor` — `grpc_requests_total`, `grpc_request_duration_seconds` |
+| **Metrics** | `PrometheusMiddleware` — the `platform_http_*` metrics of the [observability standard](#platform-observability-standard-metrics); requires `OBSERVABILITY_DOMAIN` | `ContextServerInterceptor` — the `platform_grpc_*` metrics |
 | **Logging** | `fastapicommon.logging.get_logger()` — structlog JSON, enriched with context | Same `get_logger()`; `ContextServerInterceptor` logs `grpc_request_completed` after each call |
 | **Auth** | `Depends(require_authenticated_user)` — `401` if `x-user-id` unset (opt-in per route) | **Not provided** — no gRPC equivalent exists; check `get_request_context().user_id` yourself |
 | **Tenant context** | `RequestContext{request_id, correlation_id, user: CurrentUser, trace_id, client_ip}` via `get_request_context()` | Same struct, same accessor, bound by `ContextServerInterceptor` |
 | **RBAC** | `RequireRole` / `RequireAnyRole` / `RequireAllRoles` as FastAPI dependencies | **Not provided** — these are FastAPI `Depends`-based; there is no gRPC interceptor equivalent |
-| **Timeout** | `TimeoutMiddleware(timeout_seconds=...)` — `asyncio.wait_for` around the handler, `504` JSON on expiry | **Not provided** — set a deadline on the gRPC channel/client call yourself |
+| **Timeout** | `TimeoutMiddleware(timeout_seconds=...)` — `asyncio.wait_for` around the handler, a `503` `service-unavailable` problem (`REQUEST_TIMEOUT`) on expiry | **Not provided** — set a deadline on the gRPC channel/client call yourself |
 | **Health** | `health_router` — `/health`, `/live`, `/ready` (200 unless custom readiness checks fail) | — |
-| **Error type** | `PlatformException` hierarchy → `{"error": ..., "status": ..., "trace_id": ..., "request_id": ...}` JSON via `register_exception_handlers` | Exceptions raised in a unary-unary handler propagate to the client as-is (gRPC has no equivalent exception-handler registry) |
+| **Error type** | `PlatformException` hierarchy → RFC 9457 problems via `register_exception_handlers` | Exceptions raised in a unary-unary handler propagate to the client as-is (gRPC has no equivalent exception-handler registry) |
 | **Outbound propagation** | `create_platform_http_client()` — `httpx.AsyncClient` that stamps identity/trace headers on every request | `ContextClientInterceptor` — stamps identity metadata on outbound unary-unary calls |
 | **OpenTelemetry init** | `setup_tracing(app, service_name, exporter=None)` (called automatically by `create_platform_app`) | `instrument_grpc_server()` / `instrument_grpc_client()` (call explicitly) |
 
@@ -136,7 +136,7 @@ details.
 ```text
 Incoming request
   → ContextMiddleware        (outermost — binds RequestContext for the whole request)
-  → PrometheusMiddleware     (records http_requests_total / http_request_duration_seconds)
+  → PrometheusMiddleware     (records the platform_http_* metrics)
   → TimeoutMiddleware        (innermost — asyncio.wait_for around the handler)
   ╠═ always public (no auth) ══════════════════════════════════╗
   ║   GET  /health, /live, /ready  → health_router               ║
@@ -169,8 +169,8 @@ from fastapicommon.rbac import RequireRole
 
 logger = get_logger(__name__)
 
-# PlatformSettings() reads APP_NAME, APP_ENV, OTLP_ENDPOINT, etc. from the environment —
-# see "Environment variables" below.
+# PlatformSettings() reads APP_NAME, APP_ENV, OBSERVABILITY_DOMAIN (required while metrics are
+# on), OTLP_ENDPOINT, etc. from the environment — see "Environment variables" below.
 app = create_platform_app(settings=PlatformSettings())
 
 router = APIRouter(prefix="/widgets", tags=["widgets"])
@@ -215,25 +215,38 @@ async def list_items_handler() -> dict:
 
 ### Error response shape
 
-All `PlatformException` subclasses (and the generic-exception fallback) produce the same
-JSON body — matching `platform-gincommon`'s `ErrorResponse` exactly, field-for-field, so a
-Go client parsing either language's error response succeeds unchanged:
+Every error — `PlatformException` subclasses, request validation, `HTTPException`, unmatched
+routes, timeouts and the unhandled-exception fallback — is an RFC 9457 problem
+(`application/problem+json`), identical to `platform-gincommon` v2's:
 
 ```json
-{"error": "widget 42 not found", "status": 404, "trace_id": "...", "request_id": "..."}
+{
+  "type": "https://errors.company.com/platform/not-found",
+  "title": "Not Found",
+  "status": 404,
+  "detail": "Widget 42 was not found.",
+  "instance": "/widgets/42",
+  "traceId": "4bf92f3577b34da6a3ce929d0e0e4736",
+  "errorCode": "NOT_FOUND",
+  "timestamp": "2026-10-15T10:45:22Z"
+}
 ```
-
-`trace_id` is `""` when no OTel span is active for the request. The same `request_id`/
-`trace_id` values are also echoed as response headers (`X-Request-ID`/`X-Trace-ID`, plus the
-lowercase `x-request-id`/`x-correlation-id` pair) on every response, success or error:
 
 ```python
-import httpx
+from fastapicommon.exceptions import NotFoundException, PlatformException
+from fastapicommon.problem import problem_type
 
-resp = httpx.get("http://localhost:8080/widgets/nonexistent")
-print(resp.json())                       # {"error": "...", "status": 404, "trace_id": "...", "request_id": "..."}
-print(resp.headers["X-Request-ID"])      # same request_id as the JSON body
+TENDER_NOT_FOUND = problem_type("tender", "not-found", "Tender not found", 404, "TENDER_NOT_FOUND")
+
+raise NotFoundException("Widget 42 was not found.")
+raise PlatformException("Tender 123 was not found.", problem_type=TENDER_NOT_FOUND)
 ```
+
+Validation failures are `400 platform/validation-failed` with `validationErrors`
+(`[{"field": "items[0].sku", "message": "must be at most 8 characters"}]`), a 5xx never carries
+a `detail`, and `tenantId` is present only for an authenticated identity (never on a 401).
+Clients parse problems with `fastapicommon.problem.problem_from_response(resp)`. Full contract,
+mapping and migration: [docs/problem-details.md](docs/problem-details.md).
 
 ---
 
@@ -295,6 +308,11 @@ step — see that file for a runnable variant of the pattern above (`make run` r
 FastAPI example; run the gRPC one directly with
 `python -m examples.grpc_service.server`).
 
+To emit the `platform_grpc_*` metrics from a gRPC-only service (no `create_platform_app()`),
+pass the settings to the interceptor — `ContextServerInterceptor(PlatformSettings())` — which
+initializes metrics exactly like `create_platform_app()` does (and raises on the same missing
+domain or invalid identities). See [Platform Observability Standard metrics](#platform-observability-standard-metrics).
+
 ### Required gRPC metadata
 
 | Metadata key | Enforced? | Notes |
@@ -344,6 +362,103 @@ if called outside a bound context — see
 [ARCHITECTURE.md § Failure domains](./ARCHITECTURE.md#failure-domains)).
 **gRPC:** same `get_request_context()`, valid inside a unary-unary handler wrapped by
 `ContextServerInterceptor`.
+
+---
+
+## Platform Observability Standard metrics
+
+This library implements the Enterprise Platform Observability Standard the same way the Go
+original [`platform-gincommon`](https://github.com/BCBP-SOLUTIONS-FZC-LLC/platform-gincommon)
+does (Go is the source of truth — see its `docs/observability/`). Metric names, help text,
+label names and order, label vocabularies and histogram buckets come from the Platform
+Observability Registry, vendored byte-for-byte at
+[`src/fastapicommon/metrics/registry.json`](src/fastapicommon/metrics/registry.json) (a copy of
+gincommon's `internal/obsregistry/registry.json`; a test fails if the two drift).
+
+### Configuration
+
+The domain is **mandatory** while metrics are enabled (the default):
+
+```python
+settings = PlatformSettings(
+    app_name="event-consumer",     # service label: ^[a-z][a-z0-9_-]{0,62}$
+    observability_domain="iam",    # or OBSERVABILITY_DOMAIN
+    environment="prod",            # or APP_ENV, then ENVIRONMENT: local|dev|test|staging|prod
+    build_version="v1.2.3",        # or BUILD_VERSION; "unknown" when unset
+)
+app = create_platform_app(settings=settings)
+```
+
+- The `platform_*` metrics below — the only HTTP/gRPC metrics the library emits — carry the
+  const labels `domain`, `service` and `environment` on every series.
+- `create_platform_app()` (and `ContextServerInterceptor(settings)`) **raise `ValueError` at
+  startup** — where Go panics — when no domain is configured (neither `observability_domain`
+  nor `OBSERVABILITY_DOMAIN`; the message names `OBSERVABILITY_DOMAIN`), on a domain that is not
+  in the registry, an `app_name` that is not a valid service label, or an environment that is
+  missing or not one of
+  `local, dev, test, staging, prod`. There are no aliases: `production` and `development` are
+  rejected. `PlatformSettings.environment`'s `"development"` default does not count as an
+  environment; set `APP_ENV`/`ENVIRONMENT` or pass `environment=` explicitly.
+- With `enable_metrics=False` (`ENABLE_METRICS=false`) no domain is needed: no metrics are
+  initialized and `/metrics` is not mounted. A domain that is configured is still validated.
+- Initialization is process-wide and the first app/interceptor created in the process sets the
+  identity (like gincommon's `sync.Once`). In tests, call
+  `fastapicommon.metrics.init_metrics(options, registry=CollectorRegistry())` first to get an
+  isolated registry; `/metrics` then serves that registry.
+
+### Emitted metrics
+
+Const labels on every `platform_*` series: `domain`, `service`, `environment`.
+
+| Metric | Type | Labels | Recorded by |
+|---|---|---|---|
+| `platform_build_info` | gauge (always 1) | `version` | initialization |
+| `platform_http_requests_total` | counter | `method`, `route`, `status_class`, `error_class` | `PrometheusMiddleware` |
+| `platform_http_request_duration_seconds` | histogram (`request_duration` buckets) | same | `PrometheusMiddleware` |
+| `platform_http_request_size_bytes` | histogram (`payload_size` buckets) | same | `PrometheusMiddleware` (Content-Length, 0 when unknown) |
+| `platform_http_response_size_bytes` | histogram (`payload_size` buckets) | same | `PrometheusMiddleware` (Content-Length, else bytes streamed) |
+| `platform_http_active_requests` | gauge | `route` | `PrometheusMiddleware` |
+| `platform_http_panics_total` | counter | `method`, `route` | `PrometheusMiddleware` — unhandled exceptions (also counted as 5xx above) |
+| `platform_http_rate_limited_requests_total` | counter | `method`, `route` | `PrometheusMiddleware` — any 429 response |
+| `platform_http_request_timeouts_total` | counter | `method`, `route` | `TimeoutMiddleware` — each 503 timeout problem it returns |
+| `platform_grpc_server_handled_total` | counter | `grpc_method`, `grpc_code`, `status_class`, `error_class` | `ContextServerInterceptor` (unary-unary) |
+| `platform_grpc_server_handling_seconds` | histogram (`request_duration` buckets) | `grpc_method`, `status_class`, `error_class` | same |
+| `platform_grpc_server_request_size_bytes` / `_response_size_bytes` | histogram (`payload_size` buckets) | same | same (protobuf `ByteSize()`, 0 for non-protobuf messages) |
+| `platform_grpc_server_inflight_requests` | gauge | `grpc_method` | same |
+| `platform_grpc_rate_limited_requests_total` | counter | `grpc_method` | same — RPCs ending `ResourceExhausted` |
+| `platform_grpc_panics_total` | counter | `grpc_method` | same — handler exceptions without an explicit status (client sees `UNKNOWN`) |
+
+Label values, all bounded:
+
+- `method` — the standard HTTP methods; anything else (e.g. `PURGE`) is `OTHER`.
+- `route` — the route template in the registry's (Gin-style) syntax, so Go and Python services
+  report routes identically: `/items/{item_id}` → `/items/:item_id`, `{rest:path}` → `*rest`.
+  Unmatched requests, 405s and slash redirects are `unknown` — never the raw URL path.
+- `status_class` / `error_class` — `2xx`/`success` for HTTP 200-399, `4xx`/`client_error` for
+  400-499, else `5xx`/`server_error`; for gRPC, `OK` is 2xx, client-side codes (`Canceled`,
+  `InvalidArgument`, `NotFound`, `AlreadyExists`, `PermissionDenied`, `Unauthenticated`,
+  `FailedPrecondition`, `OutOfRange`, `Aborted`, `DeadlineExceeded`, `ResourceExhausted`) are 4xx,
+  the rest 5xx — identical to gincommon.
+- `grpc_code` — Go's code names (`NotFound`, `Canceled`, ...); `grpc_method` — the full method
+  (`/package.Service/Method`) or `unknown`.
+
+The `platform_*` collectors do not expose prometheus_client's `*_created` samples (Go's client
+has none, and Go's `metricslint check` would read them as unregistered `platform_*` families).
+
+### Pre-standard metric names
+
+The library's pre-standard metric names were removed outright, with no compatibility period:
+neither this library nor gincommon was ever deployed, so nothing depended on them. See the
+[CHANGELOG](./CHANGELOG.md) for the list; Go's `metricslint check` reports them as errors.
+
+### Compliance test
+
+`tests/integration/test_metrics_compliance.py` drives every instrumented code path through
+`create_platform_app()` and the gRPC interceptor, then asserts that only `platform_*` families
+are emitted and that every `platform_*` sample
+carries exactly the registry labels plus the const labels, with every value inside the
+vocabulary of the vendored registry. Consuming services can do the same against
+`fastapicommon.metrics.metrics_registry()` using `fastapicommon.metrics.default_registry()`.
 
 ---
 
@@ -486,7 +601,7 @@ so the two docs can't drift out of sync.
 | `fastapicommon.context` | contextvars-based `RequestContext` propagation |
 | `fastapicommon.logging` | structlog JSON logging enriched with request context |
 | `fastapicommon.telemetry` | OpenTelemetry tracing setup for HTTP/gRPC |
-| `fastapicommon.metrics` | Prometheus HTTP/gRPC metrics + `/metrics` router |
+| `fastapicommon.metrics` | Prometheus HTTP/gRPC metrics + `/metrics` router; `init_metrics`, `MetricsOptions`, `metrics_registry`, `default_registry` (observability standard) |
 | `fastapicommon.middleware` | `ContextMiddleware`, `TimeoutMiddleware` |
 | `fastapicommon.rbac` | `RequireRole` / `RequireAnyRole` / `RequireAllRoles` dependencies |
 | `fastapicommon.exceptions` | `PlatformException` hierarchy + handlers |
@@ -513,6 +628,11 @@ so the two docs can't drift out of sync.
 | `ENABLE_TRACING` | `false` | `true` | `enable_tracing` — gates `setup_tracing()` entirely |
 | `ENABLE_METRICS` | `false` | `true` | `enable_metrics` — gates `PrometheusMiddleware` + `/metrics` |
 | `OTLP_ENDPOINT` | `otel-collector:4317` | unset | `otlp_endpoint` — when set, spans are exported via OTLP/gRPC; when unset, spans are recorded but never exported |
+| `OBSERVABILITY_DOMAIN` | `iam` | unset — **required** while `ENABLE_METRICS` is true | `observability_domain` — registry domain of the [`platform_*` metrics](#platform-observability-standard-metrics); startup raises `ValueError` without one |
+| `BUILD_VERSION` | `v1.2.3` | unset (`unknown`) | `build_version` — `version` label of `platform_build_info` |
+
+While metrics are enabled, `APP_ENV` / `ENVIRONMENT` (or an explicit `environment=`) is also the
+`environment` label and must be one of `local, dev, test, staging, prod`.
 
 ---
 
@@ -527,7 +647,7 @@ platform-fastapicommon/
 │   ├── auth/            # header constants, get_current_user
 │   ├── middleware/      # ContextMiddleware, TimeoutMiddleware
 │   ├── logging/         # structlog JSON configuration
-│   ├── metrics/         # Prometheus definitions + middleware + /metrics router
+│   ├── metrics/         # Prometheus definitions + middleware + /metrics router; platform_* metrics + vendored registry.json
 │   ├── telemetry/       # OpenTelemetry setup (HTTP + gRPC)
 │   ├── rbac/            # RequireRole / RequireAnyRole / RequireAllRoles
 │   ├── health/          # /health, /live, /ready router
@@ -671,7 +791,7 @@ account setup.
 
 ```bash
 make docker-build
-docker run --rm -p 8080:8080 -e APP_ENV=prod platform-fastapicommon-example:local
+docker run --rm -p 8080:8080 -e APP_ENV=prod -e OBSERVABILITY_DOMAIN=iam platform-fastapicommon-example:local
 ```
 
 The image runs the **example** service. Consumer services do not deploy this image.

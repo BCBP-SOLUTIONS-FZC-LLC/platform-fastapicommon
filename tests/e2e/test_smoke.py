@@ -53,7 +53,18 @@ def base_url() -> Iterator[str]:
 
     container_name = f"fastapicommon-e2e-{uuid.uuid4().hex[:8]}"
     subprocess.run(
-        ["docker", "run", "-d", "--name", container_name, "-P", image_tag],
+        # OBSERVABILITY_DOMAIN is mandatory with metrics on (the image sets APP_ENV=prod).
+        [
+            "docker",
+            "run",
+            "-d",
+            "--name",
+            container_name,
+            "-e",
+            "OBSERVABILITY_DOMAIN=iam",
+            "-P",
+            image_tag,
+        ],
         check=True,
         capture_output=True,
         text=True,
@@ -105,7 +116,8 @@ def test_ready(base_url: str) -> None:
 def test_metrics(base_url: str) -> None:
     response = httpx.get(f"{base_url}/metrics")
     assert response.status_code == 200
-    assert "http_requests_total" in response.text
+    assert 'platform_build_info{domain="iam"' in response.text
+    assert not any(line.startswith("http_request") for line in response.text.splitlines())
 
 
 def test_whoami_anonymous(base_url: str) -> None:
@@ -119,7 +131,9 @@ def test_delete_requires_role(base_url: str) -> None:
     assert response.status_code == 403
     body = response.json()
     assert body["status"] == 403
-    assert set(body) == {"error", "status", "trace_id", "request_id"}
+    assert response.headers["content-type"] == "application/problem+json"
+    assert body["type"] == "https://errors.company.com/platform/forbidden"
+    assert body["errorCode"] == "FORBIDDEN"
 
 
 def test_delete_with_role_succeeds(base_url: str) -> None:

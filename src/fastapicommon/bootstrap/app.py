@@ -9,7 +9,7 @@ from fastapicommon.config import PlatformSettings
 from fastapicommon.exceptions import register_exception_handlers
 from fastapicommon.health import health_router
 from fastapicommon.logging import configure_logging
-from fastapicommon.metrics import PrometheusMiddleware, metrics_router
+from fastapicommon.metrics import PrometheusMiddleware, init_metrics_from_settings, metrics_router
 from fastapicommon.middleware import ContextMiddleware, TimeoutMiddleware
 from fastapicommon.telemetry import setup_tracing
 
@@ -24,10 +24,20 @@ def create_platform_app(
 
     The consuming service should only add its own routers, repositories, use cases, and
     domain logic on top of the returned app — this library owns no business logic.
+
+    Metrics are the ``platform_*`` metrics of the Enterprise Platform Observability Standard,
+    and they need a domain: ``settings.observability_domain`` or ``OBSERVABILITY_DOMAIN``.
+    Raises ``ValueError`` (where Go's ``ObservabilityMiddlewares`` panics) on a missing or unknown
+    domain, an ``app_name`` that is not a valid service label, or a missing or out-of-vocabulary
+    environment. With ``enable_metrics=False`` no domain is needed (a configured one is still
+    validated). Metrics initialization is process-wide: the first app created in the process
+    sets the identity.
     """
     settings = settings or PlatformSettings()
     if app_name:
         settings = settings.model_copy(update={"app_name": app_name})
+
+    init_metrics_from_settings(settings)
 
     configure_logging(settings.log_level)
 
@@ -45,7 +55,9 @@ def create_platform_app(
     app.add_middleware(ContextMiddleware)
 
     app.include_router(health_router)
-    register_exception_handlers(app)
+    register_exception_handlers(
+        app, type_base=settings.problem_type_base, service=settings.app_name
+    )
 
     if settings.enable_tracing:
         setup_tracing(app, service_name=settings.app_name, exporter=_build_span_exporter(settings))
