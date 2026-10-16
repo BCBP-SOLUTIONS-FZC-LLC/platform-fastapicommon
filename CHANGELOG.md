@@ -7,6 +7,43 @@ pre-1.0 caveat on what SemVer guarantees currently apply.
 
 ## [Unreleased]
 
+### Changed (breaking) — raised dependency floors
+
+The new `lowest-deps` CI job installs every runtime dependency at its declared floor. The old
+floors did not work:
+
+- `opentelemetry-instrumentation-fastapi` / `-grpc` below 0.49b0 import `pkg_resources`, so
+  `fastapicommon` failed to import on an environment without setuptools.
+- With `starlette` below 0.46, an exception raised after a streaming response has started
+  reaches the error handling wrapped in an `ExceptionGroup`, which hides its real type from
+  the error logs.
+
+New floors: `fastapi>=0.115.10`, `starlette>=0.46`, `opentelemetry-api` / `-sdk` /
+`-exporter-otlp-proto-grpc>=1.28`, and `opentelemetry-instrumentation-fastapi` /
+`-grpc>=0.49b0`. The locked (tested) versions are unchanged.
+
+### Changed — CI/CD pipeline (parity with `platform-gincommon`)
+
+- `.github/` now follows platform-gincommon's pipeline, translated to Python as
+  platform-pgcommon-py and platform-eventcommon did: reusable `validate-test.yml` /
+  `validate-quality.yml` (replacing `validate.yml`, `quality.yml` and `test.yml`; the
+  required check names are unchanged), a `changes` job that skips build/test jobs on
+  documentation-only changes, SHA-pinned actions, and `changelog-check.yml` / `docs.yml`.
+- Tests run on Python 3.11–3.14 and with every runtime dependency at its floor (`lowest-deps`).
+- `api-compat` (griffe) reports public-API breaks against the last tag; `release.yml` fails a
+  release that may not break.
+- The example image is pushed (on `main` and on release) only when its content fingerprint
+  matches the image Trivy and the smoke tests judged. The image is Cosign keyless-signed.
+- `release.yml` checks the tag first: it must be at HEAD and on `main`, the package version
+  must match, and the CHANGELOG section must be dated. It builds the wheel and sdist once,
+  reproducibly, from the hash-locked `build-constraints.txt`. The GitHub Release carries
+  the wheel, the sdist, a Cosign-signed `SHA256SUMS`, the image's SLSA provenance and its
+  SBOM.
+- The example image's base images are digest-pinned (`make pin-base-images`). It installs
+  the locked dependency set with hashes and runs as numeric UID 10001. Its HEALTHCHECK now
+  uses Python instead of `curl`, which is no longer installed.
+- Dependabot uses the `uv` ecosystem.
+
 ### Security
 
 - **`platform_unclassified_errors_total{transport}`** (platform-gincommon registry, `approved`): incremented for every unclassified exception, HTTP (`transport="http"`) and gRPC (`transport="grpc"`). Both series start at 0. This is the alerting signal; the `unclassified error` log event stays for diagnostics. The vendored `registry.json` is re-synced (new label `transport`).

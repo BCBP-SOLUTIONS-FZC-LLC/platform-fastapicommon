@@ -29,11 +29,15 @@ PROMETHEUS_SCRAPE_TARGET ?= host.docker.internal:$(APP_PORT)
 LINT_PATHS := src tests examples
 
 .PHONY: install lint typecheck format format-check vulncheck build clean \
-        test-unit test-int test-e2e test-all cover \
+        lock-check pip-check docs-check ci-scripts-test api-compat release-guard \
+        build-constraints pin-base-images \
+        test-unit test-int test-e2e test-all test-ci cover \
         setup help run \
         prometheus-config docker-build docker-up docker-down docker-logs \
         lint-docker scan smoke-test \
         ci
+
+CI_IMAGE ?= platform-fastapicommon-ci-test
 
 # -----------------------------
 # SETUP
@@ -53,12 +57,21 @@ help:
 	@echo " make format        - ruff format + black (rewrites files)"
 	@echo " make format-check  - ruff format --check + black --check (no changes; used in CI)"
 	@echo " make vulncheck     - pip-audit against locked dependencies"
+	@echo " make lock-check    - uv.lock up to date with pyproject.toml (uv lock --check)"
+	@echo " make pip-check     - installed .venv has consistent dependencies (uv pip check)"
+	@echo " make docs-check    - every docs/architecture/mermaid/*.mmd embedded verbatim in ARCHITECTURE.md"
+	@echo " make ci-scripts-test - regression tests for the CI shell scripts (detect-changes.sh)"
+	@echo " make api-compat    - griffe vs the last release tag (API_NEW_VERSION=vX.Y.Z: fail unless allowed to break)"
+	@echo " make release-guard TAG=vX.Y.Z - package version == TAG and CHANGELOG has a dated section"
 	@echo " make test-unit     - unit tests only (tests/unit — no Docker, no wired-up app)"
 	@echo " make test-int      - integration tests (tests/integration — create_platform_app() end-to-end)"
 	@echo " make test-e2e      - e2e tests (tests/e2e — builds + runs the real Docker image, requires Docker)"
 	@echo " make test-all      - unit + integration + e2e in one pytest run (requires Docker)"
+	@echo " make test-ci       - unit + integration with coverage data, no threshold (CI's 'Validate / Test')"
 	@echo " make cover         - test-all + open an HTML coverage report (>=90% gate enforced by pyproject.toml)"
-	@echo " make build         - build the wheel + sdist into dist/ (uv build)"
+	@echo " make build         - wheel + sdist (hash-locked backend), twine check, installed-wheel check"
+	@echo " make build-constraints - re-lock the build backend (pyproject [build-system]) with hashes"
+	@echo " make pin-base-images - pin the Dockerfile base images to their current @sha256 digests"
 	@echo " make run           - run the example FastAPI service locally (uvicorn --reload)"
 	@echo " make docker-build  - build the example service Docker image locally"
 	@echo " make docker-up     - start the local observability stack (otel-collector, tempo, loki, prometheus, grafana)"
@@ -66,8 +79,8 @@ help:
 	@echo " make docker-logs   - tail logs from the observability stack containers"
 	@echo " make lint-docker   - hadolint against Dockerfile (matches CI's 'Lint Dockerfile' check)"
 	@echo " make scan          - build + Trivy CVE scan (matches CI's 'Trivy CVE scan' check)"
-	@echo " make smoke-test    - alias for test-e2e (matches CI's 'Smoke tests' check)"
-	@echo " make ci            - full local pipeline (format-check + lint + typecheck + test-all + build)"
+	@echo " make smoke-test    - build the image, smoke-tests.sh + tests/e2e against it (CI's 'Smoke tests')"
+	@echo " make ci            - local validate-quality + validate-test (no Docker image jobs)"
 	@echo " make clean         - remove venv, caches, build artifacts, and local logs"
 
 # -----------------------------
@@ -95,6 +108,37 @@ format-check:
 vulncheck:
 	uv run pip-audit
 
+# uv.lock matches pyproject.toml (validate-quality's "Lock check"; Go's tidy drift check).
+lock-check:
+	uv lock --check
+
+# The installed .venv has no missing or conflicting requirements.
+pip-check:
+	uv pip check
+
+# Every docs/architecture/mermaid/*.mmd is embedded byte-identically in ARCHITECTURE.md
+# (validate-quality's "Architecture diagram sync"; docs.yml runs it on docs-only changes).
+docs-check:
+	bash .github/scripts/docs-mermaid-sync.sh
+
+# Regression tests for the CI shell scripts (scratch git repositories, no Docker):
+# detect-changes.sh's docs-only decision and its log sanitising.
+ci-scripts-test:
+	bash .github/scripts/detect-changes_test.sh
+
+# Public-API diff (griffe) against the previous stable release tag. Without API_NEW_VERSION
+# it only warns (ci.yml); with API_NEW_VERSION=vX.Y.Z it fails on a breaking change unless
+# vX.Y.Z may break (a MAJOR bump, or a MINOR bump while 0.y.z) — release.yml.
+api-compat:
+	bash .github/scripts/api-compat.sh $(API_NEW_VERSION)
+
+# Run before tagging: the package version equals TAG and CHANGELOG.md has a dated section for
+# it. release.yml's verify job runs both, plus the git checks of verify-release-tag.sh.
+release-guard:
+	@test -n "$(TAG)" || { echo "usage: make release-guard TAG=vX.Y.Z" >&2; exit 1; }
+	uv run --no-project --with 'packaging==26.2' python .github/scripts/release_guard.py $(TAG)
+	RELEASE_TAG=$(TAG) bash .github/scripts/verify-changelog-entry.sh
+
 # -----------------------------
 # TESTS
 # -----------------------------
@@ -114,6 +158,11 @@ test-e2e:
 test-all:
 	uv run pytest tests/unit tests/integration tests/e2e -v
 
+# CI's "Validate / Test / test": one pass with coverage data (.coverage + coverage.xml) and no
+# threshold here — .github/scripts/coverage-gate.sh enforces fail_under as a separate step.
+test-ci:
+	uv run pytest tests/unit tests/integration --cov-fail-under=0
+
 # Coverage gate (>=90%) is enforced by pyproject.toml's [tool.coverage.report] fail_under,
 # applied automatically via pytest's default addopts — this target just also opens an
 # HTML report.
@@ -125,9 +174,31 @@ cover: test-all
 # BUILD
 # -----------------------------
 
+# The build backend is installed from build-constraints.txt (exact versions + hashes), so a
+# wheel never builds with a backend resolved at build time. Then twine check --strict, and the
+# wheel installs into a throwaway venv and reports pyproject.toml's version
+# (validate-quality's "Build check").
 build:
 	@echo "Building wheel + sdist..."
-	uv build
+	@rm -rf dist
+	uv build --build-constraints build-constraints.txt --require-hashes
+	@ls dist/*.whl dist/*.tar.gz
+	uv run --no-project --with 'twine==7.0.0' twine check --strict dist/*
+	@echo "Verifying the wheel installs..."
+	@venv=$$(mktemp -d) && trap 'rm -rf "$$venv"' EXIT && \
+		uv venv --quiet --python 3.12 "$$venv/venv" && \
+		VIRTUAL_ENV="$$venv/venv" uv pip install --quiet dist/*.whl && \
+		cd "$$venv" && "$$venv/venv/bin/python" -c "import importlib.metadata, fastapicommon; \
+			import fastapicommon.bootstrap, fastapicommon.problem, fastapicommon.metrics; \
+			assert fastapicommon.__version__ == importlib.metadata.version('platform-fastapicommon'), fastapicommon.__version__; \
+			print('fastapicommon', fastapicommon.__version__)"
+	@echo "OK"
+
+# Re-lock build-constraints.txt after changing [build-system].requires in pyproject.toml.
+build-constraints:
+	uv run --no-project python -c "import tomllib; print(*tomllib.load(open('pyproject.toml', 'rb'))['build-system']['requires'], sep='\n')" \
+		| uv pip compile - --universal --python-version 3.12 --generate-hashes \
+			--custom-compile-command 'make build-constraints' -o build-constraints.txt
 
 # -----------------------------
 # RUN (example usage)
@@ -153,21 +224,44 @@ run: setup
 
 docker-build:
 	@echo "Building Docker image (version: $(BUILD_VERSION))..."
-	docker build -t $(APP_NAME):local --build-arg APP_NAME=$(APP_NAME) --build-arg BUILD_VERSION=$(BUILD_VERSION) .
+	docker build -t $(APP_NAME):local --build-arg APP_NAME=$(APP_NAME) --build-arg BUILD_VERSION=$(BUILD_VERSION) \
+		--build-arg SOURCE_DATE_EPOCH=$$(git log -1 --format=%ct) .
 
-# Requires hadolint (brew install hadolint). Matches CI's "Lint Dockerfile" check exactly.
+# Requires hadolint (brew install hadolint). Matches the "Hadolint" step of CI's
+# "Build image (cache)" job (hadolint-action's default threshold, info).
 lint-docker:
-	hadolint --failure-threshold warning Dockerfile
+	hadolint --failure-threshold info Dockerfile
 
-# Requires trivy (brew install trivy). Matches CI's "Trivy CVE scan" check exactly:
-# fails only on HIGH/CRITICAL vulnerabilities that have an available fix.
+# Requires trivy (brew install trivy). Matches CI's "Trivy CVE scan" gate:
+# fails on CRITICAL/HIGH/UNKNOWN vulnerabilities that have an available fix.
 scan:
 	docker build -t $(APP_NAME):scan .
-	trivy image --severity HIGH,CRITICAL --ignore-unfixed --exit-code 1 --scanners vuln $(APP_NAME):scan
+	trivy image --severity CRITICAL,HIGH,UNKNOWN --ignore-unfixed --exit-code 1 --scanners vuln $(APP_NAME):scan
 
-# Alias — tests/e2e/test_smoke.py builds + runs the real image and asserts against it
-# over real HTTP, superseding what used to be a separate raw docker run/curl recipe here.
-smoke-test: test-e2e
+# CI's "Smoke tests" job: build the image, run .github/scripts/smoke-tests.sh (size, startup
+# gate, /health, platform_* metrics, Problem Details, non-root, pip absent), then tests/e2e
+# against the same image.
+smoke-test:
+	docker build -q --build-arg BUILD_VERSION=$(BUILD_VERSION) -t $(CI_IMAGE) . >/dev/null
+	IMAGE=$(CI_IMAGE) bash .github/scripts/smoke-tests.sh
+	E2E_IMAGE_TAG=$(CI_IMAGE) uv run pytest tests/e2e -v -m e2e --no-cov
+
+# Re-resolve every tagged Dockerfile base image (FROM <image>:<tag>) to its current digest and
+# rewrite the FROM lines as <image>:<tag>@sha256:<digest> — the format validate-quality's
+# "Dockerfile base image digest check" requires. Review with `git diff Dockerfile`, rebuild
+# (make smoke-test scan) and commit.
+pin-base-images:
+	@echo "Resolving Dockerfile base-image digests (docker buildx imagetools inspect)..."
+	@refs=$$(sed -nE 's/^FROM ([^ @]+:[^ @]+)(@sha256:[0-9a-f]+)?([[:space:]].*)?$$/\1/p' Dockerfile | sort -u); \
+	[ -n "$$refs" ] || { echo "FAIL: no tagged FROM lines found in Dockerfile" >&2; exit 1; }; \
+	for ref in $$refs; do \
+	  digest=$$(docker buildx imagetools inspect "$$ref" --format '{{.Manifest.Digest}}') || exit 1; \
+	  case "$$digest" in sha256:*) ;; *) echo "FAIL: no digest resolved for $$ref" >&2; exit 1 ;; esac; \
+	  re=$$(printf '%s' "$$ref" | sed 's/[.]/\\./g'); \
+	  sed -i.bak -E "s#^FROM $$re(@sha256:[0-9a-f]+)?([[:space:]]|$$)#FROM $$ref@$$digest\\2#" Dockerfile && rm -f Dockerfile.bak; \
+	  echo "  pinned  $$ref@$$digest"; \
+	done; \
+	if grep -E '^FROM [^ @]+:[^ @]+( AS .+)?$$' Dockerfile; then echo "FAIL: unpinned FROM line(s) above" >&2; exit 1; fi
 
 # -----------------------------
 # DOCKER (LOCAL OBSERVABILITY STACK)
@@ -191,11 +285,13 @@ docker-logs:
 	docker compose --env-file .env logs -f
 
 # -----------------------------
-# CI (mirrors .github/workflows/validate.yml + the build job; docker image build
-# is a separate CI job, not part of the default local loop)
+# CI (mirrors .github/workflows/validate-quality.yml + validate-test.yml; the image jobs —
+# build-image, trivy, smoke — are `make lint-docker scan smoke-test`)
 # -----------------------------
 
-ci: format-check lint typecheck test-all build
+ci: lock-check pip-check format-check lint typecheck docs-check ci-scripts-test vulncheck build
+	$(MAKE) test-ci
+	bash .github/scripts/coverage-gate.sh
 
 # -----------------------------
 # CLEAN

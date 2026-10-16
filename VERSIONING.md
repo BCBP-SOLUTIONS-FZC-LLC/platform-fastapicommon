@@ -147,9 +147,11 @@ commit and push the tag.
    populate the GitHub Release body — the tag push will fail with a clear error if the
    section is missing.
 
-4. **Run `make ci` locally** to confirm everything is green before tagging:
+4. **Run `make ci` and `make release-guard TAG=vX.Y.Z` locally** to confirm everything is
+   green before tagging:
    ```bash
-   make ci   # format-check + lint (ruff + mypy) + test (coverage gate) + build
+   make ci                         # validate-quality + validate-test, as in CI
+   make release-guard TAG=vX.Y.Z   # pyproject.toml version == tag, dated CHANGELOG section
    ```
 
 5. **Create and push an annotated tag** — this triggers the release workflow
@@ -178,6 +180,34 @@ commit and push the tag.
 |-------------|---------|
 | `v0.2.0-rc.1` | Release candidate; not for production unless approved |
 | `v0.2.0-beta.1` | Early integration testing |
+
+### Verifying a release
+
+Needs [cosign](https://docs.sigstore.dev/cosign/system_config/installation/) ≥ 2.4. A
+tag-triggered release is signed by `release.yml@refs/tags/<tag>`; a re-run dispatched from
+`main` by `release.yml@refs/heads/main`, which the regular expression below also accepts.
+
+```bash
+TAG=vX.Y.Z   # the release to verify
+REPO=BCBP-SOLUTIONS-FZC-LLC/platform-fastapicommon
+IDENTITY="^https://github\.com/${REPO}/\.github/workflows/release\.yml@refs/(tags/${TAG}|heads/main)$"
+
+# Wheel + sdist: verify the signed checksums, then the files against them
+gh release download "$TAG" -R "$REPO" -p SHA256SUMS -p SHA256SUMS.sigstore.json -p '*.whl' -p '*.tar.gz'
+cosign verify-blob --bundle SHA256SUMS.sigstore.json \
+  --certificate-identity-regexp "$IDENTITY" \
+  --certificate-oidc-issuer https://token.actions.githubusercontent.com \
+  SHA256SUMS
+sha256sum --check SHA256SUMS   # macOS: shasum -a 256 -c SHA256SUMS
+
+# Example service image (tag without the v)
+cosign verify --certificate-identity-regexp "$IDENTITY" \
+  --certificate-oidc-issuer https://token.actions.githubusercontent.com \
+  "ghcr.io/bcbp-solutions-fzc-llc/platform-fastapicommon:${TAG#v}"
+```
+
+The files on PyPI are byte-identical to the release's wheel and sdist (`SHA256SUMS` matches
+them). Releases up to `v0.2.0` predate signing and `SHA256SUMS`.
 
 ## Compatibility matrix (library ↔ Python)
 

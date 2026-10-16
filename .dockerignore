@@ -1,29 +1,13 @@
-.git
-.github
-.claude
-.cursor
-.venv
-.env
-.env.*
-!.env-example
-logs
-*.log
-coverage.*
-.coverage
-htmlcov
-.pytest_cache
-.mypy_cache
-.ruff_cache
-__pycache__
-*.pyc
-dist
-build
-*.egg-info
-# test code and tooling config are not needed at build/runtime
-tests/
-*.md
+# Only what the Dockerfile COPYs is needed (pyproject.toml, uv.lock, build-constraints.txt,
+# README.md, src/, examples/): keep everything else — notably .env, the virtualenv, caches,
+# tests and build output — out of the build context. An allowlist, so a new file is excluded
+# until the Dockerfile needs it (and bytecode from a local run never gets in).
+*
+!pyproject.toml
+!uv.lock
+!build-constraints.txt
 !README.md
-Makefile
-docker-compose.yml
-docker/prometheus/prometheus.yml
-docs/
+!src/
+!examples/
+**/__pycache__
+**/*.pyc

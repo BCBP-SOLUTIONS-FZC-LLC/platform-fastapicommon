@@ -701,12 +701,15 @@ make install   # uv sync (dev group + grpc extra, from uv.lock) + install pre-co
 | `make test-e2e` | `tests/e2e` only — builds + runs the real Docker image, real HTTP calls (requires Docker) |
 | `make test-all` | All three tiers together (coverage gate ≥90%, enforced by `pyproject.toml`; requires Docker) |
 | `make cover` | `test-all`, then open an HTML coverage report |
-| `make build` | Build the wheel + sdist into `dist/` (`uv build`) |
+| `make build` | Wheel + sdist into `dist/` (hash-locked build backend), `twine check --strict`, installed-wheel check |
 | `make run` | Run the example FastAPI service (`uvicorn --reload`) |
 | `make docker-build` | Build the example service Docker image locally |
 | `make docker-up` / `make docker-down` | Start/stop the local observability stack |
-| `make smoke-test` | Alias for `make test-e2e` (matches CI's "Smoke tests" check) |
-| `make ci` | `format-check` + `lint` + `typecheck` + `test-all` + `build` — the full local pipeline (requires Docker) |
+| `make smoke-test` | Build the image, run `smoke-tests.sh` and `tests/e2e` against it (CI's "Smoke tests" job; requires Docker) |
+| `make ci` | CI's validate-quality + validate-test: lock / pip check, format, lint, mypy, docs, CI script tests, pip-audit, build, `test-ci` + coverage gate |
+| `make api-compat` | griffe public-API diff against the last release tag |
+| `make release-guard TAG=vX.Y.Z` | Package version == tag and a dated CHANGELOG section (run before tagging) |
+| `make pin-base-images` | Re-pin the Dockerfile base images to their current `@sha256` digests |
 
 ### Example service (optional)
 
@@ -760,32 +763,57 @@ end-to-end against this exact `docker-compose.yml`.
 
 ## CI
 
-GitHub Actions runs on push/PR to `main`/`develop`. Job names below match the org's
-required-status-checks ruleset on `main` exactly:
+The pipeline is platform-gincommon's (`.github/`), translated to the Python tooling as
+platform-pgcommon-py and platform-eventcommon did. Third-party actions are pinned by commit
+SHA. `ci.yml` runs on push/PR to `main`:
 
-1. **Validate** — a reusable workflow fanning out into two required checks: **Quality**
-   (`uv sync` from `uv.lock`, `uv pip check`, format check, ruff lint, mypy --strict,
-   pip-audit) and **Test** (pytest, coverage gate) — shown as `Validate / Quality /
-   quality` and `Validate / Test / test`.
-2. **Coverage** — the same test suite again across the full Python version matrix (3.11,
-   3.12, 3.13, 3.14) — informational, not part of the required-checks ruleset.
-3. **Build** — wheel + sdist (`uv build`).
-4. **Lint Dockerfile** — hadolint against `Dockerfile`.
-5. **Build image (cache)** — builds the example service image (no push), using GHA cache.
-6. **Trivy CVE scan** — scans the built image; fails on HIGH/CRITICAL vulnerabilities that
-   have an available fix (`--ignore-unfixed`, since unfixed base-image CVEs aren't
-   actionable here — see `make scan` to run the same check locally).
-7. **Smoke tests** — runs `tests/e2e` (via pytest) against the already-built image from
-   step 5 — see `make smoke-test` to run the same check locally.
-8. **Docker image (example service)** — builds and pushes to GHCR (push events only).
-9. **PR summary** — posts/updates a single PR comment summarizing the checks above (PR
-   events only).
+```
+changes ─┬─► validate-test ──────┬──► interop (cross-language compatibility)
+         ├─► build-image ────────┤──► trivy ──────┐
+         │                       │   smoke ───────┤──► pr-summary (PR events only)
+         │                       └────────────────┤──► push       (push events only)
+         ├─► validate-quality ───────────────────┘
+         └─► api-compat (informational)
+```
 
-Release (`v*` tags): validate → coverage → build (+ `twine check`) → **publish to PyPI**
-(Trusted Publishing / OIDC, no stored token) *and* docker (semver tags) run in parallel →
-GitHub Release (CHANGELOG excerpt), once both finish. See
-[VERSIONING.md § Publishing to PyPI](./VERSIONING.md#publishing-to-pypi) for the one-time
-account setup.
+- **Detect changes** — a documentation-only change (`*.md`, `docs/architecture/*.mmd`)
+  skips the build/test jobs via `if:`, so the required checks still report (as skipped =
+  success). `docs.yml` checks the diagrams on those.
+- **Validate / Test / test** (required) — unit + integration with coverage on Python 3.12,
+  then the coverage gate (≥ 90%, `pyproject.toml` `fail_under`). The same workflow also runs
+  the suites on 3.11 / 3.13 / 3.14 and with every runtime dependency at its floor
+  (`lowest-deps.sh`); all of them gate trivy, smoke, interop and push.
+- **Validate / Quality / quality** (required) — lock check, `uv pip check`, HTML-entity
+  check on workflows, ruff format + black, ruff, mypy --strict, diagram sync, CI script
+  tests, pip-audit, digest-pinned `FROM` lines, and `make build` (hash-locked build backend,
+  `twine check --strict`, installed-wheel check). Gates push.
+- **API compatibility** — griffe against the last release tag; a warning here, blocking in
+  `release.yml`.
+- **Build image (cache)** (required) — Hadolint and a `.dockerignore` check first, then the
+  example service image is built into the GHA + registry cache.
+- **Trivy CVE scan** (required) — fails on CRITICAL / HIGH / UNKNOWN with a fix; SARIF to
+  the Security tab; CycloneDX SBOM artifact.
+- **Smoke tests** (required) — `.github/scripts/smoke-tests.sh` (size, fail-fast on an
+  unknown `OBSERVABILITY_DOMAIN`, `/health`, `platform_*` metrics, RFC 9457 not-found,
+  installed version, pip absent, numeric non-root UID), then `tests/e2e` against the same
+  image. `make smoke-test` runs both locally.
+- **PR summary** (required) — one status table, posted or updated on every PR run.
+- **Push image → GHCR** (pushes to `main`) — rebuilds, and publishes only if the image's
+  content fingerprint matches the one trivy and smoke judged (checked before the push and
+  again on the pushed digest), then Cosign keyless-signs it.
+
+`changelog-check.yml` fails a PR that changes `src/`, `pyproject.toml`, `uv.lock`,
+`build-constraints.txt` or the `Dockerfile` without a CHANGELOG entry (Dependabot exempt).
+
+Release (`v*` tags, `release.yml`): **verify** (dispatch ref, tag at HEAD and on `main`,
+`pyproject.toml` version == tag, dated CHANGELOG section, which floating image tags may move)
+→ the same gates as CI at the tag, plus blocking `api-compat` → **dist** (wheel + sdist built
+once, reproducibly, with `SHA256SUMS`) → **push** (fingerprint-checked image `X.Y.Z`, and
+`X.Y` / `X` only when newest of that line; never `latest`; SBOM, SLSA provenance, Cosign
+signature) → **Publish to PyPI** (Trusted Publishing / OIDC, the same files) → **GitHub
+Release** (CHANGELOG section, wheel, sdist, Cosign-signed `SHA256SUMS`, provenance, SBOM).
+See [VERSIONING.md § Publishing to PyPI](./VERSIONING.md#publishing-to-pypi) for the
+one-time account setup and [§ Verifying a release](./VERSIONING.md#verifying-a-release).
 
 ---
 

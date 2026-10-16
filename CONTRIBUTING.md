@@ -103,7 +103,8 @@ that).
 | `make test-unit` | `tests/unit` only |
 | `make test-int` | `tests/integration` only (`-m integration`) |
 | `make test-e2e` | `tests/e2e` only (`-m e2e`, `--no-cov` — see below) |
-| `make test-all` | All three tiers together — what `make ci` runs |
+| `make test-all` | All three tiers together (requires Docker) |
+| `make test-ci` | Unit + integration with coverage data — what CI's `Validate / Test` and `make ci` run |
 | `make cover` | `test-all` + opens an HTML coverage report |
 
 Aside from `tests/e2e`, all tests must pass without a running server or Docker stack — the

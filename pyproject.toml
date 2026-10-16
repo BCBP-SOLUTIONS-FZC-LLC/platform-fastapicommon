@@ -1,5 +1,5 @@
 [build-system]
-requires = ["hatchling"]
+requires = ["hatchling>=1.32.4,<2"]
 build-backend = "hatchling.build"
 
 [project]
@@ -20,18 +20,18 @@ classifiers = [
     "Typing :: Typed",
 ]
 dependencies = [
-    "fastapi>=0.110",
-    "starlette>=0.37",
+    "fastapi>=0.115.10",
+    "starlette>=0.46",
     "pydantic>=2.6",
     "pydantic-settings>=2.2",
     "structlog>=24.1",
     "prometheus-client>=0.20",
     "httpx>=0.27",
-    "opentelemetry-api>=1.24",
-    "opentelemetry-sdk>=1.24",
-    "opentelemetry-instrumentation-fastapi>=0.45b0",
-    "opentelemetry-instrumentation-grpc>=0.45b0",
-    "opentelemetry-exporter-otlp-proto-grpc>=1.24",
+    "opentelemetry-api>=1.28",
+    "opentelemetry-sdk>=1.28",
+    "opentelemetry-instrumentation-fastapi>=0.49b0",
+    "opentelemetry-instrumentation-grpc>=0.49b0",
+    "opentelemetry-exporter-otlp-proto-grpc>=1.28",
 ]
 
 [project.optional-dependencies]
@@ -56,6 +56,8 @@ dev = [
     # `uv build` is the build frontend now (no separate `build` package needed); twine
     # is still used for `twine check` in release.yml.
     "twine>=5.0",
+    # Public-API diff against the last release tag (`make api-compat`, ci.yml / release.yml).
+    "griffe>=2.3.2",
     # grpcio and uvicorn are duplicated from [project.optional-dependencies] (grpc,
     # examples) so the dev group alone (the uv default) is enough to run the full test
     # suite and `make run` — matches platform-pgcommon-py's convention of duplicating
