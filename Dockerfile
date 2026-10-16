@@ -20,8 +20,11 @@ FROM python:3.14-slim
 # Pinning apt versions on python:3.12-slim is brittle: Debian's archive rotates old
 # point-release versions out, breaking the build on every base image bump.
 # hadolint ignore=DL3008
+# pip is not needed at runtime: removing it drops the copies of urllib3, msgpack and
+# setuptools that pip vendors (Trivy reports them even when pip itself is current).
 RUN apt-get update && apt-get install -y --no-install-recommends curl \
     && rm -rf /var/lib/apt/lists/* \
+    && python -m pip uninstall -y pip \
     && useradd --no-create-home --shell /usr/sbin/nologin appuser
 
 WORKDIR /app
