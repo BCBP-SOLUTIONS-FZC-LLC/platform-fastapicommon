@@ -365,7 +365,7 @@ jobs:
           cache-dir: /tmp/trivy-cache
 
       - name: Upload SBOM artifact
-        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
         with:
           name: sbom-${{ env.RELEASE_TAG }}
           path: sbom.cyclonedx.json
@@ -482,7 +482,7 @@ jobs:
         run: bash .github/scripts/prepare-release-dist.sh
 
       - name: Upload dist artifact
-        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
         with:
           name: dist-${{ env.RELEASE_TAG }}
           path: |
@@ -637,7 +637,7 @@ jobs:
         run: bash .github/scripts/export-image-provenance.sh
 
       - name: Upload provenance artifact
-        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
         with:
           name: provenance-${{ env.RELEASE_TAG }}
           path: provenance.slsa.json
