@@ -19,10 +19,13 @@ class PlatformSettings(BaseSettings):
     environment: str = Field(
         default="development", validation_alias=AliasChoices("APP_ENV", "environment")
     )
-    log_level: str = "INFO"
+    # LOG_LEVEL (debug, info, warn, error); empty: debug in dev / local, info otherwise (Go).
+    log_level: str = ""
     request_timeout_seconds: float = 30.0
     enable_tracing: bool = True
     enable_metrics: bool = True
+    # Overrides OTEL_EXPORTER_OTLP_ENDPOINT (default localhost:4317; "none" disables export).
+    # Env OTLP_ENDPOINT.
     otlp_endpoint: str | None = None
     # RFC 9457 type URI base ({base}/{domain}/{error}) — env PROBLEM_TYPE_BASE; empty means
     # https://errors.company.com (gincommon Config.ProblemTypeBase).

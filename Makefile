@@ -9,7 +9,7 @@ APP_PORT ?= 8080
 OBSERVABILITY_DOMAIN ?= iam
 BUILD_VERSION ?= $(shell git describe --tags --always --dirty 2>/dev/null || echo dev)
 LOG_FILE ?= logs/app.log
-OTLP_ENDPOINT ?= localhost:4317
+OTEL_EXPORTER_OTLP_ENDPOINT ?= localhost:4317
 OTEL_COLLECTOR_GRPC_PORT ?= 4317
 OTEL_COLLECTOR_HTTP_PORT ?= 4318
 TEMPO_HTTP_PORT ?= 3200
@@ -21,7 +21,7 @@ PROMETHEUS_SCRAPE_TARGET ?= host.docker.internal:$(APP_PORT)
 # Deliberately NOT exported file-wide: `docker compose --env-file .env` reads these
 # directly from .env, and every other recipe below interpolates $(VAR) at Make-expansion
 # time rather than reading the shell environment. A blanket `export` here would leak
-# APP_NAME/OTLP_ENDPOINT into `make test`'s pytest subprocess and silently override
+# APP_NAME/OTEL_EXPORTER_OTLP_ENDPOINT into `make test`'s pytest subprocess and silently override
 # PlatformSettings' defaults in tests that assert on them. Only `run` actually needs these
 # as real environment variables (its PlatformSettings() call reads os.environ), so they're
 # set inline on that recipe only.
@@ -31,6 +31,7 @@ LINT_PATHS := src tests examples
 .PHONY: install lint typecheck format format-check vulncheck build clean \
         lock-check pip-check docs-check ci-scripts-test api-compat release-guard \
         build-constraints pin-base-images \
+        metrics-lint metrics-registry metrics-refs metrics-rules metrics-inventory gincommon-parity \
         test-unit test-int test-e2e test-all test-ci cover \
         setup help run \
         prometheus-config docker-build docker-up docker-down docker-logs \
@@ -61,6 +62,9 @@ help:
 	@echo " make pip-check     - installed .venv has consistent dependencies (uv pip check)"
 	@echo " make docs-check    - every docs/architecture/mermaid/*.mmd embedded verbatim in ARCHITECTURE.md"
 	@echo " make ci-scripts-test - regression tests for the CI shell scripts (detect-changes.sh)"
+	@echo " make metrics-lint  - registry self-check, rule refs, promtool, inventory drift (CI gate)"
+	@echo " make metrics-inventory - regenerate docs/observability/metric-registry.md"
+	@echo " make gincommon-parity GINCOMMON_DIR=path - registry, rules, inventory identical to gincommon's"
 	@echo " make api-compat    - griffe vs the last release tag (API_NEW_VERSION=vX.Y.Z: fail unless allowed to break)"
 	@echo " make release-guard TAG=vX.Y.Z - package version == TAG and CHANGELOG has a dated section"
 	@echo " make test-unit     - unit tests only (tests/unit — no Docker, no wired-up app)"
@@ -125,6 +129,48 @@ docs-check:
 # detect-changes.sh's docs-only decision and its log sanitising.
 ci-scripts-test:
 	bash .github/scripts/detect-changes_test.sh
+
+# -----------------------------
+# OBSERVABILITY STANDARD (mirrors platform-gincommon's `make metrics-lint`)
+# -----------------------------
+
+METRICSLINT := uv run --no-sync fastapicommon-metricslint
+# promtool from PATH, else this digest-pinned Prometheus image (gincommon's version).
+PROMTOOL ?= $(shell command -v promtool 2>/dev/null)
+PROMETHEUS_IMAGE ?= prom/prometheus:v3.5.0@sha256:63805ebb8d2b3920190daf1cb14a60871b16fd38bed42b857a3182bc621f4996
+# The platform-gincommon checkout to compare with (gincommon-parity); CI checks out GINCOMMON_REF.
+GINCOMMON_DIR ?= ../../platform-gincommon
+
+# The vendored registry is self-consistent (gincommon's `metricslint registry`).
+metrics-registry:
+	$(METRICSLINT) registry
+
+# The reference rules use only registered platform_* names, and no legacy one.
+metrics-refs:
+	$(METRICSLINT) refs --deny-deprecated docker/prometheus/rules
+
+# promtool check + unit tests of the reference recording rules and SLO burn-rate alerts.
+metrics-rules:
+ifneq ($(PROMTOOL),)
+	cd docker/prometheus/rules && $(PROMTOOL) check rules platform-*.yml && $(PROMTOOL) test rules promtool-tests.yml
+else
+	docker run --rm --entrypoint /bin/sh -v $(CURDIR)/docker/prometheus/rules:/rules:ro -w /rules $(PROMETHEUS_IMAGE) \
+		-c 'promtool check rules platform-*.yml && promtool test rules promtool-tests.yml'
+endif
+
+# Regenerate docs/observability/metric-registry.md from the vendored registry.
+metrics-inventory:
+	$(METRICSLINT) inventory -o docs/observability/metric-registry.md
+
+# validate-quality's "Observability standard": registry, refs, rules, and inventory drift.
+metrics-lint: metrics-registry metrics-refs metrics-rules
+	@$(METRICSLINT) inventory | diff -u docs/observability/metric-registry.md - \
+		|| (echo "docs/observability/metric-registry.md is stale: run make metrics-inventory"; exit 1)
+
+# Go is the source of truth: registry.json and the reference rules are byte-identical to
+# gincommon's, and the generated inventory matches gincommon's metric-registry.md.
+gincommon-parity:
+	bash .github/scripts/gincommon-parity.sh "$(GINCOMMON_DIR)"
 
 # Public-API diff (griffe) against the previous stable release tag. Without API_NEW_VERSION
 # it only warns (ci.yml); with API_NEW_VERSION=vX.Y.Z it fails on a breaking change unless
@@ -206,17 +252,18 @@ build-constraints:
 
 # Runs the example FastAPI service on the host so OTLP export reaches the
 # otel-collector (localhost:4317) and Prometheus can scrape host.docker.internal.
-# JSON logs are duplicated to LOG_FILE for Promtail to tail. These are set as real
-# environment variables (not just Make variables) because PlatformSettings() inside
-# examples/fastapi_service/main.py reads them from the process environment — scoped to
-# this target only, see the note in the CONFIG section above.
+# The library writes JSON logs to LOG_FILE as well (as gincommon does) for Promtail to tail.
+# These are set as real environment variables (not just Make variables) because
+# PlatformSettings() and the logging / tracing setup read them from the process environment —
+# scoped to this target only, see the note in the CONFIG section above.
 run: export APP_NAME := $(APP_NAME)
 run: export APP_ENV := $(APP_ENV)
 run: export OBSERVABILITY_DOMAIN := $(OBSERVABILITY_DOMAIN)
-run: export OTLP_ENDPOINT := $(OTLP_ENDPOINT)
+run: export OTEL_EXPORTER_OTLP_ENDPOINT := $(OTEL_EXPORTER_OTLP_ENDPOINT)
+run: export LOG_FILE := $(LOG_FILE)
 run: setup
-	@echo "Running example FastAPI service on :$(APP_PORT) (logs -> $(LOG_FILE))..."
-	uv run uvicorn examples.fastapi_service.main:app --host 0.0.0.0 --port $(APP_PORT) --reload 2>&1 | tee -a $(LOG_FILE)
+	@echo "Running example FastAPI service on :$(APP_PORT) (logs -> stderr and $(LOG_FILE))..."
+	uv run uvicorn examples.fastapi_service.main:app --host 0.0.0.0 --port $(APP_PORT) --reload
 
 # -----------------------------
 # DOCKER (EXAMPLE SERVICE IMAGE)
@@ -289,7 +336,7 @@ docker-logs:
 # build-image, trivy, smoke — are `make lint-docker scan smoke-test`)
 # -----------------------------
 
-ci: lock-check pip-check format-check lint typecheck docs-check ci-scripts-test vulncheck build
+ci: lock-check pip-check format-check lint typecheck metrics-lint docs-check ci-scripts-test vulncheck build
 	$(MAKE) test-ci
 	bash .github/scripts/coverage-gate.sh
 

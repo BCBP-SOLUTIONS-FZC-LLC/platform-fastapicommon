@@ -526,3 +526,42 @@ def test_platform_metrics_require_their_registry_entries() -> None:
         {"name": "platform_grpc_panics_total", "tier": "platform", "type": "counter", "help": "h"}
     )
     PlatformMetrics(identity, load_registry(json.dumps(document)))
+
+
+def test_route_label_resolves_included_routers() -> None:
+    """FastAPI keeps included routers as lazy entries (no ``path``); their routes must still get
+    their full, prefixed template, not ``unknown`` (they did not on FastAPI 0.140)."""
+    from fastapi import APIRouter, FastAPI
+
+    from fastapicommon.metrics.platform import http_route_label
+
+    app = FastAPI()
+    outer, inner = APIRouter(prefix="/widgets"), APIRouter(prefix="/v1")
+
+    @inner.get("/{widget_id}")
+    async def widget(widget_id: str) -> dict[str, str]:
+        return {}
+
+    @outer.get("/me")
+    async def me() -> dict[str, str]:
+        return {}
+
+    outer.include_router(inner)
+    app.include_router(outer)
+
+    def label(path: str) -> str:
+        return http_route_label(
+            {
+                "type": "http",
+                "path": path,
+                "method": "GET",
+                "app": app,
+                "root_path": "",
+                "headers": [],
+                "query_string": b"",
+            }
+        )
+
+    assert label("/widgets/me") == "/widgets/me"
+    assert label("/widgets/v1/42") == "/widgets/v1/:widget_id"
+    assert label("/widgets/v2/42") == "unknown"

@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+from opentelemetry import trace
+from opentelemetry.trace import Status, StatusCode
 from starlette.requests import Request
 from starlette.types import ASGIApp, Message, Receive, Scope, Send
 
@@ -21,6 +23,9 @@ class UnhandledErrorMiddleware:
     If the response had already started, the problem cannot be sent: the exception is
     logged the same way and the response is left incomplete (the server closes the
     connection), like gincommon's abort after a partial write.
+
+    The exception is also recorded on the active server span (``TracingMiddleware``) as an
+    ``exception`` event with its type only, as for a recovered panic in gincommon.
     """
 
     def __init__(self, app: ASGIApp) -> None:
@@ -41,9 +46,18 @@ class UnhandledErrorMiddleware:
         try:
             await self.app(scope, receive, send_wrapper)
         except Exception as exc:
+            _record_on_span(exc)
             request = Request(scope)
             if started:
                 log_unclassified(request, exc, status=500, error_code="INTERNAL_ERROR", trace_id="")
                 return
             response = await unhandled_exception_handler(request, exc)
             await response(scope, receive, send)
+
+
+def _record_on_span(exc: Exception) -> None:
+    span = trace.get_current_span()
+    if not span.is_recording():
+        return
+    span.add_event("exception", {"exception.type": type(exc).__qualname__})
+    span.set_status(Status(StatusCode.ERROR, "panic"))

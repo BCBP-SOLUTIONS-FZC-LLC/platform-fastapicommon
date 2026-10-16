@@ -26,7 +26,7 @@ const COVERAGE_LABEL = 'Coverage ≥ 90%';
 const rows = [
   ['Tests (unit · integration) · Python 3.11–3.14 · lowest deps',                   'validate-test'],
   [COVERAGE_LABEL,                                                                   'validate-test'],
-  ['Code quality (lock · ruff format · black · ruff · mypy --strict · docs · pip-audit · build)', 'validate-quality'],
+  ['Code quality (lock · ruff format · black · ruff · mypy --strict · observability standard · gincommon parity · docs · pip-audit · build)', 'validate-quality'],
   ['Example service image build + Dockerfile lint',                                  'build-image'],
   ['Trivy CVE scan',                                                                 'trivy'],
   ['Example service smoke + e2e tests',                                              'smoke'],

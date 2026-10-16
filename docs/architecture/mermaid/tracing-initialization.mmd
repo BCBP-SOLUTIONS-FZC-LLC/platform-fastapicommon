@@ -1,19 +1,16 @@
 flowchart TD
-    A([create_platform_app: settings.enable_tracing == true]) --> B["_build_span_exporter(settings)"]
-    B --> C{settings.otlp_endpoint set?}
-    C -- no --> D["return None\n(spans recorded, never exported)"]
-    C -- yes --> E["OTLPSpanExporter(\n  endpoint=settings.otlp_endpoint,\n  insecure=environment in ('dev','development','local')\n)"]
-
-    D --> F[setup_tracing app, service_name, exporter]
-    E --> F
-
-    F --> G["Resource.create({SERVICE_NAME: service_name})"]
-    G --> H["provider = TracerProvider(resource=resource)"]
-    H --> I{exporter is not None?}
-    I -- yes --> J["provider.add_span_processor(\n  BatchSpanProcessor(exporter))"]
-    I -- no --> K
-    J --> K["trace.set_tracer_provider(provider)"]
-    K --> L["FastAPIInstrumentor.instrument_app(\n  app, tracer_provider=provider)"]
-    L --> M([return provider])
-
-    N(["instrument_grpc_server() / instrument_grpc_client()\n(called separately by the gRPC service, requires the grpc extra)"]) -.-> O["GrpcInstrumentorServer / GrpcInstrumentorClient\n.instrument()"]
+    A([create_platform_app: settings.enable_tracing == true]) --> B["TracingConfig.from_env(app_name, build_version,\n  observability_domain, environment, endpoint=settings.otlp_endpoint)"]
+    B --> C["OTEL_* environment, gincommon defaults:\nendpoint localhost:4317 (none/off/disabled or OTEL_TRACES_EXPORTER=none: in-process only)\ninsecure only for dev/local · sample ratio 1.0 dev/local, else 0.1\nbaggage off · ignore_remote_parent_sampled off"]
+    C --> D{ensure_tracing: provider already installed?}
+    D -- "service's own SDK TracerProvider" --> K([kept, never replaced])
+    D -- "this library's, configured" --> K2([kept: first configured install wins])
+    D -- "none, or provisional unknown_service" --> E["TracerProvider(\n  resource: service.name, service.version,\n  service.namespace = domain, deployment.environment.name,\n  sampler: ParentBased(root ratio))"]
+    E --> F{endpoint set?}
+    F -- yes --> G["BatchSpanProcessor(OTLPSpanExporter(endpoint, insecure))"]
+    F -- no --> H["no exporter (spans in-process)"]
+    G --> I["delegating global provider: inner = new provider\n(trace.set_tracer_provider at most once; old provider flushed)"]
+    H --> I
+    I --> J["propagator: W3C traceparent (+ baggage when enabled)\nlog otel_tracing_initialized"]
+    J --> L["TracingMiddleware: one SERVER span per request\nnamed METHOD route"]
+    J --> M["ContextServerInterceptor: one SERVER span per RPC\nnamed after the bounded grpc_method"]
+    N(["app shutdown (lifespan)"]) --> O["shutdown_tracing(): force_flush + shutdown (5 s)"]

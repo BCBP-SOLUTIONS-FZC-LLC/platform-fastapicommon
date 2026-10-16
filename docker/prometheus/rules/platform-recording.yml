@@ -1,0 +1,73 @@
+# Reference recording rules for the Enterprise Platform Observability Standard.
+# Inputs are platform_* metrics only (CI: `make metrics-refs` rejects legacy names
+# here). Every rule keeps domain, service and environment so cross-service and
+# cross-domain aggregation stays valid. Naming: level:metric:operation.
+groups:
+  - name: platform-http
+    rules:
+      - record: service:platform_http_requests:rate5m
+        expr: sum by (domain, service, environment) (rate(platform_http_requests_total[5m]))
+      - record: domain:platform_http_requests:rate5m
+        expr: sum by (domain, environment) (rate(platform_http_requests_total[5m]))
+      - record: service_route:platform_http_request_duration_seconds:p99_5m
+        expr: |
+          histogram_quantile(0.99,
+            sum by (le, domain, service, environment, route) (rate(platform_http_request_duration_seconds_bucket[5m])))
+      # SLI: availability = 1 - share of 5xx responses. One rule per burn-rate window.
+      - record: service:platform_http_error_ratio:rate5m
+        expr: |
+          sum by (domain, service, environment) (rate(platform_http_requests_total{status_class="5xx"}[5m]))
+          / sum by (domain, service, environment) (rate(platform_http_requests_total[5m]))
+      - record: service:platform_http_error_ratio:rate30m
+        expr: |
+          sum by (domain, service, environment) (rate(platform_http_requests_total{status_class="5xx"}[30m]))
+          / sum by (domain, service, environment) (rate(platform_http_requests_total[30m]))
+      - record: service:platform_http_error_ratio:rate1h
+        expr: |
+          sum by (domain, service, environment) (rate(platform_http_requests_total{status_class="5xx"}[1h]))
+          / sum by (domain, service, environment) (rate(platform_http_requests_total[1h]))
+      - record: service:platform_http_error_ratio:rate6h
+        expr: |
+          sum by (domain, service, environment) (rate(platform_http_requests_total{status_class="5xx"}[6h]))
+          / sum by (domain, service, environment) (rate(platform_http_requests_total[6h]))
+      # HPA signal: in-flight requests per service.
+      - record: service:platform_http_active_requests:sum
+        expr: sum by (domain, service, environment) (platform_http_active_requests)
+
+  - name: platform-grpc
+    rules:
+      - record: service:platform_grpc_server_handled:rate5m
+        expr: sum by (domain, service, environment) (rate(platform_grpc_server_handled_total[5m]))
+      - record: service_method:platform_grpc_server_handling_seconds:p99_5m
+        expr: |
+          histogram_quantile(0.99,
+            sum by (le, domain, service, environment, grpc_method) (rate(platform_grpc_server_handling_seconds_bucket[5m])))
+      - record: service:platform_grpc_error_ratio:rate5m
+        expr: |
+          sum by (domain, service, environment) (rate(platform_grpc_server_handled_total{status_class="5xx"}[5m]))
+          / sum by (domain, service, environment) (rate(platform_grpc_server_handled_total[5m]))
+      - record: service:platform_grpc_error_ratio:rate30m
+        expr: |
+          sum by (domain, service, environment) (rate(platform_grpc_server_handled_total{status_class="5xx"}[30m]))
+          / sum by (domain, service, environment) (rate(platform_grpc_server_handled_total[30m]))
+      - record: service:platform_grpc_error_ratio:rate1h
+        expr: |
+          sum by (domain, service, environment) (rate(platform_grpc_server_handled_total{status_class="5xx"}[1h]))
+          / sum by (domain, service, environment) (rate(platform_grpc_server_handled_total[1h]))
+      - record: service:platform_grpc_error_ratio:rate6h
+        expr: |
+          sum by (domain, service, environment) (rate(platform_grpc_server_handled_total{status_class="5xx"}[6h]))
+          / sum by (domain, service, environment) (rate(platform_grpc_server_handled_total[6h]))
+      - record: service:platform_grpc_server_inflight_requests:sum
+        expr: sum by (domain, service, environment) (platform_grpc_server_inflight_requests)
+
+  - name: platform-messaging
+    rules:
+      - record: service_queue:platform_messages_received:rate5m
+        expr: sum by (domain, service, environment, queue) (rate(platform_messages_received_total[5m]))
+      - record: service_queue:platform_messages_failed_ratio:rate5m
+        expr: |
+          sum by (domain, service, environment, queue) (rate(platform_messages_failed_total[5m]))
+          / sum by (domain, service, environment, queue) (rate(platform_messages_received_total[5m]))
+      - record: service_queue:platform_dlq_messages:increase10m
+        expr: sum by (domain, service, environment, queue) (increase(platform_dlq_messages_total[10m]))

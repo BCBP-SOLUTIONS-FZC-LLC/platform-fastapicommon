@@ -1,0 +1,94 @@
+# promtool unit tests for the reference rules: promtool test rules promtool-tests.yml (not loaded by Prometheus: rule_files matches platform-*.yml)
+rule_files:
+  - platform-recording.yml
+  - platform-alerts.yml
+
+evaluation_interval: 1m
+
+tests:
+  - name: HTTP fast burn pages on a sustained 5% error ratio
+    interval: 1m
+    input_series:
+      - series: 'platform_http_requests_total{domain="iam",service="event-consumer",environment="prod",method="GET",route="/x",status_class="2xx",error_class="success"}'
+        values: '0+95x90'
+      - series: 'platform_http_requests_total{domain="iam",service="event-consumer",environment="prod",method="GET",route="/x",status_class="5xx",error_class="server_error"}'
+        values: '0+5x90'
+    alert_rule_test:
+      - eval_time: 70m
+        alertname: PlatformHTTPErrorBudgetFastBurn
+        exp_alerts:
+          - exp_labels:
+              severity: page
+              domain: iam
+              service: event-consumer
+              environment: prod
+            exp_annotations:
+              summary: "iam/event-consumer (prod) is burning its HTTP error budget 14x too fast"
+              runbook_url: https://github.com/BCBP-SOLUTIONS-FZC-LLC/platform-gincommon/blob/main/docs/observability/runbooks.md#platformhttperrorbudgetfastburn
+
+  - name: No HTTP burn alert without errors
+    interval: 1m
+    input_series:
+      - series: 'platform_http_requests_total{domain="iam",service="event-consumer",environment="prod",method="GET",route="/x",status_class="2xx",error_class="success"}'
+        values: '0+100x90'
+    alert_rule_test:
+      - eval_time: 70m
+        alertname: PlatformHTTPErrorBudgetFastBurn
+        exp_alerts: []
+
+  - name: Cross-domain aggregation keeps domain and environment
+    interval: 1m
+    input_series:
+      - series: 'platform_http_requests_total{domain="iam",service="a",environment="prod",method="GET",route="/x",status_class="2xx",error_class="success"}'
+        values: '0+60x10'
+      - series: 'platform_http_requests_total{domain="iam",service="b",environment="prod",method="GET",route="/y",status_class="2xx",error_class="success"}'
+        values: '0+60x10'
+    promql_expr_test:
+      - expr: domain:platform_http_requests:rate5m
+        eval_time: 10m
+        exp_samples:
+          - labels: 'domain:platform_http_requests:rate5m{domain="iam",environment="prod"}'
+            value: 2
+
+  - name: Dead-lettered messages alert
+    interval: 1m
+    input_series:
+      - series: 'platform_dlq_messages_total{domain="billing",service="invoice-worker",environment="prod",queue="invoices",event_type="invoice.created",reason="schema_invalid"}'
+        values: '0 0 0 1 1 1'
+    alert_rule_test:
+      - eval_time: 5m
+        alertname: PlatformMessagesDeadLettered
+        exp_alerts:
+          - exp_labels:
+              severity: ticket
+              domain: billing
+              service: invoice-worker
+              environment: prod
+              queue: invoices
+            exp_annotations:
+              summary: "invoice-worker (prod) dead-lettered 1 messages from invoices"
+              runbook_url: https://github.com/BCBP-SOLUTIONS-FZC-LLC/platform-gincommon/blob/main/docs/observability/runbooks.md#platformmessagesdeadlettered
+
+  - name: Unclassified errors raise a ticket per service and transport
+    interval: 1m
+    input_series:
+      - series: 'platform_unclassified_errors_total{domain="iam",service="tender-acl",environment="prod",transport="http"}'
+        values: '0 0 0 1 1 1 1 1 1 1'
+      - series: 'platform_unclassified_errors_total{domain="iam",service="tender-acl",environment="prod",transport="grpc"}'
+        values: '0x9'
+    alert_rule_test:
+      - eval_time: 5m
+        alertname: PlatformUnclassifiedErrors
+        exp_alerts:
+          - exp_labels:
+              severity: ticket
+              domain: iam
+              service: tender-acl
+              environment: prod
+              transport: http
+            exp_annotations:
+              summary: "tender-acl (prod) answered unclassified http errors as internal errors"
+              runbook_url: https://github.com/BCBP-SOLUTIONS-FZC-LLC/platform-gincommon/blob/main/docs/observability/runbooks.md#platformunclassifiederrors
+      - eval_time: 9m
+        alertname: PlatformUnclassifiedErrors
+        exp_alerts: []

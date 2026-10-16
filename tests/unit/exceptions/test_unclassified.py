@@ -1,6 +1,5 @@
 from __future__ import annotations
 
-import json
 import logging
 from collections.abc import AsyncIterator
 
@@ -76,9 +75,8 @@ def _app(*, middleware: bool = True) -> FastAPI:
 def _entries(caplog: pytest.LogCaptureFixture) -> list[tuple[logging.LogRecord, dict[str, object]]]:
     out = []
     for r in caplog.records:
-        msg = r.getMessage()
-        if "unclassified error" in msg:
-            out.append((r, json.loads(msg)))
+        if isinstance(r.msg, dict) and r.msg.get("event") == "unclassified error":
+            out.append((r, dict(r.msg)))
     return out
 
 

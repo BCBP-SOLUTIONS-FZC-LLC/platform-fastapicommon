@@ -1,0 +1,103 @@
+# Reference alerts for the Enterprise Platform Observability Standard, built on
+# platform-recording.yml. SLO: 99.9% availability over 30 days (error budget
+# 0.001); burn-rate thresholds follow the Google SRE workbook multiwindow,
+# multi-burn-rate pattern (14.4x over 1h/5m pages, 6x over 6h/30m tickets).
+groups:
+  - name: platform-slo
+    rules:
+      - alert: PlatformHTTPErrorBudgetFastBurn
+        expr: |
+          service:platform_http_error_ratio:rate1h > (14.4 * 0.001)
+          and service:platform_http_error_ratio:rate5m > (14.4 * 0.001)
+        for: 2m
+        labels:
+          severity: page
+        annotations:
+          summary: "{{ $labels.domain }}/{{ $labels.service }} ({{ $labels.environment }}) is burning its HTTP error budget 14x too fast"
+          runbook_url: https://github.com/BCBP-SOLUTIONS-FZC-LLC/platform-gincommon/blob/main/docs/observability/runbooks.md#platformhttperrorbudgetfastburn
+      - alert: PlatformHTTPErrorBudgetSlowBurn
+        expr: |
+          service:platform_http_error_ratio:rate6h > (6 * 0.001)
+          and service:platform_http_error_ratio:rate30m > (6 * 0.001)
+        for: 15m
+        labels:
+          severity: ticket
+        annotations:
+          summary: "{{ $labels.domain }}/{{ $labels.service }} ({{ $labels.environment }}) is burning its HTTP error budget 6x too fast"
+          runbook_url: https://github.com/BCBP-SOLUTIONS-FZC-LLC/platform-gincommon/blob/main/docs/observability/runbooks.md#platformhttperrorbudgetslowburn
+      - alert: PlatformGRPCErrorBudgetFastBurn
+        expr: |
+          service:platform_grpc_error_ratio:rate1h > (14.4 * 0.001)
+          and service:platform_grpc_error_ratio:rate5m > (14.4 * 0.001)
+        for: 2m
+        labels:
+          severity: page
+        annotations:
+          summary: "{{ $labels.domain }}/{{ $labels.service }} ({{ $labels.environment }}) is burning its gRPC error budget 14x too fast"
+          runbook_url: https://github.com/BCBP-SOLUTIONS-FZC-LLC/platform-gincommon/blob/main/docs/observability/runbooks.md#platformgrpcerrorbudgetfastburn
+      - alert: PlatformGRPCErrorBudgetSlowBurn
+        expr: |
+          service:platform_grpc_error_ratio:rate6h > (6 * 0.001)
+          and service:platform_grpc_error_ratio:rate30m > (6 * 0.001)
+        for: 15m
+        labels:
+          severity: ticket
+        annotations:
+          summary: "{{ $labels.domain }}/{{ $labels.service }} ({{ $labels.environment }}) is burning its gRPC error budget 6x too fast"
+          runbook_url: https://github.com/BCBP-SOLUTIONS-FZC-LLC/platform-gincommon/blob/main/docs/observability/runbooks.md#platformgrpcerrorbudgetslowburn
+
+  - name: platform-http
+    rules:
+      - alert: PlatformHTTPLatencyHigh
+        expr: service_route:platform_http_request_duration_seconds:p99_5m > 1
+        for: 10m
+        labels:
+          severity: ticket
+        annotations:
+          summary: "p99 latency of {{ $labels.route }} on {{ $labels.service }} ({{ $labels.environment }}) is {{ $value | humanizeDuration }}"
+          runbook_url: https://github.com/BCBP-SOLUTIONS-FZC-LLC/platform-gincommon/blob/main/docs/observability/runbooks.md#platformhttplatencyhigh
+      - alert: PlatformHTTPPanics
+        expr: sum by (domain, service, environment, route) (increase(platform_http_panics_total[5m])) > 0
+        labels:
+          severity: ticket
+        annotations:
+          summary: "{{ $labels.service }} ({{ $labels.environment }}) recovered handler panics on {{ $labels.route }}"
+          runbook_url: https://github.com/BCBP-SOLUTIONS-FZC-LLC/platform-gincommon/blob/main/docs/observability/runbooks.md#platformhttppanics
+
+  - name: platform-grpc
+    rules:
+      - alert: PlatformGRPCPanics
+        expr: sum by (domain, service, environment, grpc_method) (increase(platform_grpc_panics_total[5m])) > 0
+        labels:
+          severity: ticket
+        annotations:
+          summary: "{{ $labels.service }} ({{ $labels.environment }}) recovered panics in {{ $labels.grpc_method }}"
+          runbook_url: https://github.com/BCBP-SOLUTIONS-FZC-LLC/platform-gincommon/blob/main/docs/observability/runbooks.md#platformgrpcpanics
+
+  - name: platform-errors
+    rules:
+      - alert: PlatformUnclassifiedErrors
+        expr: sum by (domain, service, environment, transport) (increase(platform_unclassified_errors_total[5m])) > 0
+        labels:
+          severity: ticket
+        annotations:
+          summary: "{{ $labels.service }} ({{ $labels.environment }}) answered unclassified {{ $labels.transport }} errors as internal errors"
+          runbook_url: https://github.com/BCBP-SOLUTIONS-FZC-LLC/platform-gincommon/blob/main/docs/observability/runbooks.md#platformunclassifiederrors
+
+  - name: platform-messaging
+    rules:
+      - alert: PlatformMessagesDeadLettered
+        expr: service_queue:platform_dlq_messages:increase10m > 0
+        labels:
+          severity: ticket
+        annotations:
+          summary: "{{ $labels.service }} ({{ $labels.environment }}) dead-lettered {{ $value | humanize }} messages from {{ $labels.queue }}"
+          runbook_url: https://github.com/BCBP-SOLUTIONS-FZC-LLC/platform-gincommon/blob/main/docs/observability/runbooks.md#platformmessagesdeadlettered
+      - alert: PlatformMessagesFailureRatioHigh
+        expr: service_queue:platform_messages_failed_ratio:rate5m > 0.05
+        for: 10m
+        labels:
+          severity: ticket
+        annotations:
+          summary: "{{ $labels.service }} ({{ $labels.environment }}) fails {{ $value | humanizePercentage }} of messages from {{ $labels.queue }}"
+          runbook_url: https://github.com/BCBP-SOLUTIONS-FZC-LLC/platform-gincommon/blob/main/docs/observability/runbooks.md#platformmessagesfailureratiohigh

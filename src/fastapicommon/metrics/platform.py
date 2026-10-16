@@ -82,6 +82,11 @@ _GRPC_CLIENT_CODES = frozenset(
     }
 )
 
+try:  # FastAPI ≥ 0.12x: included routers are lazy; see _flatten_routes.
+    from fastapi.routing import iter_route_contexts as _iter_route_contexts
+except ImportError:  # pragma: no cover - older FastAPI (exercised by the lowest-deps job)
+    _iter_route_contexts = None  # type: ignore[assignment]
+
 #: FastAPI/Starlette path parameter, e.g. ``{item_id}``, ``{item_id:int}``, ``{rest:path}``.
 _PATH_PARAM = re.compile(r"\{([^}:]+)(?::([^}]*))?\}")
 
@@ -132,8 +137,22 @@ def grpc_error_class(code: str) -> str:
     return "client_error" if code in _GRPC_CLIENT_CODES else "server_error"
 
 
+#: Go ``label.GRPCMethod``: ``/package.Service/Method``, at most 256 bytes.
+_GRPC_METHOD = re.compile(r"/[A-Za-z0-9_.]+/[A-Za-z0-9_]+")
+MAX_GRPC_METHOD_LEN = 256
+
+
 def grpc_method_label(full_method: str | None) -> str:
-    return full_method or UNKNOWN
+    """``full_method`` when it is a well-formed ``/package.Service/Method`` of at most 256
+    bytes, else ``"unknown"`` (Go ``label.GRPCMethod``), so client-chosen method names cannot
+    explode label or span-name cardinality."""
+    if (
+        not full_method
+        or len(full_method.encode()) > MAX_GRPC_METHOD_LEN
+        or not _GRPC_METHOD.fullmatch(full_method)
+    ):
+        return UNKNOWN
+    return full_method
 
 
 def route_template_label(path: str) -> str:
@@ -148,10 +167,20 @@ def route_template_label(path: str) -> str:
     return _PATH_PARAM.sub(_replace, path)
 
 
+def _flatten_routes(routes: Sequence[Any]) -> Sequence[Any]:
+    """FastAPI ≥ 0.12x keeps included routers as lazy entries without a ``path``; its public
+    ``iter_route_contexts`` (what FastAPI's OpenAPI generation uses) yields each effective
+    route with its full, prefixed template. Older versions copy the routes into the app's
+    router, so they are already flat."""
+    if _iter_route_contexts is None:
+        return routes
+    return list(_iter_route_contexts(routes))
+
+
 def _match_routes(
     routes: Sequence[Any], scope: MutableMapping[str, Any], prefix: str
 ) -> str | None:
-    for route in routes:
+    for route in _flatten_routes(routes):
         match, child_scope = route.matches(scope)
         if match is not Match.FULL:
             continue
@@ -159,9 +188,10 @@ def _match_routes(
         if not isinstance(path, str):
             return None
         full_path = prefix + path
-        if isinstance(route, Mount):
-            if route.routes:
-                return _match_routes(route.routes, {**scope, **child_scope}, full_path)
+        original = getattr(route, "original_route", route)
+        if isinstance(original, Mount):
+            if original.routes:
+                return _match_routes(original.routes, {**scope, **child_scope}, full_path)
             # An opaque mounted ASGI app (e.g. StaticFiles): its mount prefix is the template.
             return full_path or None
         return full_path

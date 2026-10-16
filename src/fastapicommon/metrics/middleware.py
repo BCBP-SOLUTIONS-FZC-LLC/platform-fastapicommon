@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import threading
 import time
 from collections.abc import AsyncIterator, Callable
 from typing import Any
@@ -8,12 +9,48 @@ from starlette.middleware.base import BaseHTTPMiddleware, RequestResponseEndpoin
 from starlette.requests import Request
 from starlette.responses import Response
 
+from fastapicommon.logging import get_logger
+from fastapicommon.logging.sanitize import sanitize_log_value
 from fastapicommon.metrics.platform import (
     PlatformMetrics,
     http_route_label,
     platform_metrics,
     request_body_size,
 )
+
+_logger = get_logger("fastapicommon.metrics")
+
+#: Go ``MetricsMiddleware``: at most one ``rate limited`` warning per route per second.
+RATE_LIMIT_LOG_INTERVAL_SECONDS = 1.0
+
+
+class _RateLimitLog:
+    """One ``rate limited`` warn entry per route per interval; the entries skipped since the
+    last one are reported as ``suppressed``."""
+
+    def __init__(self, interval: float = RATE_LIMIT_LOG_INTERVAL_SECONDS) -> None:
+        self._interval = interval
+        self._state: dict[str, tuple[float, int]] = {}
+        self._lock = threading.Lock()
+
+    def __call__(self, route: str, method: str, status: int) -> None:
+        now = time.monotonic()
+        with self._lock:
+            last, suppressed = self._state.get(route, (float("-inf"), 0))
+            if now - last < self._interval:
+                self._state[route] = (last, suppressed + 1)
+                return
+            self._state[route] = (now, 0)
+        _logger.warning(
+            "rate limited",
+            route=route,
+            method=sanitize_log_value(method),
+            status=status,
+            suppressed=suppressed,
+        )
+
+
+_log_rate_limited = _RateLimitLog()
 
 
 class PrometheusMiddleware(BaseHTTPMiddleware):
@@ -54,6 +91,8 @@ class PrometheusMiddleware(BaseHTTPMiddleware):
         status_code = response.status_code
         response_size = _content_length(response)
         platform.record_http(method, route, status_code, duration, request_size, response_size)
+        if status_code == 429:
+            _log_rate_limited(route, method, status_code)
         if response_size is None:
             _count_body(
                 response,

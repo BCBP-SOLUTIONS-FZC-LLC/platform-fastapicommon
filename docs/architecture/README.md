@@ -13,7 +13,7 @@ link back here.
 | [`request-flow.mmd`](mermaid/request-flow.mmd) | Full HTTP request sequence through `ContextMiddleware` → `PrometheusMiddleware` → `TimeoutMiddleware` → handler |
 | [`exception-handling-flow.mmd`](mermaid/exception-handling-flow.mmd) | Which handler catches `PlatformException`, `RequestValidationError`, `StarletteHTTPException`, and unhandled exceptions |
 | [`rbac-dependency-flow.mmd`](mermaid/rbac-dependency-flow.mmd) | `RequireRole` / `RequireAnyRole` / `RequireAllRoles` authorization decision |
-| [`tracing-initialization.mmd`](mermaid/tracing-initialization.mmd) | `setup_tracing` / `_build_span_exporter` — OTLP exporter wiring from `PlatformSettings.otlp_endpoint` |
+| [`tracing-initialization.mmd`](mermaid/tracing-initialization.mmd) | `ensure_tracing` / `TracingConfig.from_env` — gincommon's `OTEL_*` configuration, resource, sampler, delegating provider and shutdown flush |
 | [`metrics-flow.mmd`](mermaid/metrics-flow.mmd) | Prometheus HTTP + gRPC metric recording and the `/metrics` exposition endpoint |
 | [`grpc-interceptors.mmd`](mermaid/grpc-interceptors.mmd) | `ContextClientInterceptor` and `ContextServerInterceptor` unary-unary call sequence |
 | [`observability-stack.mmd`](mermaid/observability-stack.mmd) | How logs, metrics, and traces flow into the local `docker-compose.yml` stack (Loki, Prometheus, Tempo, Grafana) |

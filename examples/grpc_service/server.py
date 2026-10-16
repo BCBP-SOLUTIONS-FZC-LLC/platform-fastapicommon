@@ -14,7 +14,7 @@ import grpc
 
 from fastapicommon.grpc import ContextServerInterceptor
 from fastapicommon.logging import configure_logging, get_logger
-from fastapicommon.telemetry import instrument_grpc_server
+from fastapicommon.telemetry import init_tracing_from_env
 
 logger = get_logger(__name__)
 
@@ -30,7 +30,9 @@ def echo(request_bytes: bytes, context: grpc.ServicerContext) -> bytes:
 
 def create_server() -> grpc.Server:
     configure_logging()
-    instrument_grpc_server()
+    # ContextServerInterceptor starts gincommon-compatible server spans itself; this installs
+    # the provider they export through (OTEL_SERVICE_NAME / APP_NAME and the OTEL_* settings).
+    init_tracing_from_env()
 
     handler = grpc.unary_unary_rpc_method_handler(
         echo, request_deserializer=_identity, response_serializer=_identity

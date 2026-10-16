@@ -1,21 +1,23 @@
 graph LR
     subgraph app["examples/fastapi_service (or any consuming service)"]
-        ctxmw["ContextMiddleware\nrequest_id / correlation_id / tenant_id / user_id"]
+        tracemw["TracingMiddleware\nserver span METHOD route"]
+        ctxmw["ContextMiddleware\nrequest_id / correlation_id / tenant_id / user_id / trace_id"]
+        logmw["LoggingMiddleware\nhttp_request access log"]
         promw["PrometheusMiddleware"]
-        logger["structlog JSON logs\n(get_logger, stdout)"]
-        tracer["OTel spans\n(FastAPIInstrumentor)"]
+        logger["structlog, gincommon (Zap) layout\nJSON on stderr (console in dev/local)"]
     end
 
     subgraph local["Local stack — docker-compose.yml"]
-        logfile["logs/app.log\n(stdout teed by `make run`)"]
+        logfile["logs/app.log\n(LOG_FILE, JSON)"]
         promtail["promtail"]
         loki["loki :3100"]
-        prometheus["prometheus :9090\nscrapes host.docker.internal:APP_PORT/metrics"]
+        prometheus["prometheus :9090\nscrapes host.docker.internal:APP_PORT/metrics\n+ vendored platform rules"]
         collector["otel-collector :4317/:4318\n(OTLP/gRPC + HTTP)"]
         tempo["tempo :3200"]
         grafana["grafana :3000\n(Prometheus + Loki + Tempo datasources\ntrace <-> log correlation provisioned)"]
     end
 
+    logmw --> logger
     logger --> logfile
     logfile --> promtail
     promtail --> loki
@@ -24,8 +26,8 @@ graph LR
     promw --> prometheus
     prometheus --> grafana
 
-    tracer -->|"OTLPSpanExporter\n(only if OTLP_ENDPOINT / settings.otlp_endpoint set)"| collector
+    tracemw -->|"OTLPSpanExporter\n(OTEL_EXPORTER_OTLP_ENDPOINT, default localhost:4317)"| collector
     collector --> tempo
     tempo --> grafana
 
-    ctxmw -.->|"request_id/correlation_id\ncarried in log fields"| logger
+    ctxmw -.->|"request_id / trace_id\ncarried in log fields"| logger

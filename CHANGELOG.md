@@ -22,6 +22,106 @@ New floors: `fastapi>=0.115.10`, `starlette>=0.46`, `opentelemetry-api` / `-sdk`
 `-exporter-otlp-proto-grpc>=1.28`, and `opentelemetry-instrumentation-fastapi` /
 `-grpc>=0.49b0`. The locked (tested) versions are unchanged.
 
+### Changed (breaking) — logs and traces aligned with `platform-gincommon`
+
+**Logs** now use gincommon's Zap output contract:
+
+- **Format:**
+  - JSON on **stderr** in Zap's production layout, with the keys `level`
+    (`debug`/`info`/`warn`/`error`), `ts` (Unix seconds), `caller`, `msg`, the fields, and
+    `stacktrace` on error entries.
+  - This replaces structlog's `event` / `level` / `timestamp` on stdout. Loki queries on
+    `event` must use `msg`.
+- **Dev:** `dev` / `local` use Zap's console layout. ADR-001 is amended accordingly.
+- **Settings:**
+  - `LOG_LEVEL` defaults to debug in dev/local and info otherwise (`PlatformSettings.log_level`
+    defaults to `""`).
+  - New: `LOG_SAMPLING`.
+  - `LOG_FILE` is written by the library. `make run` no longer pipes output through `tee`.
+- **`http_request`:** a new access log (`LoggingMiddleware`, installed by
+  `create_platform_app`) records `trace_id`, `request_id`, `method`, the route template as
+  `path`, `status`, `duration_ms`, and either the verified identity or `claimed_*` values.
+- **`grpc_request`** replaces `grpc_request_completed`. Its fields are `method` (bounded),
+  `grpc_code` (Go names), `duration_ms` (was `duration_seconds`), `request_id` and the
+  identity. The level follows the code.
+- **New audit and diagnostic entries:** `auth: request rejected` (`require_authenticated_user`),
+  `authz: access denied` (role dependencies), `rate limited` (429, at most 1 per route per
+  second), `metrics handler error`, and the `otel_*` entries.
+- **Correlation:** every entry written in a request now also carries `trace_id`.
+- **Sanitising:** the access, auth and gRPC entries apply gincommon's sanitiser
+  (`fastapicommon.logging.sanitize`).
+
+**Traces:**
+
+- **Spans:** the library starts its own server spans, `TracingMiddleware` for HTTP and
+  `ContextServerInterceptor` for gRPC.
+  - HTTP spans are named `METHOD route` (`GET /items/:item_id`), with gincommon's attributes
+    and Error-status rules.
+  - gRPC spans are named after the bounded `grpc_method`, with `rpc.*` and both status-code
+    attributes.
+  - Exceptions are recorded by type only.
+  - `FastAPIInstrumentor` is gone, along with the `opentelemetry-instrumentation-fastapi`
+    dependency.
+- **Configuration:**
+  - gincommon's `OTEL_*` variables: `OTEL_EXPORTER_OTLP_ENDPOINT` (default
+    **`localhost:4317`**, where previously nothing was exported unless `OTLP_ENDPOINT` was
+    set; `none` disables export), `OTEL_EXPORTER_OTLP_INSECURE`,
+    `OTEL_TRACES_SAMPLER_RATIO` / `_ARG`, `OTEL_TRACES_IGNORE_REMOTE_PARENT_SAMPLED` and
+    `OTEL_PROPAGATOR_BAGGAGE`.
+  - `OTLP_ENDPOINT` still overrides the endpoint.
+- **Sampling:** parent-based, at 1.0 in dev/local and **0.1** otherwise (it was always 1.0).
+- **Resource:** adds `service.version`, `service.namespace` (the domain) and
+  `deployment.environment.name`.
+- **Provider:** set once (delegating). The first configured install wins, a later one swaps
+  it safely, a provider the service installed itself is kept, and the app's lifespan flushes
+  it on shutdown.
+- **New API:**
+  - `TracingConfig`, `init_tracing`, `init_tracing_from_env`, `ensure_tracing` and
+    `shutdown_tracing`;
+  - `new_tracer`, `noop_tracer`, `span_trace_id`, `record_span_error`, `inject_trace_context`
+    and `extract_trace_context`.
+- **gRPC example:** `instrument_grpc_server()` would now nest a second span, so the example
+  uses `init_tracing_from_env()` instead.
+
+**Metrics:** `grpc_method` is bounded as in gincommon: a malformed or over-256-byte method
+is `unknown`.
+
+**Fixed:** with FastAPI ≥ 0.12x (0.140 is locked), every route added through
+`include_router()` (including `/health`, `/ready` and `/metrics`) was labelled
+`route="unknown"`, because FastAPI now keeps included routers as lazy entries. Routes are
+now resolved through FastAPI's public `iter_route_contexts`, so they get their full template
+(`/widgets/:widget_id`). This applies to the metrics label, the `http_request` log `path`
+and the span name.
+
+### Added — the observability standard's metrics schema strategy (parity with `platform-gincommon`)
+
+- **Registry re-synced** with platform-gincommon v2.0.0 (adds the `transport` label and the
+  `platform_unclassified_errors_total` entry; fastapicommon does not emit it yet).
+- **Metric constructors for a service's own metrics** (Go `NewShared*` / `NewCounterVec` ...):
+  - `new_shared_counter` / `new_shared_gauge` / `new_shared_histogram` build Tier 1/2 metrics
+    from their registry entry: the name, help, labels and buckets all come from the registry.
+  - `new_counter` / `new_gauge` / `new_histogram` build Tier 3 `<domain>_<service>_*` metrics.
+    They reject registry and `platform_*` names, wrong suffixes, prohibited labels and the
+    const labels.
+  - `register_labeled` adds the identity labels to a third-party collector.
+  - The constructors raise `MetricsNotInitializedError` before metrics are initialized.
+- **`fastapicommon.metrics.compliance`**: `validate()` / `validate_text()` apply the full rule
+  set of Go's `obsregistry.Validate`, using the same rule names. They accept Prometheus text
+  and OpenMetrics, and support strict mode with `allow_proposed_owners`.
+- **`fastapicommon-metricslint`** console script, a port of Go's `metricslint`. It has the
+  same `check` / `refs` / `registry` / `inventory` commands and exit codes.
+- **`parse_registry()`** applies Go `Parse`'s self-consistency rules. `default_registry()` now
+  parses strictly.
+- **`docs/observability/`:**
+  - `README.md`, `migration.md` and `runbooks.md`;
+  - `metric-registry.md`, generated by `make metrics-inventory` and identical to gincommon's.
+- **Reference Prometheus rules** vendored from gincommon (`docker/prometheus/rules/`:
+  recording rules, SLO burn-rate alerts, promtool tests). The local Prometheus loads them.
+- **CI:** `make metrics-lint` runs the registry self-check, rule refs, promtool and an
+  inventory drift check. `make gincommon-parity` compares the registry, rules and inventory
+  with platform-gincommon at `GINCOMMON_REF`; this is required on `main` and for a release.
+  The integration test validates the scrape with `validate()` (0 errors).
+
 ### Changed — CI/CD pipeline (parity with `platform-gincommon`)
 
 - `.github/` now follows platform-gincommon's pipeline, translated to Python as
@@ -44,14 +144,14 @@ New floors: `fastapi>=0.115.10`, `starlette>=0.46`, `opentelemetry-api` / `-sdk`
   uses Python instead of `curl`, which is no longer installed.
 - Dependabot uses the `uv` ecosystem.
 
-### Security
+### Security — unclassified errors (parity with `platform-gincommon` OQ-24 / OQ-25)
 
+- **gRPC exception messages no longer reach clients or logs.** grpcio answered a handler exception with `UNKNOWN "Exception calling application: <message>"` and logged the traceback with the message. `ContextServerInterceptor` now sanitizes every RPC (unary and streaming). A status the handler chose (`context.abort`, or `set_code` then raise) is kept, re-aborted with its own details. Any other exception is aborted as `INTERNAL "internal server error"` and logged at ERROR as `unclassified error` (`grpc_method`, `grpc_code=Internal`, ids, `error_type` / `error_chain`, `stack`; never the message). This is the same contract as platform-gincommon's gRPC error sanitizer. Callers that matched on `UNKNOWN` or on the details text must use status codes. Unclassified exceptions still count in `platform_grpc_panics_total`, now with code `Internal`.
+- **Unclassified exceptions are logged as a defect, without their message** (parity with platform-gincommon's OQ-24 resolution). `unhandled_exception_handler` used to call `logger.exception(...)`, which logged the exception text and the full traceback. It now logs one error-level `unclassified error` entry: `classified=false`, ids, `service`, `method`, `route`, `operation`, `status`, `errorCode`, `error_type` / `error_chain` (exception types) and `stack` (`file:line in function` frames, no source lines). The client response is unchanged: a 500 `internal-error` without detail.
+- **New `UnhandledErrorMiddleware`**, installed by `create_platform_app` just inside `LoggingMiddleware` (so `http_request` logs the 500). It also records the exception type on the server span (`exception` event, status `panic`). Starlette's `ServerErrorMiddleware` re-raises after the `Exception` handler, so the server (uvicorn) logged the traceback *with the message*. The middleware answers the 500 problem itself and does not re-raise. Apps that call `register_exception_handlers` without `create_platform_app` should add it.
 - **`platform_unclassified_errors_total{transport}`** (platform-gincommon registry, `approved`): incremented for every unclassified exception, HTTP (`transport="http"`) and gRPC (`transport="grpc"`). Both series start at 0. This is the alerting signal; the `unclassified error` log event stays for diagnostics. The vendored `registry.json` is re-synced (new label `transport`).
-- **gRPC exception messages no longer reach clients or logs.** grpcio answered a handler exception with `UNKNOWN "Exception calling application: <message>"` and logged the traceback with the message. `ContextServerInterceptor` now sanitizes every RPC (unary and streaming). A status the handler chose (`context.abort`, or `set_code` then raise) is kept, re-aborted with its own details. Any other exception is aborted as `INTERNAL "internal server error"` and logged at ERROR as `unclassified error` (`grpc_method`, ids, `error_type` / `error_chain`, `stack`; never the message). This is the same contract as platform-gincommon's gRPC error sanitizer. Callers that matched on `UNKNOWN` or on the details text must use status codes. Unclassified exceptions still count in `platform_grpc_panics_total`, now with code `Internal`.
-- **Unclassified exceptions are logged as a defect, without their message** (parity with platform-gincommon's OQ-24 resolution). `unhandled_exception_handler` used to call `logger.exception(...)`, which logged the exception text and the full traceback. It now logs one structlog ERROR `unclassified error` entry: `classified=false`, ids, `service`, `method`, `route`, `operation`, `status`, `errorCode`, `error_type` / `error_chain` (exception types) and `stack` (`file:line in function` frames, no source lines). The client response is unchanged: a 500 `internal-error` without detail.
-- **New `UnhandledErrorMiddleware`**, installed by `create_platform_app` just inside `ContextMiddleware`. Starlette's `ServerErrorMiddleware` re-raises after the `Exception` handler, so the server (uvicorn) logged the traceback *with the message*. The middleware answers the 500 problem itself and does not re-raise. Apps that call `register_exception_handlers` without `create_platform_app` should add it.
 
-### Security
+### Security — dependencies
 
 - Locked dependency upgrades for the `pip-audit` gate: `cryptography` 50.0.2 (PYSEC-2026-3552), `urllib3` 2.8.0 (PYSEC-2026-4175/4176/4177), `virtualenv` 21.14.5 (PYSEC-2026-4011–4014) and `pip` 26.2.1 (PYSEC-2026-3721).
 - The example service image removes `pip` from its runtime stage. pip's vendored `urllib3`, `msgpack` and `setuptools` were what Trivy flagged, even with the base image's current pip, and nothing runs pip at runtime.

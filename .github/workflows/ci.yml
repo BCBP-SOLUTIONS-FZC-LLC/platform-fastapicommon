@@ -25,7 +25,8 @@
 # build, and there's no separate lint-dockerfile job to pay a job-minute for.
 # pr-summary posts a status table on pull_request events.
 #
-# Docs-only changes (any *.md, docs/architecture/*.mmd) skip the
+# Docs-only changes (any *.md, docs/architecture/*.mmd — but nothing under
+# docs/observability/, which the observability-standard checks cover) skip the
 # expensive jobs, but the workflow itself always runs: the `changes` job
 # (detect-changes.sh) decides, and every job behind a required check is
 # skipped by `if:` instead of the whole workflow being filtered out by
@@ -116,6 +117,7 @@ jobs:
     uses: ./.github/workflows/validate-quality.yml
     with:
       skip: ${{ needs.changes.outputs.code != 'true' }}
+      require_gincommon_parity: ${{ github.event_name != 'pull_request' }}
     secrets:
       CI_REPO_READ_TOKEN: ${{ secrets.CI_REPO_READ_TOKEN }}
 

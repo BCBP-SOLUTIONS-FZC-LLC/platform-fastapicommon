@@ -170,6 +170,7 @@ jobs:
       CI_REPO_READ_TOKEN: ${{ secrets.CI_REPO_READ_TOKEN }}
     with:
       ref: ${{ github.event.inputs.tag || github.ref }}
+      require_gincommon_parity: true
 
   # ── release-only gate: no breaking public-API change unless the version may
   # break (griffe vs the highest stable tag below this one; ci.yml runs it as

@@ -3,7 +3,6 @@ the client (grpcio's "Exception calling application: <message>") or the logs."""
 
 from __future__ import annotations
 
-import json
 import logging
 from collections.abc import Iterator
 from concurrent import futures
@@ -94,7 +93,9 @@ def channel() -> Iterator[grpc.Channel]:
 
 def _entries(caplog: pytest.LogCaptureFixture) -> list[dict[str, Any]]:
     return [
-        json.loads(r.getMessage()) for r in caplog.records if "unclassified error" in r.getMessage()
+        dict(r.msg)
+        for r in caplog.records
+        if isinstance(r.msg, dict) and r.msg.get("event") == "unclassified error"
     ]
 
 
@@ -117,7 +118,7 @@ def test_unclassified_exception_is_internal_with_fixed_message(
     assert info.value.details() == MSG_INTERNAL
     (f,) = _entries(caplog)
     assert f["classified"] is False and f["level"] == "error"
-    assert f["grpc_method"] == "/test.Errors/Plain" and f["grpc_code"] == "INTERNAL"
+    assert f["grpc_method"] == "/test.Errors/Plain" and f["grpc_code"] == "Internal"
     assert f["request_id"] == "req-1"
     assert f["error_chain"] == [f"{__name__}.RepoError", "ValueError"]
     assert any(" in _plain" in fr for fr in f["stack"])

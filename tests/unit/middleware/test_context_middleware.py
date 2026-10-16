@@ -1,10 +1,10 @@
 from fastapi import FastAPI
 from fastapi.testclient import TestClient
 from opentelemetry import trace as otel_trace
-from opentelemetry.sdk.trace import TracerProvider
 
 from fastapicommon.context import get_request_context
 from fastapicommon.middleware import ContextMiddleware
+from fastapicommon.telemetry import TracingConfig, init_tracing
 
 
 def _build_app() -> FastAPI:
@@ -143,8 +143,7 @@ def test_trace_id_is_empty_string_when_no_active_span() -> None:
 
 
 def test_trace_id_echoed_when_a_real_span_is_active() -> None:
-    if not isinstance(otel_trace.get_tracer_provider(), TracerProvider):
-        otel_trace.set_tracer_provider(TracerProvider())
+    init_tracing(TracingConfig(service_name="test-caller", endpoint=""))
     tracer = otel_trace.get_tracer("test-caller")
     client = TestClient(_build_app())
 

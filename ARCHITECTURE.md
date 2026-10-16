@@ -129,14 +129,17 @@ dependency.
 
 | Symbol | Description |
 |--------|-------------|
+| `TracingMiddleware` | One OTel SERVER span per request, continuing the inbound `traceparent`; renamed `METHOD route` (Gin syntax, e.g. `GET /items/:item_id`) with gincommon's attributes and status rules |
 | `ContextMiddleware` | Reads auth/tracing headers, generates `request_id`/`correlation_id` if absent, binds `RequestContext`, echoes both ids back on the response |
+| `LoggingMiddleware` | The `http_request` access log (gincommon's `LoggingMiddleware`): route template, status, `duration_ms`, ids, verified or `claimed_*` identity; level by status |
 | `TimeoutMiddleware(timeout_seconds=30.0)` | Wraps `call_next` in `asyncio.wait_for`; returns a 503 `service-unavailable` problem (`REQUEST_TIMEOUT`) on timeout |
 
 ### fastapicommon.logging
 
 | Symbol | Description |
 |--------|-------------|
-| `configure_logging(level=logging.INFO)` | Configures structlog for JSON-only output (ADR-001), enriched with request/tenant/user context via a custom processor |
+| `configure_logging(level=None, environment=None)` | Configures structlog with platform-gincommon's (Zap) output contract (ADR-001): JSON `level`/`ts`/`caller`/`msg` on stderr, console layout in dev/local, `LOG_LEVEL` / `LOG_SAMPLING` / `LOG_FILE`; enriched with request/trace/tenant/user context |
+| `sanitize_fields` / `sanitize_log_value` (`fastapicommon.logging.sanitize`) | gincommon's log sanitiser: redact sensitive keys; strip control characters and cap values at 256 bytes |
 | `get_logger(name=None)` | Returns a structlog bound logger |
 
 ### fastapicommon.metrics
@@ -155,8 +158,12 @@ dependency.
 
 | Symbol | Description |
 |--------|-------------|
-| `setup_tracing(app, service_name, exporter=None)` | Builds a `TracerProvider`, optionally attaches a `BatchSpanProcessor(exporter)`, instruments the FastAPI app. Returns the provider |
-| `instrument_grpc_server()` / `instrument_grpc_client()` | Instrument gRPC server/client channels for tracing (requires the `grpc` extra) |
+| `TracingConfig` / `TracingConfig.from_env(...)` | Identity + export settings, resolved from the `OTEL_*` environment with gincommon's defaults |
+| `init_tracing(config, exporter=None)` / `init_tracing_from_env()` / `ensure_tracing(config)` | Install the provider (Go `InitTracingWithConfig` / `InitTracingFromEnv` / `EnsureInitTelemetry`) |
+| `shutdown_tracing()` | Flush and stop the active provider (Go `Shutdown`); run by `create_platform_app`'s lifespan |
+| `new_tracer` / `noop_tracer` / `span_trace_id` / `record_span_error` / `inject_trace_context` | Go's tracing helpers (`NewTracer`, `NoopTracer`, `SpanTraceID`, `RecordSpanError`, `InjectTraceContext`) |
+| `setup_tracing(app, service_name, exporter=None)` | Install tracing and add `TracingMiddleware` to an app built without `create_platform_app` |
+| `instrument_grpc_client()` / `instrument_grpc_server()` | OTel's generic gRPC instrumentation (client: `traceparent` on outbound calls). The server one is not needed with `ContextServerInterceptor`, which starts its own spans |
 
 ### fastapicommon.rbac
 
@@ -186,7 +193,7 @@ dependency.
 
 | Symbol | Description |
 |--------|-------------|
-| `PlatformSettings` | `pydantic-settings` `BaseSettings`: `app_name`, `environment` (accepts `APP_ENV` or `ENVIRONMENT` env vars via `AliasChoices`), `log_level`, `request_timeout_seconds`, `enable_tracing`, `enable_metrics`, `otlp_endpoint`, `observability_domain` (`OBSERVABILITY_DOMAIN`), `build_version` (`BUILD_VERSION`) |
+| `PlatformSettings` | `pydantic-settings` `BaseSettings`: `app_name`, `environment` (accepts `APP_ENV` or `ENVIRONMENT` env vars via `AliasChoices`), `log_level` (empty: environment default, as gincommon), `request_timeout_seconds`, `enable_tracing`, `enable_metrics`, `otlp_endpoint`, `observability_domain` (`OBSERVABILITY_DOMAIN`), `build_version` (`BUILD_VERSION`) |
 
 ### fastapicommon.bootstrap
 
@@ -224,29 +231,28 @@ flowchart TD
     B --> C{app_name given?}
     C -- yes --> D[settings = settings.model_copy\nupdate app_name]
     C -- no --> E
-    D --> E[configure_logging settings.log_level]
-    E --> F[app = FastAPI title=settings.app_name]
+    D --> E[init_metrics_from_settings settings]
+    E --> E2["configure_logging(settings.log_level, environment)\ngincommon layout: JSON on stderr, console in dev/local"]
+    E2 --> T{settings.enable_tracing?}
+    T -- yes --> T1["ensure_tracing(TracingConfig.from_env(...))\nlifespan: shutdown_tracing on exit"]
+    T -- no --> F
+    T1 --> F[app = FastAPI title=settings.app_name]
 
     F --> G["add_middleware TimeoutMiddleware\ntimeout_seconds=settings.request_timeout_seconds"]
     G --> H{settings.enable_metrics?}
     H -- yes --> I["add_middleware PrometheusMiddleware\ninclude_router metrics_router"]
-    H -- no --> J
-    I --> J["add_middleware ContextMiddleware"]
-
-    J --> K[include_router health_router]
+    H -- no --> J0
+    I --> J0["add_middleware LoggingMiddleware"]
+    J0 --> J["add_middleware ContextMiddleware"]
+    J --> J2{settings.enable_tracing?}
+    J2 -- yes --> J3["add_middleware TracingMiddleware"]
+    J2 -- no --> K
+    J3 --> K[include_router health_router]
     K --> L[register_exception_handlers app]
-    L --> M{settings.enable_tracing?}
-    M -- yes --> N["_build_span_exporter settings"]
-    N --> O{settings.otlp_endpoint set?}
-    O -- yes --> P["OTLPSpanExporter\ninsecure = environment in dev/development/local"]
-    O -- no --> Q["exporter = None\nspans recorded, not exported"]
-    P --> R[setup_tracing app, service_name, exporter]
-    Q --> R
-    M -- no --> S
-    R --> S([return app])
+    L --> S([return app])
 
-    Note1["Middleware added LAST runs OUTERMOST.\nAdd order here is Timeout, Prometheus, Context —\nso the real request-time order is\nContext (outer) -> Prometheus -> Timeout (inner) -> route handler.\nContext is bound before metrics/timeout run."]
-    J -.-> Note1
+    Note1["Middleware added LAST runs OUTERMOST.\nAdd order here is Timeout, Prometheus, Logging, Context, Tracing —\nso the real request-time order is\nTracing (outer) -> Context -> Logging -> Prometheus -> Timeout (inner) -> route handler,\nplatform-gincommon's ObservabilityMiddlewares order."]
+    J3 -.-> Note1
 ```
 
 ---
@@ -258,18 +264,25 @@ flowchart TD
 ```mermaid
 sequenceDiagram
     participant Client
+    participant TR as TracingMiddleware
     participant CM as ContextMiddleware
+    participant LM as LoggingMiddleware
     participant UE as UnhandledErrorMiddleware
     participant PM as PrometheusMiddleware
     participant TM as TimeoutMiddleware
     participant H as Route handler
 
-    Note over CM,TM: Added last, so ContextMiddleware is outermost,<br/>added first, so TimeoutMiddleware is innermost.
+    Note over TR,TM: Added last, so TracingMiddleware is outermost,<br/>added first, so TimeoutMiddleware is innermost.
 
-    Client ->>+ CM: HTTP request
+    Client ->>+ TR: HTTP request
+    Note over TR: extract traceparent (W3C), start SERVER span named after the method
+
+    TR ->>+ CM: app(scope)
     Note over CM: read + validate x-user-id, x-tenant-id, x-tenant-roles,<br/>x-request-id, x-correlation-id (Go gincommon validation rules)<br/>generate request_id/correlation_id if absent<br/>compute trace_id from the active OTel span, client_ip from X-Forwarded-For/X-Real-IP/peer<br/>bind_request_context(...)
 
-    CM ->>+ PM: call_next(request)
+    CM ->>+ LM: call_next(request)
+    LM ->>+ UE: app(scope)
+    UE ->>+ PM: app(scope)
     Note over PM: start = time.perf_counter()
 
     PM ->>+ TM: call_next(request)
@@ -286,10 +299,16 @@ sequenceDiagram
 
     Note over PM: duration = perf_counter() - start<br/>route = http_route_label(scope) (Gin-style template or "unknown")<br/>platform_http_requests_total{method, route, status_class, error_class}.inc()<br/>platform_http_request_duration_seconds{...}.observe(duration)
 
-    PM -->>- CM: response
+    PM -->>- UE: response (or an unclassified exception, counted as 500)
+    Note over UE: on an exception before the response started:<br/>"unclassified error" log (types + frames, never the message),<br/>platform_unclassified_errors_total{transport="http"}.inc(),<br/>exception event (type only) on the server span,<br/>answer 500 internal-error problem — not re-raised
+    UE -->>- LM: response
+    Note over LM: http_request log: trace_id, request_id, method, path (route template),<br/>status, duration_ms, tenant_id / user_id (or claimed_*)<br/>info 2xx/3xx · warn 4xx · error 5xx
+    LM -->>- CM: response
     Note over CM: response.headers[x-request-id] = request_id<br/>response.headers[x-correlation-id] = correlation_id<br/>response.headers[X-Request-ID] = request_id<br/>response.headers[X-Trace-ID] = trace_id (if set)<br/>reset_request_context(token) in finally
 
-    CM -->>- Client: HTTP response
+    CM -->>- TR: HTTP response
+    Note over TR: rename span METHOD route, set http.route, url.path,<br/>http.response.status_code; Error status for 5xx / exception
+    TR -->>- Client: HTTP response
 ```
 
 A `PlatformException` (or any exception) raised inside the route handler is caught by
@@ -337,7 +356,7 @@ flowchart TD
 ```
 
 An exception nothing classified is a programming defect. `unhandled_exception_handler` answers
-a generic 500 and logs one structlog ERROR entry, `unclassified error` (logger
+a generic 500 and logs one error-level entry, `unclassified error` (logger
 `fastapicommon.exceptions`), with `classified=false`, `traceId` / `trace_id` / `request_id`,
 `service`, `method`, `route`, `operation` (the endpoint's `module.qualname`), `status`,
 `errorCode`, `error_type` / `error_chain` (exception types along `__cause__` / `__context__` and
@@ -349,8 +368,8 @@ on (gincommon LLD OQ-25); the log event is kept for diagnostics.
 
 Starlette's `ServerErrorMiddleware` always re-raises after calling the `Exception` handler, so
 the server would log the traceback *with* the message ("Exception in ASGI application").
-`UnhandledErrorMiddleware` (installed by `create_platform_app` just inside `ContextMiddleware`,
-outside `PrometheusMiddleware`, which records the 500 first) catches the exception and answers
+`UnhandledErrorMiddleware` (installed by `create_platform_app` just inside `LoggingMiddleware`,
+which logs the 500 as `http_request`, and outside `PrometheusMiddleware`, which records it first) catches the exception and answers
 the problem itself without re-raising. If the response had already started it logs the same
 entry and leaves the response incomplete.
 
@@ -403,33 +422,33 @@ roles. There is no equivalent ordering hazard here.
 
 ```mermaid
 flowchart TD
-    A([create_platform_app: settings.enable_tracing == true]) --> B["_build_span_exporter(settings)"]
-    B --> C{settings.otlp_endpoint set?}
-    C -- no --> D["return None\n(spans recorded, never exported)"]
-    C -- yes --> E["OTLPSpanExporter(\n  endpoint=settings.otlp_endpoint,\n  insecure=environment in ('dev','development','local')\n)"]
-
-    D --> F[setup_tracing app, service_name, exporter]
-    E --> F
-
-    F --> G["Resource.create({SERVICE_NAME: service_name})"]
-    G --> H["provider = TracerProvider(resource=resource)"]
-    H --> I{exporter is not None?}
-    I -- yes --> J["provider.add_span_processor(\n  BatchSpanProcessor(exporter))"]
-    I -- no --> K
-    J --> K["trace.set_tracer_provider(provider)"]
-    K --> L["FastAPIInstrumentor.instrument_app(\n  app, tracer_provider=provider)"]
-    L --> M([return provider])
-
-    N(["instrument_grpc_server() / instrument_grpc_client()\n(called separately by the gRPC service, requires the grpc extra)"]) -.-> O["GrpcInstrumentorServer / GrpcInstrumentorClient\n.instrument()"]
+    A([create_platform_app: settings.enable_tracing == true]) --> B["TracingConfig.from_env(app_name, build_version,\n  observability_domain, environment, endpoint=settings.otlp_endpoint)"]
+    B --> C["OTEL_* environment, gincommon defaults:\nendpoint localhost:4317 (none/off/disabled or OTEL_TRACES_EXPORTER=none: in-process only)\ninsecure only for dev/local · sample ratio 1.0 dev/local, else 0.1\nbaggage off · ignore_remote_parent_sampled off"]
+    C --> D{ensure_tracing: provider already installed?}
+    D -- "service's own SDK TracerProvider" --> K([kept, never replaced])
+    D -- "this library's, configured" --> K2([kept: first configured install wins])
+    D -- "none, or provisional unknown_service" --> E["TracerProvider(\n  resource: service.name, service.version,\n  service.namespace = domain, deployment.environment.name,\n  sampler: ParentBased(root ratio))"]
+    E --> F{endpoint set?}
+    F -- yes --> G["BatchSpanProcessor(OTLPSpanExporter(endpoint, insecure))"]
+    F -- no --> H["no exporter (spans in-process)"]
+    G --> I["delegating global provider: inner = new provider\n(trace.set_tracer_provider at most once; old provider flushed)"]
+    H --> I
+    I --> J["propagator: W3C traceparent (+ baggage when enabled)\nlog otel_tracing_initialized"]
+    J --> L["TracingMiddleware: one SERVER span per request\nnamed METHOD route"]
+    J --> M["ContextServerInterceptor: one SERVER span per RPC\nnamed after the bounded grpc_method"]
+    N(["app shutdown (lifespan)"]) --> O["shutdown_tracing(): force_flush + shutdown (5 s)"]
 ```
 
-If a collector is unreachable at the configured `otlp_endpoint`, `BatchSpanProcessor`
-retries exports asynchronously in the background (visible as
-`Transient error ... retrying` log lines) — it does not block or fail request handling.
-If `otlp_endpoint` is simply never set, there is no error or warning at all; spans are
-created (valid trace IDs, visible to `FastAPIInstrumentor`) but silently never leave the
-process. This is a common source of "why don't I see any traces" confusion — check
-`PlatformSettings.otlp_endpoint` / the `OTLP_ENDPOINT` env var first.
+Tracing follows platform-gincommon's `otel` package: the same `OTEL_*` variables and defaults,
+the same resource attributes, a parent-based ratio sampler, and one `otel_tracing_initialized`
+log entry per install with the effective configuration (endpoint, exporter state, sample
+ratio, ...) — the first place to look when traces are missing. Export goes to
+`localhost:4317` unless `OTEL_EXPORTER_OTLP_ENDPOINT` / `settings.otlp_endpoint` say otherwise;
+`none` (or `OTEL_TRACES_EXPORTER=none`) keeps spans in-process. An unreachable collector does
+not block requests: `BatchSpanProcessor` retries in the background and SDK errors are logged
+as `otel_error`. The global provider is set once, to a delegating provider; a later install
+swaps the SDK provider behind it (tracers obtained earlier follow) and flushes the old one,
+and a provider the service installed itself is never replaced.
 
 ---
 
@@ -527,11 +546,12 @@ sequenceDiagram
     alt handler is None or not unary_unary
         CSI -->> Chan: return handler unchanged (streaming RPCs pass through)
     else unary_unary handler
-        CSI ->> CSI: _context_from_metadata(invocation_metadata)\ngenerates request_id/correlation_id if absent
+        CSI ->> CSI: start SERVER span (traceparent from metadata),\nnamed after the bounded grpc_method
+        CSI ->> CSI: _context_from_metadata(invocation_metadata)\ngenerates request_id/correlation_id if absent, trace_id from the span
         CSI ->> CSI: bind_request_context(rpc_context)
         CSI ->>+ H: original_behavior(request, context)
         H -->>- CSI: response (or raises)
-        Note over CSI: finally: platform_grpc_* recorded (handled, handling_seconds, sizes, inflight)<br/>logger.info("grpc_request_completed", ...)<br/>reset_request_context(token)
+        Note over CSI: finally: platform_grpc_* recorded (handled, handling_seconds, sizes, inflight)<br/>grpc_request log (method, grpc_code, duration_ms, request_id, identity)<br/>reset_request_context(token)<br/>span: rpc.response.status_code, rpc.grpc.status_code; Error for non-OK
         CSI -->>- Chan: response
     end
 
@@ -549,7 +569,7 @@ details `"Exception calling application: <message>"`, and logs the traceback wit
 The interceptor stops both: if the handler chose a status (`context.abort`, or `set_code` then
 raise) it re-aborts with that code and its details; otherwise it logs one ERROR
 `unclassified error` entry (`classified=false`, `trace_id`, `request_id`, `service`,
-`grpc_method`, `grpc_code=INTERNAL`, `error_type` / `error_chain`, `stack`; never the message)
+`grpc_method`, `grpc_code=Internal`, `error_type` / `error_chain`, `stack`; never the message)
 and aborts with `INTERNAL "internal server error"`. An unclassified exception still counts in
 `platform_grpc_panics_total` (grpc-python's equivalent of a Go handler panic), now with code
 `Internal`. This is platform-gincommon's error-sanitizer contract.
@@ -570,22 +590,24 @@ logs flowing through Promtail into Loki) — see `make docker-up` / `make run` i
 ```mermaid
 graph LR
     subgraph app["examples/fastapi_service (or any consuming service)"]
-        ctxmw["ContextMiddleware\nrequest_id / correlation_id / tenant_id / user_id"]
+        tracemw["TracingMiddleware\nserver span METHOD route"]
+        ctxmw["ContextMiddleware\nrequest_id / correlation_id / tenant_id / user_id / trace_id"]
+        logmw["LoggingMiddleware\nhttp_request access log"]
         promw["PrometheusMiddleware"]
-        logger["structlog JSON logs\n(get_logger, stdout)"]
-        tracer["OTel spans\n(FastAPIInstrumentor)"]
+        logger["structlog, gincommon (Zap) layout\nJSON on stderr (console in dev/local)"]
     end
 
     subgraph local["Local stack — docker-compose.yml"]
-        logfile["logs/app.log\n(stdout teed by `make run`)"]
+        logfile["logs/app.log\n(LOG_FILE, JSON)"]
         promtail["promtail"]
         loki["loki :3100"]
-        prometheus["prometheus :9090\nscrapes host.docker.internal:APP_PORT/metrics"]
+        prometheus["prometheus :9090\nscrapes host.docker.internal:APP_PORT/metrics\n+ vendored platform rules"]
         collector["otel-collector :4317/:4318\n(OTLP/gRPC + HTTP)"]
         tempo["tempo :3200"]
         grafana["grafana :3000\n(Prometheus + Loki + Tempo datasources\ntrace <-> log correlation provisioned)"]
     end
 
+    logmw --> logger
     logger --> logfile
     logfile --> promtail
     promtail --> loki
@@ -594,11 +616,11 @@ graph LR
     promw --> prometheus
     prometheus --> grafana
 
-    tracer -->|"OTLPSpanExporter\n(only if OTLP_ENDPOINT / settings.otlp_endpoint set)"| collector
+    tracemw -->|"OTLPSpanExporter\n(OTEL_EXPORTER_OTLP_ENDPOINT, default localhost:4317)"| collector
     collector --> tempo
     tempo --> grafana
 
-    ctxmw -.->|"request_id/correlation_id\ncarried in log fields"| logger
+    ctxmw -.->|"request_id / trace_id\ncarried in log fields"| logger
 ```
 
 ---
@@ -742,7 +764,7 @@ not provided by this library today — see [Platform contract](#platform-contrac
 |-----------|-------------|--------|----------|
 | **Prometheus metrics** | `settings.enable_metrics=False` | `PrometheusMiddleware` never installed, `/metrics` route absent (404) | No recording anywhere; no crash |
 | **OTLP tracing export** | Collector unreachable | `BatchSpanProcessor` retries asynchronously in a background thread; logs `Transient error ... retrying` | Request handling is never blocked or failed by export failures |
-| **OTLP tracing export** | `otlp_endpoint` unset | No error, no warning | Spans created with valid trace IDs but never exported |
+| **OTLP tracing export** | Export disabled (`OTEL_EXPORTER_OTLP_ENDPOINT=none` / `OTEL_TRACES_EXPORTER=none`) | `otel_tracing_initialized` reports `exporter: disabled (no endpoint)` | Spans created with valid trace IDs but never exported |
 | **Structured logging** | N/A | `get_logger()` always returns a usable logger; there is no "nil logger" failure mode in this library | — |
 | **RBAC** | `RequireRole`/`RequireAnyRole`/`RequireAllRoles` check fails | `ForbiddenException` → `403` `platform/forbidden` problem via the registered exception handler | Does not affect other routes or middleware |
 | **Missing/unbound context** | Code calls `get_request_context()` outside `ContextMiddleware` or `request_context_scope` (e.g. a detached background task) | Raises `LookupError` | Use `get_request_context_or_none()` or the individual `get_*` accessors, which return `None`/`()`/`""` instead |
@@ -765,8 +787,8 @@ anything, but produces broken tracing, misleading metrics, or an unintended trus
 | **Requests enter through a trusted API gateway** | `ContextMiddleware` reads `x-user-id` / `x-tenant-id` / `x-tenant-roles` verbatim from headers — it does not verify them cryptographically. A client that can reach the service directly can claim any identity. |
 | **`/health`, `/live`, `/ready` are never wrapped in an auth-requiring dependency** | They are registered without any RBAC/auth dependency by design, so load balancer and k8s probes (which don't send identity headers) always succeed. Adding `Depends(require_authenticated_user)` to a health route breaks liveness/readiness probing. |
 | **Outbound calls use `create_platform_http_client()` (or manually propagate headers)** | Without it, `traceparent`/`x-request-id`/`x-correlation-id` don't reach the next service — the distributed trace and cross-service log correlation break at that call boundary. |
-| **`OTLP_ENDPOINT` / `settings.otlp_endpoint` is set wherever traces are expected** | Tracing is silently a no-op (spans recorded, never exported) when unset — there is no error to alert on. |
-| **`app_name` is set per service (via `PlatformSettings` or `create_platform_app(app_name=...)`)** | Used as the FastAPI title and the OTel `service.name` resource attribute (Tempo's service map, Grafana's trace search). It is *not* applied as a Prometheus const label — see the metrics cardinality note above for why Prometheus `job`/`instance` labels, not this library, distinguish services in dashboards. |
+| **`OTEL_EXPORTER_OTLP_ENDPOINT` points at the collector wherever traces are expected** | The default is `localhost:4317` (gincommon's); in a pod without a local collector, set it, or spans are retried and dropped (`otel_error`). |
+| **`app_name` is set per service (via `PlatformSettings` or `create_platform_app(app_name=...)`)** | Used as the FastAPI title and the OTel `service.name` resource attribute (Tempo's service map, Grafana's trace search). It is also the `service` const label of every `platform_*` metric (the observability standard). |
 | **gRPC streaming RPCs bind context manually if they need it** | `ContextServerInterceptor` binds context for unary-unary calls only; a streaming handler reading `get_request_context()` without first calling `request_context_scope` will raise `LookupError`. |
 
 ---

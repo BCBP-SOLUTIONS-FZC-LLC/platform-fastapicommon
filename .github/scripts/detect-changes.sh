@@ -11,10 +11,9 @@
 #
 # Documentation = any *.md file, or a *.mmd diagram under docs/architecture/
 # (docs.yml checks those). NOT documentation: anything under
-# docs/observability/ (the generated metrics inventory there is checked by
-# tests/unit/test_metrics_inventory.py — `make metrics-lint` — which only the
-# required validate-quality / validate-test jobs run), and any other file under
-# docs/architecture/.
+# docs/observability/ (the generated metric-registry.md there is checked by
+# `make metrics-lint` and `make gincommon-parity`, which only the required
+# validate-quality job runs), and any other file under docs/architecture/.
 #
 # Every path of the change is judged: the diff runs with --no-renames, so a
 # rename or move is listed as a deletion of the old path plus an addition of

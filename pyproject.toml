@@ -29,10 +29,13 @@ dependencies = [
     "httpx>=0.27",
     "opentelemetry-api>=1.28",
     "opentelemetry-sdk>=1.28",
-    "opentelemetry-instrumentation-fastapi>=0.49b0",
     "opentelemetry-instrumentation-grpc>=0.49b0",
     "opentelemetry-exporter-otlp-proto-grpc>=1.28",
 ]
+
+[project.scripts]
+# Python port of platform-gincommon's cmd/metricslint (check / refs / registry / inventory).
+fastapicommon-metricslint = "fastapicommon.metrics.lint:main"
 
 [project.optional-dependencies]
 grpc = ["grpcio>=1.62"]

@@ -1,6 +1,7 @@
 # Reusable workflow — quality gate.
-# workflow hygiene · lock · format · lint · types · docs · CI script tests ·
-# vulnerabilities · Dockerfile pins · packaging.
+# workflow hygiene · lock · format · lint · types · observability standard ·
+# gincommon parity · docs · CI script tests · vulnerabilities · Dockerfile pins ·
+# packaging.
 # Called by ci.yml and release.yml. Must pass before push/release; does NOT
 # gate trivy or smoke (those only need validate-test.yml). Ported from
 # platform-gincommon (via platform-eventcommon's Python port). The emitted
@@ -24,6 +25,14 @@ name: Validate / Quality
         type: boolean
         required: false
         default: false
+      require_gincommon_parity:
+        description: >-
+          Fail (instead of warn) when platform-gincommon cannot be checked out for the
+          parity step — set on pushes to main and by release.yml, so nothing is merged or
+          released without the comparison; PRs (forks have no secrets) only warn.
+        type: boolean
+        required: false
+        default: false
     secrets:
       # The only secret this workflow reads (checkout of a private repo;
       # github.token is the fallback). Callers pass it explicitly — no
@@ -37,6 +46,9 @@ permissions:
 
 env:
   FORCE_JAVASCRIPT_ACTIONS_TO_NODE24: 'true'
+  # The platform-gincommon release whose Platform Observability Registry and reference
+  # Prometheus rules are vendored here byte for byte (the gincommon parity step below).
+  GINCOMMON_REF: v2.0.0
 
 jobs:
   quality:
@@ -44,6 +56,10 @@ jobs:
     if: ${{ !inputs.skip }}
     runs-on: ubuntu-latest
     timeout-minutes: 15
+    env:
+      # Whether the private platform-gincommon repo can be checked out (parity step); a step's
+      # `if:` cannot read its own env, hence job level. Only the boolean, never the token.
+      HAS_REPO_READ_TOKEN: ${{ secrets.CI_REPO_READ_TOKEN != '' }}
     steps:
       - name: Checkout
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
@@ -95,6 +111,50 @@ jobs:
 
       - name: Type check (mypy --strict)
         run: uv run --no-sync mypy
+
+      # Enterprise Platform Observability Standard (gincommon's `make metrics-lint`): the
+      # vendored registry's self-check, the reference rules referencing registered
+      # platform_* names only, promtool check + unit tests of those rules (digest-pinned
+      # prom/prometheus image), and docs/observability/metric-registry.md drift.
+      # Emitted-metric compliance runs in validate-test (test_metrics_compliance.py).
+      - name: Observability standard
+        run: |
+          if ! make metrics-lint; then
+            echo "::error file=src/fastapicommon/metrics/registry.json,title=Observability standard::make metrics-lint failed — run it locally (make metrics-inventory regenerates the inventory)."
+            exit 1
+          fi
+
+      # Go is the source of truth: registry.json, docker/prometheus/rules and the generated
+      # metric-registry.md must equal platform-gincommon's at GINCOMMON_REF. The private repo
+      # is checked out with CI_REPO_READ_TOKEN, then moved out of the workspace so nothing else
+      # (ruff, pytest) sees it. Without the token (a fork PR) the step warns — never a silent
+      # pass; on main and for a release it fails.
+      - name: Check out platform-gincommon (parity)
+        id: go-checkout
+        if: env.HAS_REPO_READ_TOKEN == 'true'
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          repository: BCBP-SOLUTIONS-FZC-LLC/platform-gincommon
+          ref: ${{ env.GINCOMMON_REF }}
+          path: .platform-gincommon
+          persist-credentials: false
+          token: ${{ secrets.CI_REPO_READ_TOKEN }}
+
+      - name: gincommon parity (registry, reference rules, inventory)
+        run: |
+          if [ "${GO_CHECKOUT}" != success ]; then
+            if [ "${REQUIRE_PARITY}" = true ]; then
+              echo "::error title=gincommon parity not checked::platform-gincommon ${GINCOMMON_REF} could not be checked out (is CI_REPO_READ_TOKEN set, with read access to platform-gincommon?) — required on main and for a release."
+              exit 1
+            fi
+            echo "::warning title=gincommon parity not checked::CI_REPO_READ_TOKEN is not available to this run (fork PR?) — the vendored registry and rules were not compared with platform-gincommon ${GINCOMMON_REF}."
+            exit 0
+          fi
+          mv .platform-gincommon "${RUNNER_TEMP}/platform-gincommon"
+          make gincommon-parity GINCOMMON_DIR="${RUNNER_TEMP}/platform-gincommon"
+        env:
+          GO_CHECKOUT: ${{ steps.go-checkout.outcome }}
+          REQUIRE_PARITY: ${{ inputs.require_gincommon_parity }}
 
       # Architecture diagrams: every docs/architecture/mermaid/*.mmd must be
       # embedded byte-identically in ARCHITECTURE.md. ci.yml skips this job on

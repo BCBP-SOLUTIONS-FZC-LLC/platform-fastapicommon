@@ -17,11 +17,12 @@ sequenceDiagram
     alt handler is None or not unary_unary
         CSI -->> Chan: return handler unchanged (streaming RPCs pass through)
     else unary_unary handler
-        CSI ->> CSI: _context_from_metadata(invocation_metadata)\ngenerates request_id/correlation_id if absent
+        CSI ->> CSI: start SERVER span (traceparent from metadata),\nnamed after the bounded grpc_method
+        CSI ->> CSI: _context_from_metadata(invocation_metadata)\ngenerates request_id/correlation_id if absent, trace_id from the span
         CSI ->> CSI: bind_request_context(rpc_context)
         CSI ->>+ H: original_behavior(request, context)
         H -->>- CSI: response (or raises)
-        Note over CSI: finally: platform_grpc_* recorded (handled, handling_seconds, sizes, inflight)<br/>logger.info("grpc_request_completed", ...)<br/>reset_request_context(token)
+        Note over CSI: finally: platform_grpc_* recorded (handled, handling_seconds, sizes, inflight)<br/>grpc_request log (method, grpc_code, duration_ms, request_id, identity)<br/>reset_request_context(token)<br/>span: rpc.response.status_code, rpc.grpc.status_code; Error for non-OK
         CSI -->>- Chan: response
     end
 

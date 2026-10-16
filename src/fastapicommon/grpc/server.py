@@ -4,9 +4,13 @@ import contextlib
 import time
 import uuid
 from collections.abc import Callable, Iterator
+from dataclasses import replace
 from typing import TYPE_CHECKING, Any
 
 import grpc
+from opentelemetry import context as otel_context
+from opentelemetry import propagate, trace
+from opentelemetry.trace import SpanKind, Status, StatusCode
 
 from fastapicommon.auth.headers import (
     CORRELATION_ID_HEADER,
@@ -25,8 +29,10 @@ from fastapicommon.context import (
 )
 from fastapicommon.exceptions.handlers import error_chain_types, stack_frames
 from fastapicommon.logging import get_logger
+from fastapicommon.logging.sanitize import sanitize_fields, sanitize_log_value
 from fastapicommon.metrics.platform import (
     TRANSPORT_GRPC,
+    UNKNOWN,
     grpc_code_label,
     grpc_method_label,
     init_metrics_from_settings,
@@ -37,11 +43,32 @@ from fastapicommon.metrics.platform import (
 if TYPE_CHECKING:
     from fastapicommon.config import PlatformSettings
 
-_logger = get_logger(__name__)
+_logger = get_logger("fastapicommon.grpc")
 _unclassified_log = get_logger("fastapicommon.exceptions")
 
+TRACER_SCOPE = "platform-fastapicommon/grpc"
+
+#: Go ``isClientError``: these codes log ``grpc_request`` at warn, other non-OK codes at error.
+_CLIENT_CODES = frozenset(
+    {
+        "InvalidArgument",
+        "NotFound",
+        "AlreadyExists",
+        "PermissionDenied",
+        "Unauthenticated",
+        "ResourceExhausted",
+        "FailedPrecondition",
+        "Aborted",
+        "OutOfRange",
+        "Canceled",
+        "DeadlineExceeded",
+    }
+)
 #: The fixed message of every INTERNAL status the library produces (gincommon's MsgInternal).
 MSG_INTERNAL = "internal server error"
+
+#: grpc.StatusCode by its Go-style name (``NotFound``), for the canonical span attributes.
+_STATUS_BY_GO_NAME = {grpc_code_label(code.name): code for code in grpc.StatusCode}
 
 
 def _explicit_code(context: Any) -> Any:
@@ -61,7 +88,7 @@ def _log_unclassified_grpc(method: str, exc: BaseException, service: str) -> Non
         "trace_id": context.trace_id if context is not None else "",
         "request_id": context.request_id if context is not None else "",
         "grpc_method": grpc_method_label(method),
-        "grpc_code": "INTERNAL",
+        "grpc_code": grpc_code_label("INTERNAL"),
         "error_type": "",
         "error_chain": [],
         "stack": stack_frames(exc),
@@ -113,6 +140,72 @@ def _platform_grpc_code(context: Any, raised: bool) -> tuple[str, bool]:
     return grpc_code_label(name), False
 
 
+def _split_full_method(full: str) -> tuple[str, str]:
+    """Go ``splitFullMethod``: ``/pkg.Service/Method`` → (``pkg.Service``, ``Method``)."""
+    stripped = full.lstrip("/")
+    service, _, method = stripped.rpartition("/")
+    return service, method or "unknown"
+
+
+def _start_server_span(method: str, metadata: tuple[tuple[str, str], ...]) -> trace.Span:
+    """Go ``startServerSpan``: a server span named after the bounded method; an unrecognised
+    method is ``rpc.method=_OTHER`` with the sanitized original in ``rpc.method_original``."""
+    carrier = {key.lower(): value for key, value in metadata if isinstance(value, str)}
+    parent = propagate.extract(carrier)
+    name = grpc_method_label(method)
+    span = trace.get_tracer(TRACER_SCOPE).start_span(name, context=parent, kind=SpanKind.SERVER)
+    if name == UNKNOWN:
+        span.set_attributes(
+            {
+                "rpc.system.name": "grpc",
+                "rpc.method": "_OTHER",
+                "rpc.method_original": sanitize_log_value(method or ""),
+            }
+        )
+    else:
+        service, rpc_method = _split_full_method(name)
+        span.set_attributes(
+            {"rpc.system.name": "grpc", "rpc.service": service, "rpc.method": rpc_method}
+        )
+    return span
+
+
+def _finish_server_span(span: trace.Span, code: str, error: BaseException | None) -> None:
+    """Go ``finishServerSpan``: ``rpc.response.status_code`` (canonical, e.g. ``NOT_FOUND``) and
+    the legacy integer ``rpc.grpc.status_code``; Error status for any non-OK outcome. An
+    exception is recorded with its type only (never the message)."""
+    status = _STATUS_BY_GO_NAME.get(code, grpc.StatusCode.UNKNOWN)
+    span.set_attributes(
+        {"rpc.response.status_code": status.name, "rpc.grpc.status_code": int(status.value[0])}
+    )
+    if error is not None:
+        span.add_event("exception", {"exception.type": type(error).__qualname__})
+    if code != "OK":
+        span.set_status(Status(StatusCode.ERROR, "panic" if error is not None else code))
+
+
+def _log_grpc_request(method: str, code: str, seconds: float, rpc_context: RequestContext) -> None:
+    """Go ``logGRPCRequest``: ``grpc_request`` with the bounded method, the Go code name,
+    ``duration_ms``, ``request_id`` and the identity; info for OK, warn for client codes, error
+    otherwise."""
+    fields: dict[str, Any] = {
+        "method": grpc_method_label(method),
+        "grpc_code": code,
+        "duration_ms": seconds * 1000.0,
+        "request_id": rpc_context.request_id,
+    }
+    if rpc_context.user_id or rpc_context.tenant_id:
+        fields["user_id"] = rpc_context.user_id
+        fields["tenant_id"] = rpc_context.tenant_id
+    safe = sanitize_fields(fields)
+    if code == "OK":
+        _logger.info("grpc_request", **safe)
+    elif code in _CLIENT_CODES:
+        _logger.warning("grpc_request", **safe)
+    else:
+        _logger.error("grpc_request", **safe)
+
+
 def _context_from_metadata(metadata: tuple[tuple[str, str], ...]) -> RequestContext:
     headers = {key.lower(): value for key, value in metadata}
     request_id = headers.get(REQUEST_ID_HEADER) or str(uuid.uuid4())
@@ -130,8 +223,14 @@ def _context_from_metadata(metadata: tuple[tuple[str, str], ...]) -> RequestCont
 
 
 class ContextServerInterceptor(grpc.ServerInterceptor):  # type: ignore[misc]
-    """Binds a RequestContext (from inbound metadata) around each unary-unary RPC, records the
-    ``platform_grpc_*`` metrics, and logs completion.
+    """Traces, binds a RequestContext (from inbound metadata) around, measures and logs each
+    unary-unary RPC — platform-gincommon's tracing, context, metrics and logging interceptors in
+    one.
+
+    The server span continues the inbound ``traceparent`` and is named after the bounded
+    ``grpc_method`` (see :func:`_start_server_span`); the RequestContext carries its trace id.
+    Each RPC is logged as ``grpc_request`` (``method``, ``grpc_code``, ``duration_ms``,
+    ``request_id``, ``user_id`` / ``tenant_id``).
 
     Once metrics are initialized it records ``platform_grpc_server_handled_total``,
     ``platform_grpc_server_handling_seconds``, request / response size, in-flight,
@@ -171,21 +270,28 @@ class ContextServerInterceptor(grpc.ServerInterceptor):  # type: ignore[misc]
 
         def wrapped_behavior(request: Any, context: grpc.ServicerContext) -> Any:
             metadata = tuple(context.invocation_metadata() or ())
+            span = _start_server_span(method, metadata)
+            span_token = otel_context.attach(trace.set_span_in_context(span))
             rpc_context = _context_from_metadata(metadata)
+            span_context = span.get_span_context()
+            if span_context.is_valid:
+                rpc_context = replace(
+                    rpc_context, trace_id=trace.format_trace_id(span_context.trace_id)
+                )
             token = bind_request_context(rpc_context)
             platform = platform_metrics()
             grpc_method = grpc_method_label(method)
             if platform is not None:
                 platform.grpc_inflight_inc(grpc_method)
             start = time.perf_counter()
-            status_code = "OK"
+            error: BaseException | None = None
             response: Any = None
             unclassified = False
             try:
                 response = original_behavior(request, context)
                 return response
             except Exception as exc:
-                status_code = "ERROR"
+                error = exc
                 # Raises the abort (INTERNAL for an unclassified exception, else the
                 # handler's own status); falls through only for a context that cannot abort.
                 unclassified = _explicit_code(context) is None
@@ -193,12 +299,12 @@ class ContextServerInterceptor(grpc.ServerInterceptor):  # type: ignore[misc]
                 raise
             finally:
                 duration = time.perf_counter() - start
+                code, panicked = _platform_grpc_code(context, error is not None)
+                # An unclassified exception is grpc-python's handler panic (Go: a recovered
+                # panic), now sent as INTERNAL.
+                panicked = panicked or unclassified
                 if platform is not None:
                     platform.grpc_inflight_dec(grpc_method)
-                    code, panicked = _platform_grpc_code(context, status_code == "ERROR")
-                    # An unclassified exception is grpc-python's handler panic (Go: a
-                    # recovered panic), now sent as INTERNAL.
-                    panicked = panicked or unclassified
                     platform.record_grpc(
                         grpc_method,
                         code,
@@ -208,13 +314,13 @@ class ContextServerInterceptor(grpc.ServerInterceptor):  # type: ignore[misc]
                     )
                     if panicked:
                         platform.record_grpc_panic(grpc_method)
-                _logger.info(
-                    "grpc_request_completed",
-                    method=method,
-                    status_code=status_code,
-                    duration_seconds=duration,
-                )
+                _log_grpc_request(method, code, duration, rpc_context)
                 reset_request_context(token)
+                try:
+                    _finish_server_span(span, code, error if panicked else None)
+                finally:
+                    span.end()
+                    otel_context.detach(span_token)
 
         return grpc.unary_unary_rpc_method_handler(
             wrapped_behavior,

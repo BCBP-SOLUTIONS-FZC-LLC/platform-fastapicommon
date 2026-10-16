@@ -1,11 +1,10 @@
 import pytest
 from fastapi import Depends
 from fastapi.testclient import TestClient
-from opentelemetry.exporter.otlp.proto.grpc.trace_exporter import OTLPSpanExporter
 
 from fastapicommon.auth import CurrentUser, get_current_user
 from fastapicommon.bootstrap import create_platform_app
-from fastapicommon.bootstrap.app import _build_span_exporter
+from fastapicommon.bootstrap.app import _tracing_config
 from fastapicommon.config import PlatformSettings
 from fastapicommon.exceptions import NotFoundException
 
@@ -69,15 +68,21 @@ def test_app_name_override() -> None:
     assert app.title == "override-name"
 
 
-def test_build_span_exporter_none_when_no_otlp_endpoint() -> None:
-    settings = PlatformSettings(_env_file=None)
-    assert _build_span_exporter(settings) is None
-
-
-def test_build_span_exporter_builds_otlp_exporter_when_configured() -> None:
-    settings = PlatformSettings(_env_file=None, otlp_endpoint="localhost:4317")
-    exporter = _build_span_exporter(settings)
-    assert isinstance(exporter, OTLPSpanExporter)
+def test_tracing_config_comes_from_the_settings_identity(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.delenv("OTEL_TRACES_EXPORTER", raising=False)
+    monkeypatch.delenv("OTEL_EXPORTER_OTLP_ENDPOINT", raising=False)
+    settings = PlatformSettings(
+        _env_file=None, app_name="orders-api", build_version="v1.2.3", **IDENTITY
+    )
+    config = _tracing_config(settings, "test")
+    assert (config.service_name, config.service_version) == ("orders-api", "v1.2.3")
+    assert (config.domain, config.environment) == ("iam", "test")
+    assert config.endpoint == "localhost:4317"  # gincommon's default
+    assert not config.provisional
+    override = PlatformSettings(_env_file=None, otlp_endpoint="collector:4317", **IDENTITY)
+    assert _tracing_config(override, "test").endpoint == "collector:4317"
 
 
 def test_create_platform_app_wires_otlp_exporter_without_raising() -> None:
