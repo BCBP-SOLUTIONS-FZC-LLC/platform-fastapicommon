@@ -367,6 +367,14 @@
       "max_values": 100,
       "cardinality": "bounded by configured topics"
     },
+    "transport": {
+      "description": "Inbound transport of the request: http or grpc.",
+      "values": [
+        "http",
+        "grpc"
+      ],
+      "cardinality": "fixed"
+    },
     "version": {
       "description": "Build version of the emitting binary (Config.BuildVersion / BUILD_VERSION; unknown when unset). Only on build-info metrics: a per-build label on every series would multiply series on each deploy.",
       "pattern": "^[0-9A-Za-z][0-9A-Za-z._+-]{0,63}$",
@@ -611,6 +619,20 @@
       ],
       "aggregation": "sum by (domain, service, environment) of increase().",
       "owner": "platform-gincommon"
+    },
+    {
+      "name": "platform_unclassified_errors_total",
+      "tier": "platform",
+      "owner": "platform-gincommon",
+      "type": "counter",
+      "status": "approved",
+      "help": "Errors that reached the top-level error handler unclassified and were answered as a generic internal error (HTTP 500 internal-error, gRPC Internal): a programming defect.",
+      "labels": [
+        "transport"
+      ],
+      "aggregation": "Alert on any: sum by (domain, service, environment) (increase(platform_unclassified_errors_total[5m])) > 0. Trend: sum by (domain, service, transport) (rate(platform_unclassified_errors_total[1h])).",
+      "cardinality": "transport (2).",
+      "governance_notes": "Approved 2026-10-16 (platform-gincommon LLD OQ-25). Emitted by platform-gincommon (HTTP error handler, gRPC error sanitizer) and platform-fastapicommon (UnhandledErrorMiddleware, gRPC interceptor). Both transports are initialised to 0 so the first error is visible to increase(). Which route or method failed is in the retained 'unclassified error' log event; it is deliberately not a label."
     },
     {
       "name": "platform_messages_received_total",
