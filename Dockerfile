@@ -52,9 +52,14 @@ RUN apt-get update \
 # The runtime image never invokes pip (dependencies are installed in the builder stage and
 # copied in below) — strip it from the base image. pip vendors its own pinned copies of
 # urllib3, msgpack and setuptools, which Trivy reports even when pip itself is current.
+# Nor does a server use the stdlib's interactive / GUI parts (ensurepip, IDLE, Tk — no Tk
+# libraries are installed anyway — turtle demos, pydoc's topic data): about 7 MB.
 RUN PIP_PKG_DIR="$(python -c 'import pip, os; print(os.path.dirname(pip.__file__))')" \
+    && STDLIB="$(dirname "$(dirname "$PIP_PKG_DIR")")" \
     && rm -rf "$PIP_PKG_DIR" "$(dirname "$PIP_PKG_DIR")"/pip-*.dist-info \
-    && rm -f /usr/local/bin/pip /usr/local/bin/pip3 /usr/local/bin/pip3.*
+    && rm -f /usr/local/bin/pip /usr/local/bin/pip3 /usr/local/bin/pip3.* \
+    && rm -rf "$STDLIB"/ensurepip "$STDLIB"/idlelib "$STDLIB"/tkinter "$STDLIB"/turtledemo \
+        "$STDLIB"/pydoc_data /usr/local/bin/idle3* /usr/local/bin/pydoc3*
 
 WORKDIR /app
 

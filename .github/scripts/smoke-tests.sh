@@ -27,11 +27,15 @@ cleanup() { docker rm -f "${NAME}" >/dev/null 2>&1 || true; }
 trap cleanup EXIT
 
 echo "::group::Image size check (linux/amd64)"
-# python:3.14-slim plus fastapi/starlette/pydantic, grpcio, uvicorn[standard]
-# and opentelemetry is ~65 MB as Docker reports .Size (compressed);
-# the limit catches regressions (build tooling, uv, pip,
-# tests or a virtualenv leaking into the runtime stage), not arch variance.
-MAX_MB=150
+# .Size is the UNCOMPRESSED size on CI's runners (classic image store) but the
+# compressed size under Docker Desktop's containerd store (about 60 MB here), so
+# a local run is far more lenient than CI. Measured uncompressed (linux/amd64):
+# python:3.14-slim is ~120 MB, plus fastapi/starlette/pydantic, grpcio (16 MB,
+# needed by the OTLP exporter), opentelemetry and plain uvicorn: ~154 MB. The
+# limit (about 10% headroom) catches regressions: build tooling, uv, pip, tests,
+# a virtualenv or uvicorn[standard] leaking into the runtime stage. It is above
+# gincommon's 150 MB, which budgets a Go binary, not a Python runtime.
+MAX_MB=170
 size=$(docker image inspect "${IMAGE}" --format='{{.Size}}')
 mb=$((size / 1024 / 1024))
 echo "Image size: ${mb} MB (limit: ${MAX_MB} MB)"

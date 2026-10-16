@@ -129,6 +129,14 @@ and the span name.
 
 ### Changed — CI/CD pipeline (parity with `platform-gincommon`)
 
+- **Example image budget: 170 MB** (uncompressed, linux/amd64), measured for this Python image
+  (~154 MB) instead of gincommon's 150 MB Go budget, which it never met: the limit had been
+  calibrated on the compressed size Docker Desktop reports. To shrink it, the `examples` extra
+  installs plain `uvicorn` instead of `uvicorn[standard]` (no uvloop, httptools, watchfiles,
+  websockets, PyYAML or python-dotenv: about 26 MB; `make run` keeps them through the dev
+  group), and the runtime stage drops the stdlib's ensurepip, IDLE, Tk, turtle demos and pydoc
+  topic data.
+
 - `.github/` now follows platform-gincommon's pipeline, translated to Python as
   platform-pgcommon-py and platform-eventcommon did: reusable `validate-test.yml` /
   `validate-quality.yml` (replacing `validate.yml`, `quality.yml` and `test.yml`; the

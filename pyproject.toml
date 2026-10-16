@@ -39,9 +39,11 @@ fastapicommon-metricslint = "fastapicommon.metrics.lint:main"
 
 [project.optional-dependencies]
 grpc = ["grpcio>=1.62"]
-# Not part of the library's public API — exists only so the Dockerfile (plain pip, no
-# uv) can install what examples/fastapi_service needs: `pip install ".[grpc,examples]"`.
-examples = ["uvicorn[standard]>=0.29"]
+# Not part of the library's public API — exists only so the Dockerfile can install what
+# examples/fastapi_service needs. Plain uvicorn: the image needs neither --reload (watchfiles)
+# nor uvloop / httptools / websockets / PyYAML / python-dotenv (about 26 MB); `make run` uses
+# the dev group's uvicorn[standard].
+examples = ["uvicorn>=0.29"]
 
 [project.urls]
 Repository = "https://github.com/BCBP-SOLUTIONS-FZC-LLC/platform-fastapicommon"

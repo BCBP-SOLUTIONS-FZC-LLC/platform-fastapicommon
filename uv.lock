@@ -1365,7 +1365,7 @@ dependencies = [
 
 [package.optional-dependencies]
 examples = [
-    { name = "uvicorn", extra = ["standard"] },
+    { name = "uvicorn" },
 ]
 grpc = [
     { name = "grpcio" },
@@ -1403,7 +1403,7 @@ requires-dist = [
     { name = "pydantic-settings", specifier = ">=2.2" },
     { name = "starlette", specifier = ">=0.46" },
     { name = "structlog", specifier = ">=24.1" },
-    { name = "uvicorn", extras = ["standard"], marker = "extra == 'examples'", specifier = ">=0.29" },
+    { name = "uvicorn", marker = "extra == 'examples'", specifier = ">=0.29" },
 ]
 provides-extras = ["grpc", "examples"]
 
