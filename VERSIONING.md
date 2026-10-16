@@ -4,7 +4,7 @@ This repository is a **Python package** (`platform-fastapicommon` on PyPI, impor
 
 ## Semantic versioning (SemVer)
 
-We use [SemVer 2.0.0](https://semver.org/): `MAJOR.MINOR.PATCH` (e.g. `v0.2.0`).
+We use [SemVer 2.0.0](https://semver.org/): `MAJOR.MINOR.PATCH` (e.g. `v0.3.0`).
 
 | Bump | When you change | Examples |
 |------|------------------|----------|
@@ -38,9 +38,9 @@ Import **`fastapicommon.<subpackage>`** only. Python cannot enforce this the way
 
 | Version | Status | PyPI | Supported until |
 |---------|--------|------|-----------------|
-| `0.3.x` | **Next** (`[Unreleased]`) | — | Active once released |
-| `0.2.x` | **Current** (from `v0.2.0`) | `platform-fastapicommon==0.2.0` | Security fixes until `0.3.0` ships |
-| `0.1.x` | Superseded | `==0.1.1` | No further releases; upgrade to `0.2.x` |
+| `0.3.x` | **Current** (from `v0.3.0`, 2026-10-17) | `platform-fastapicommon==0.3.0` | Active |
+| `0.2.x` | Superseded | `==0.2.0` | No further releases; upgrade to `0.3.x` |
+| `0.1.x` | Superseded | `==0.1.1` | No further releases; upgrade to `0.3.x` |
 
 Releases up to `v0.2.0` predate release signing and `SHA256SUMS`. When `1.0.0` ships, a new MAJOR line gives the previous major **security fixes only** for a period the platform team defines (typically 6 months).
 
@@ -49,16 +49,16 @@ Releases up to `v0.2.0` predate release signing and `SHA256SUMS`. When `1.0.0` s
 Pin in your service's `pyproject.toml` / requirements:
 
 ```bash
-pip install "platform-fastapicommon==0.2.0"          # or "platform-fastapicommon[grpc]==0.2.0"
-uv add "platform-fastapicommon[grpc]==0.2.0"
+pip install "platform-fastapicommon==0.3.0"          # or "platform-fastapicommon[grpc]==0.3.0"
+uv add "platform-fastapicommon[grpc]==0.3.0"
 ```
 
 | Pin style | Use when |
 |-----------|----------|
-| `==0.2.0` | Production; exact reproducibility (recommended while `0.y.z`) |
-| `~=0.2.0` | Production; accept PATCH updates on `0.2.x` |
-| `>=0.2,<0.3` | The same, written as a range |
-| unpinned / `>=0.2` | Experiments only; never in production, especially pre-1.0 |
+| `==0.3.0` | Production; exact reproducibility (recommended while `0.y.z`) |
+| `~=0.3.0` | Production; accept PATCH updates on `0.3.x` |
+| `>=0.3,<0.4` | The same, written as a range |
+| unpinned / `>=0.3` | Experiments only; never in production, especially pre-1.0 |
 
 pip resolves versions from **[PyPI](https://pypi.org/project/platform-fastapicommon/)**. The distribution is `platform-fastapicommon`; the import is `fastapicommon` (`fastapicommon` alone was rejected by PyPI as too similar to an unrelated package).
 
