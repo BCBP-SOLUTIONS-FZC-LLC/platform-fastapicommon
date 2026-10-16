@@ -130,7 +130,7 @@ dependency.
 | Symbol | Description |
 |--------|-------------|
 | `TracingMiddleware` | One OTel SERVER span per request, continuing the inbound `traceparent`; renamed `METHOD route` (Gin syntax, e.g. `GET /items/:item_id`) with gincommon's attributes and status rules |
-| `ContextMiddleware` | Reads auth/tracing headers, generates `request_id`/`correlation_id` if absent, binds `RequestContext`, echoes both ids back on the response |
+| `ContextMiddleware` | Reads auth/tracing headers, validates `x-request-id` / `x-correlation-id` (`resolve_ids`: an invalid request id becomes a new UUID, an invalid correlation id the request id), binds `RequestContext`, echoes both ids back on the response |
 | `LoggingMiddleware` | The `http_request` access log (gincommon's `LoggingMiddleware`): route template, status, `duration_ms`, ids, verified or `claimed_*` identity; level by status |
 | `TimeoutMiddleware(timeout_seconds=30.0)` | Runs the app as a task and returns a 503 `service-unavailable` problem (`REQUEST_TIMEOUT`) if no response has started within the timeout; a started (streaming) response is not cut off |
 
@@ -552,7 +552,7 @@ sequenceDiagram
         CSI -->> Chan: return handler unchanged (streaming RPCs pass through)
     else unary_unary handler
         CSI ->> CSI: start SERVER span (traceparent from metadata),\nnamed after the bounded grpc_method
-        CSI ->> CSI: _context_from_metadata(invocation_metadata)\ngenerates request_id/correlation_id if absent, trace_id from the span
+        CSI ->> CSI: _context_from_metadata(invocation_metadata)\nvalidates request_id/correlation_id (resolve_ids) or generates them, trace_id from the span
         CSI ->> CSI: bind_request_context(rpc_context)
         CSI ->>+ H: original_behavior(request, context)
         H -->>- CSI: response (or raises)

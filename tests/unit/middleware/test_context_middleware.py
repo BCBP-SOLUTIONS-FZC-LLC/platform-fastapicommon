@@ -1,3 +1,4 @@
+import pytest
 from fastapi import FastAPI
 from fastapi.testclient import TestClient
 from opentelemetry import trace as otel_trace
@@ -154,3 +155,23 @@ def test_trace_id_echoed_when_a_real_span_is_active() -> None:
     assert body["trace_id"]
     assert len(body["trace_id"]) == 32
     assert response.headers["X-Trace-ID"] == body["trace_id"]
+
+
+@pytest.mark.parametrize(
+    "bad", ["has a space", "a" * 129, "<script>", "idé".encode(), "   ", "x;y=z"]
+)
+def test_invalid_correlation_id_falls_back_to_request_id(bad: str | bytes) -> None:
+    """Regression: x-correlation-id was echoed on the response and logged verbatim; it is
+    validated like x-request-id now, and an invalid one falls back to the request id."""
+    client = TestClient(_build_app())
+    response = client.get("/whoami", headers={"x-request-id": "req-1", "x-correlation-id": bad})
+    assert response.json()["correlation_id"] == "req-1"
+    assert response.headers["x-correlation-id"] == "req-1"
+
+
+def test_valid_correlation_id_is_kept_with_an_invalid_request_id() -> None:
+    client = TestClient(_build_app())
+    body = client.get(
+        "/whoami", headers={"x-request-id": "bad id", "x-correlation-id": "corr-7"}
+    ).json()
+    assert body["correlation_id"] == "corr-7" and body["request_id"] not in ("bad id", "corr-7")

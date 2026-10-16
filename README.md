@@ -64,7 +64,7 @@ This library **standardises** these concerns once so every service gets:
 
 | Capability | HTTP | gRPC |
 |------------|------|------|
-| **Request/correlation ID** | `ContextMiddleware` — reads `x-request-id`/`x-correlation-id` or generates a UUID; echoes both back | `ContextServerInterceptor` — reads from metadata or generates a UUID |
+| **Request/correlation ID** | `ContextMiddleware` — reads `x-request-id`/`x-correlation-id` (validated: `[A-Za-z0-9._-]`, ≤128 bytes) or generates a UUID; echoes both back | `ContextServerInterceptor` — the same, from metadata |
 | **Tracing** | `TracingMiddleware` — one server span per request, `METHOD route`, gincommon's attributes | `ContextServerInterceptor` — one server span per RPC; `instrument_grpc_client()` for outbound calls |
 | **Metrics** | `PrometheusMiddleware` — the `platform_http_*` metrics of the [observability standard](#platform-observability-standard-metrics); requires `OBSERVABILITY_DOMAIN` | `ContextServerInterceptor` — the `platform_grpc_*` metrics |
 | **Logging** | `LoggingMiddleware` — the `http_request` access log; `get_logger()` in gincommon's layout, enriched with context | Same `get_logger()`; `ContextServerInterceptor` logs `grpc_request` after each call |

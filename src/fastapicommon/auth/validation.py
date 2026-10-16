@@ -6,6 +6,7 @@ identically whether it lands on a Go or a Python route.
 from __future__ import annotations
 
 import re
+import uuid
 
 from fastapicommon.auth.headers import TENANT_ROLES_SEPARATOR
 
@@ -55,6 +56,16 @@ def normalize_request_id(raw: str | None) -> str | None:
     if not _REQUEST_ID_RE.match(s):
         return None
     return s
+
+
+def resolve_ids(raw_request_id: str | None, raw_correlation_id: str | None) -> tuple[str, str]:
+    """The request's ``(request_id, correlation_id)`` from inbound ``x-request-id`` /
+    ``x-correlation-id``, for HTTP and gRPC alike. Both are validated like Go's
+    ``NormalizeRequestID`` (see :func:`normalize_request_id`): an invalid request id is replaced
+    by a new UUID, an invalid or missing correlation id falls back to the request id. Neither
+    raw value is ever echoed, logged or propagated."""
+    request_id = normalize_request_id(raw_request_id) or str(uuid.uuid4())
+    return request_id, normalize_request_id(raw_correlation_id) or request_id
 
 
 def parse_roles(header: str | None) -> tuple[str, ...]:

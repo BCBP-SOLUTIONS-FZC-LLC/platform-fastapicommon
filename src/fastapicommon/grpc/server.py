@@ -4,7 +4,6 @@ import asyncio
 import contextlib
 import inspect
 import time
-import uuid
 from collections.abc import AsyncIterator, Awaitable, Callable, Iterator
 from dataclasses import replace
 from typing import TYPE_CHECKING, Any
@@ -22,6 +21,7 @@ from fastapicommon.auth.headers import (
     TENANT_ROLES_SEPARATOR,
     USER_ID_HEADER,
 )
+from fastapicommon.auth.validation import resolve_ids
 from fastapicommon.context import (
     CurrentUser,
     RequestContext,
@@ -225,8 +225,10 @@ def _log_grpc_request(method: str, code: str, seconds: float, rpc_context: Reque
 
 def _context_from_metadata(metadata: tuple[tuple[str, str], ...]) -> RequestContext:
     headers = {key.lower(): value for key, value in metadata}
-    request_id = headers.get(REQUEST_ID_HEADER) or str(uuid.uuid4())
-    correlation_id = headers.get(CORRELATION_ID_HEADER) or request_id
+    # Validated like HTTP and Go's request_id interceptor (NormalizeRequestID).
+    request_id, correlation_id = resolve_ids(
+        headers.get(REQUEST_ID_HEADER), headers.get(CORRELATION_ID_HEADER)
+    )
     roles_header = headers.get(TENANT_ROLES_HEADER, "")
     roles = tuple(
         role.strip() for role in roles_header.split(TENANT_ROLES_SEPARATOR) if role.strip()

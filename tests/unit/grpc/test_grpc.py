@@ -184,3 +184,15 @@ def test_failing_metric_still_resets_context_and_ends_span(monkeypatch: Any) -> 
     assert get_request_context_or_none() is None
     assert trace.get_current_span() is outer_span
     assert broken.decremented
+
+
+def test_context_from_metadata_validates_ids() -> None:
+    """Regression: gRPC used x-request-id / x-correlation-id verbatim (Go's request_id
+    interceptor applies NormalizeRequestID); invalid ones are replaced like on HTTP."""
+    context = _context_from_metadata(
+        (("x-request-id", "bad id\n"), ("x-correlation-id", "<script>"))
+    )
+    assert context.request_id != "bad id\n" and len(context.request_id) == 36  # a new UUID
+    assert context.correlation_id == context.request_id
+    kept = _context_from_metadata((("x-request-id", "req-9"), ("x-correlation-id", "corr-9")))
+    assert (kept.request_id, kept.correlation_id) == ("req-9", "corr-9")

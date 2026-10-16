@@ -219,6 +219,11 @@ and the span name.
 - **Cheaper logging.** Loggers are cached on first use (level and stack threshold are read per
   entry, so `configure_logging` still applies), and `stacktrace` uses Zap's layout (function,
   then `file:line`, innermost first) without reading source lines: error entries cost about half.
+- **`x-correlation-id` is validated** like `x-request-id` (`[A-Za-z0-9._-]`, at most 128 bytes) on
+  HTTP and gRPC; an invalid one falls back to the request id instead of being echoed on the
+  response, logged and propagated verbatim. On gRPC, `x-request-id` itself was not validated
+  either (Go's request-id interceptor applies `NormalizeRequestID`); an invalid one is now
+  replaced by a new UUID, as on HTTP.
 - Internal: one boolean environment parser (`env_bool`, invalid values warned once), one
   force-flush helper, and a scope flag instead of reading SDK span internals.
 - Internal: one Gin `ClientIP()` (`fastapicommon.middleware.context.client_ip`), one UTF-8

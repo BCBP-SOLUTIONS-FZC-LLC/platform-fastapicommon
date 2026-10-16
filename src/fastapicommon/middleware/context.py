@@ -1,6 +1,5 @@
 from __future__ import annotations
 
-import uuid
 from collections.abc import Mapping
 
 from opentelemetry import trace
@@ -15,7 +14,7 @@ from fastapicommon.auth.headers import (
     TENANT_ROLES_HEADER,
     USER_ID_HEADER,
 )
-from fastapicommon.auth.validation import normalize_header_value, normalize_request_id, parse_roles
+from fastapicommon.auth.validation import normalize_header_value, parse_roles, resolve_ids
 from fastapicommon.context import (
     CurrentUser,
     RequestContext,
@@ -72,8 +71,9 @@ class ContextMiddleware:
             return
         request = Request(scope)
         headers = request.headers
-        request_id = normalize_request_id(headers.get(REQUEST_ID_HEADER)) or str(uuid.uuid4())
-        correlation_id = headers.get(CORRELATION_ID_HEADER) or request_id
+        request_id, correlation_id = resolve_ids(
+            headers.get(REQUEST_ID_HEADER), headers.get(CORRELATION_ID_HEADER)
+        )
         roles = parse_roles(headers.get(TENANT_ROLES_HEADER))
 
         user = CurrentUser(
