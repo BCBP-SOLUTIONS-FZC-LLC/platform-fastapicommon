@@ -204,7 +204,7 @@ dependency.
 
 | Symbol | Description |
 |--------|-------------|
-| `ContextServerInterceptor` | Binds a `RequestContext` from inbound metadata around each **unary-unary** RPC; records gRPC metrics; logs completion. Streaming RPCs pass through unmodified |
+| `ContextServerInterceptor` | Binds a `RequestContext` from inbound metadata around each **unary-unary** RPC; records gRPC metrics; logs completion. **Every** RPC (unary and streaming) has its exceptions sanitized: the handler's own status is kept, any other exception is aborted as `INTERNAL "internal server error"` and logged as `unclassified error` (never the message). Streaming RPCs get no context binding or metrics |
 | `ContextClientInterceptor` | Propagates `x-user-id`/`x-tenant-id`/`x-request-id`/`x-correlation-id` onto outbound unary-unary call metadata from the bound `RequestContext` |
 
 ---
@@ -343,7 +343,9 @@ a generic 500 and logs one structlog ERROR entry, `unclassified error` (logger
 `errorCode`, `error_type` / `error_chain` (exception types along `__cause__` / `__context__` and
 exception-group members, at most 8) and `stack` (`file:line in function` frames, no source lines).
 It **never logs the exception message**, which may carry SQL, PII, tokens or secrets: the same
-contract as platform-gincommon's (its LLD OQ-24). Alert on it.
+contract as platform-gincommon's (its LLD OQ-24). Each one also increments
+`platform_unclassified_errors_total{transport="http"}` (gRPC: `transport="grpc"`), the metric to alert
+on (gincommon LLD OQ-25); the log event is kept for diagnostics.
 
 Starlette's `ServerErrorMiddleware` always re-raises after calling the `Exception` handler, so
 the server would log the traceback *with* the message ("Exception in ASGI application").
@@ -486,7 +488,8 @@ in short: `platform_build_info{version}`; `platform_http_requests_total`,
 `platform_http_request_timeouts_total`; and `platform_grpc_server_handled_total`,
 `platform_grpc_server_handling_seconds`, `platform_grpc_server_request_size_bytes`,
 `platform_grpc_server_response_size_bytes`, `platform_grpc_server_inflight_requests`,
-`platform_grpc_rate_limited_requests_total`, `platform_grpc_panics_total`.
+`platform_grpc_rate_limited_requests_total`, `platform_grpc_panics_total`, and the cross-transport
+`platform_unclassified_errors_total{transport}` (both series initialised to 0).
 
 The platform `route` label is resolved *before* the handler runs by matching the request
 against the app's routes (recursing into `Mount`s), like Gin's `FullPath()`, so the in-flight
@@ -536,10 +539,20 @@ sequenceDiagram
     CCI -->>- Client: response
 ```
 
-`ContextServerInterceptor` only wraps **unary-unary** RPCs. Streaming RPCs (unary-stream,
-stream-unary, stream-stream) are returned unmodified — a streaming handler that needs
-request context must bind it manually with
+`ContextServerInterceptor` binds context and records metrics for **unary-unary** RPCs only.
+Streaming RPCs (unary-stream, stream-unary, stream-stream) are wrapped for error sanitizing
+alone — a streaming handler that needs request context must bind it manually with
 `fastapicommon.context.request_context_scope`.
+
+**Error sanitizing (all arities).** grpcio answers a handler exception with `UNKNOWN` and
+details `"Exception calling application: <message>"`, and logs the traceback with the message.
+The interceptor stops both: if the handler chose a status (`context.abort`, or `set_code` then
+raise) it re-aborts with that code and its details; otherwise it logs one ERROR
+`unclassified error` entry (`classified=false`, `trace_id`, `request_id`, `service`,
+`grpc_method`, `grpc_code=INTERNAL`, `error_type` / `error_chain`, `stack`; never the message)
+and aborts with `INTERNAL "internal server error"`. An unclassified exception still counts in
+`platform_grpc_panics_total` (grpc-python's equivalent of a Go handler panic), now with code
+`Internal`. This is platform-gincommon's error-sanitizer contract.
 
 ---
 
@@ -754,7 +767,7 @@ anything, but produces broken tracing, misleading metrics, or an unintended trus
 | **Outbound calls use `create_platform_http_client()` (or manually propagate headers)** | Without it, `traceparent`/`x-request-id`/`x-correlation-id` don't reach the next service — the distributed trace and cross-service log correlation break at that call boundary. |
 | **`OTLP_ENDPOINT` / `settings.otlp_endpoint` is set wherever traces are expected** | Tracing is silently a no-op (spans recorded, never exported) when unset — there is no error to alert on. |
 | **`app_name` is set per service (via `PlatformSettings` or `create_platform_app(app_name=...)`)** | Used as the FastAPI title and the OTel `service.name` resource attribute (Tempo's service map, Grafana's trace search). It is *not* applied as a Prometheus const label — see the metrics cardinality note above for why Prometheus `job`/`instance` labels, not this library, distinguish services in dashboards. |
-| **gRPC streaming RPCs bind context manually if they need it** | `ContextServerInterceptor` only wraps unary-unary calls; a streaming handler reading `get_request_context()` without first calling `request_context_scope` will raise `LookupError`. |
+| **gRPC streaming RPCs bind context manually if they need it** | `ContextServerInterceptor` binds context for unary-unary calls only; a streaming handler reading `get_request_context()` without first calling `request_context_scope` will raise `LookupError`. |
 
 ---
 
@@ -767,7 +780,8 @@ anything, but produces broken tracing, misleading metrics, or an unintended trus
 | Middleware add order is Timeout → Prometheus → Context, so runtime nesting is Context (outer) → Prometheus → Timeout (inner) → handler | `bootstrap/app.py` — context is available to every layer beneath it, including the handler and its dependencies |
 | OTLP `insecure` defaults to `True` when `environment` is `dev`/`development`/`local`, else `False` | `bootstrap/app.py::_build_span_exporter` — mirrors `platform-gincommon`'s `OTEL_EXPORTER_OTLP_INSECURE` default logic |
 | `PrometheusMiddleware` labels by the matched route's path *template*, not the raw URL, when a route matches | `metrics/middleware.py` — keeps cardinality bounded for real traffic; see the caveat above for the unmatched-route (404) case |
-| `ContextServerInterceptor` passes through any handler where `handler.unary_unary` is falsy | `grpc/server.py` — streaming RPCs are never wrapped, never double-instrumented |
+| No gRPC exception message reaches a client or a log | `grpc/server.py` `_sanitize` — every arity; the handler's own status is kept, anything else is `INTERNAL "internal server error"` + `unclassified error` (types, frames) |
+| Streaming RPCs are never double-instrumented | `grpc/server.py` — only unary-unary calls get context binding and metrics |
 | `TimeoutMiddleware(timeout_seconds=...)` always wraps `call_next` in `asyncio.wait_for`, even for very large timeouts | `middleware/timeout.py` — there's no "disabled" sentinel value; set a large `request_timeout_seconds` to effectively disable it |
 | Every registered exception handler (and `TimeoutMiddleware`) renders through `problem_response`, producing an RFC 9457 problem identical to gincommon v2's (types, titles, error codes, traceId order, validation messages) | `exceptions/handlers.py`, `problem/` — `tests/unit/problem` checks the platform types against gincommon's `docs/problem-details/registry.md` |
 | `fastapicommon.grpc` is never imported by `fastapicommon/__init__.py` | Base install has no `grpcio` dependency; only importing `fastapicommon.grpc` directly requires the `grpc` extra |

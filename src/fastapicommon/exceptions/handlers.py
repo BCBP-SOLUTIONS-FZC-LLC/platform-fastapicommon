@@ -192,8 +192,15 @@ def log_unclassified(
 ) -> None:
     """Emit the error-level ``unclassified error`` entry (gincommon's contract): where it
     happened, the exception types and the stack frames — never the exception message."""
-    from fastapicommon.metrics.platform import http_route_label  # avoid an import cycle
+    from fastapicommon.metrics.platform import (  # avoid an import cycle
+        TRANSPORT_HTTP,
+        http_route_label,
+        platform_metrics,
+    )
 
+    platform = platform_metrics()
+    if platform is not None:
+        platform.record_unclassified_error(TRANSPORT_HTTP)
     context = get_request_context_or_none()
     s = _settings(request)
     chain = error_chain_types(exc)

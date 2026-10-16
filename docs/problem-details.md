@@ -73,7 +73,11 @@ An exception nothing classified (not a `PlatformException`, `HTTPException`, val
 - **Never the exception message.** `str(exc)` can carry SQL, row values, tokens or secrets. The entry has the types along `__cause__` / `__context__` and exception-group members (at most 8) and the stack frames as `file:line in function` (at most 30, no source lines).
 - **Not re-raised.** Starlette's `ServerErrorMiddleware` re-raises after the `Exception` handler, so the server would log the message ("Exception in ASGI application"). `UnhandledErrorMiddleware` stops the exception inside the stack; `create_platform_app` installs it just inside `ContextMiddleware`. An app built with `register_exception_handlers` alone should add it the same way: `app.add_middleware(UnhandledErrorMiddleware)` before `app.add_middleware(ContextMiddleware)`.
 - Classified errors, including a deliberate `PlatformException()` (500), are not flagged.
-- **Alert on it**: each entry is a defect; fix it by raising a `PlatformException` where the failure happens.
+- **Alert on the metric, diagnose with the log.** Each unclassified exception also increments `platform_unclassified_errors_total{transport="http"|"grpc"}` (approved in gincommon's LLD OQ-25; both series start at 0). Alert on `sum by (domain, service, environment, transport) (increase(platform_unclassified_errors_total[5m])) > 0` (gincommon's reference `PlatformUnclassifiedErrors`). The log entry says where and which types. Fix it by raising a `PlatformException` where the failure happens.
+
+## gRPC
+
+RFC 9457 is HTTP-only, but gRPC errors follow the same rule that no exception message reaches a client or a log. `ContextServerInterceptor` sanitizes every RPC: a status the handler chose (`context.abort`, `set_code`) is kept; any other exception is aborted as `INTERNAL "internal server error"` and logged as `unclassified error` with `grpc_method` (instead of `route` / `operation`), the exception types and the stack frames. Without it, grpcio sends `UNKNOWN "Exception calling application: <message>"` and logs the message. It is the same contract as gincommon's gRPC error sanitizer.
 
 ## Configuration
 

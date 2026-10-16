@@ -306,6 +306,11 @@ class _WithoutCreatedSeries(Collector):
                 yield family
 
 
+#: ``transport`` label values of ``platform_unclassified_errors_total``.
+TRANSPORT_HTTP = "http"
+TRANSPORT_GRPC = "grpc"
+
+
 class PlatformMetrics:
     """The ``platform_*`` collectors fastapicommon emits, built from their registry entries."""
 
@@ -331,6 +336,10 @@ class PlatformMetrics:
         self.grpc_inflight = self._gauge("platform_grpc_server_inflight_requests")
         self.grpc_rate_limited = self._counter("platform_grpc_rate_limited_requests_total")
         self.grpc_panics = self._counter("platform_grpc_panics_total")
+        self.unclassified_errors = self._counter("platform_unclassified_errors_total")
+        # Both series exist from startup (at 0), so increase() sees the first error.
+        for transport in (TRANSPORT_HTTP, TRANSPORT_GRPC):
+            self.unclassified_errors.labels(*self._const, transport)
 
         # platform_build_info's declared labels (e.g. version) are identity values too.
         spec = self._spec("platform_build_info", "gauge")
@@ -458,6 +467,12 @@ class PlatformMetrics:
 
     def record_grpc_panic(self, grpc_method: str) -> None:
         self.grpc_panics.labels(*self._const, grpc_method).inc()
+
+    def record_unclassified_error(self, transport: str) -> None:
+        """``platform_unclassified_errors_total{transport}`` +1 (Go
+        ``metrics.RecordUnclassifiedError``): an exception that reached the top-level handler
+        unclassified and was answered as a generic internal error."""
+        self.unclassified_errors.labels(*self._const, transport).inc()
 
 
 # --------------------------------------------------------------------------------------------

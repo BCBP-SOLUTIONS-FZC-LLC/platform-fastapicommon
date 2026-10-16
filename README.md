@@ -71,7 +71,7 @@ This library **standardises** these concerns once so every service gets:
 | **RBAC** | `RequireRole` / `RequireAnyRole` / `RequireAllRoles` as FastAPI dependencies | **Not provided** — these are FastAPI `Depends`-based; there is no gRPC interceptor equivalent |
 | **Timeout** | `TimeoutMiddleware(timeout_seconds=...)` — `asyncio.wait_for` around the handler, a `503` `service-unavailable` problem (`REQUEST_TIMEOUT`) on expiry | **Not provided** — set a deadline on the gRPC channel/client call yourself |
 | **Health** | `health_router` — `/health`, `/live`, `/ready` (200 unless custom readiness checks fail) | — |
-| **Error type** | `PlatformException` hierarchy → RFC 9457 problems via `register_exception_handlers` | Exceptions raised in a unary-unary handler propagate to the client as-is (gRPC has no equivalent exception-handler registry) |
+| **Error type** | `PlatformException` hierarchy → RFC 9457 problems via `register_exception_handlers` | `ContextServerInterceptor` sanitizes every RPC (unary and streaming): a status the handler chose (`context.abort` / `set_code`) is kept; any other exception becomes `INTERNAL "internal server error"` and is logged as `unclassified error` (types and frames, never the message). Without it grpcio sends `UNKNOWN "Exception calling application: <message>"` and logs the message |
 | **Outbound propagation** | `create_platform_http_client()` — `httpx.AsyncClient` that stamps identity/trace headers on every request | `ContextClientInterceptor` — stamps identity metadata on outbound unary-unary calls |
 | **OpenTelemetry init** | `setup_tracing(app, service_name, exporter=None)` (called automatically by `create_platform_app`) | `instrument_grpc_server()` / `instrument_grpc_client()` (call explicitly) |
 
@@ -427,7 +427,8 @@ Const labels on every `platform_*` series: `domain`, `service`, `environment`.
 | `platform_grpc_server_request_size_bytes` / `_response_size_bytes` | histogram (`payload_size` buckets) | same | same (protobuf `ByteSize()`, 0 for non-protobuf messages) |
 | `platform_grpc_server_inflight_requests` | gauge | `grpc_method` | same |
 | `platform_grpc_rate_limited_requests_total` | counter | `grpc_method` | same — RPCs ending `ResourceExhausted` |
-| `platform_grpc_panics_total` | counter | `grpc_method` | same — handler exceptions without an explicit status (client sees `UNKNOWN`) |
+| `platform_grpc_panics_total` | counter | `grpc_method` | same — handler exceptions without an explicit status (client sees `INTERNAL "internal server error"`) |
+| `platform_unclassified_errors_total` | counter | `transport` (`http` \| `grpc`) | every exception nothing classified (`UnhandledErrorMiddleware` / the exception handler, and the gRPC interceptor); both series start at 0. Alert on it (gincommon's `PlatformUnclassifiedErrors`); diagnose with the `unclassified error` log event |
 
 Label values, all bounded:
 
