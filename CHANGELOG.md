@@ -129,6 +129,17 @@ and the span name.
 
 ### Changed — CI/CD pipeline (parity with `platform-gincommon`)
 
+- **Makefile restructured after `platform-pgcommon-py`'s**: per-target `.PHONY` and comments,
+  `UV` / test-directory / image variables, and its aliases (`fmt`, `fmt-check`, `vuln-check`,
+  `hadolint`, `test`, `test-integration`, `test-smoke-image`, `metrics-doc`). New targets:
+  `install-hooks`, `docs-serve`, `show-config`, `cover-check`, `cover-func`, `docker-reset`,
+  `docker-ps`. `make setup` now also runs `uv sync` and installs the git hook (`make install`
+  is `uv sync` only), `make format` also applies ruff's autofixes, `make lint-docker` falls back
+  to the pinned hadolint image without a local hadolint, `make pin-base-images` reports what
+  changed, and `make ci` sequences the coverage gate after `test-ci` (safe under `make -j`).
+  `make test-int` runs with `--no-cov`: the integration subset alone failed the 90% gate
+  although every test passed.
+
 - **Example image budget: 170 MB** (uncompressed, linux/amd64), measured for this Python image
   (~154 MB) instead of gincommon's 150 MB Go budget, which it never met: the limit had been
   calibrated on the compressed size Docker Desktop reports. To shrink it, the `examples` extra

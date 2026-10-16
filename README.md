@@ -776,8 +776,8 @@ reproducible installs. Install `uv` yourself first (`brew install uv` or see uv'
 ### Setup
 
 ```bash
-make setup     # copies .env-example -> .env, creates logs/
-make install   # uv sync (dev group + grpc extra, from uv.lock) + install pre-commit hooks
+make setup     # uv sync (dev group + grpc extra, from uv.lock), .env from .env-example,
+               # logs/, and the pre-commit git hook (make install: uv sync only)
 ```
 
 ### Common commands
@@ -786,7 +786,7 @@ make install   # uv sync (dev group + grpc extra, from uv.lock) + install pre-co
 |---------|-------------|
 | `make lint` | ruff check |
 | `make typecheck` | mypy --strict |
-| `make format` | ruff format + black (rewrites files) |
+| `make format` | ruff format + black + ruff check --fix (rewrites files) |
 | `make format-check` | Same, but check-only — no changes; used in CI |
 | `make vulncheck` | pip-audit against locked dependencies |
 | `make test-unit` | `tests/unit` only — no Docker, no wired-up app |
@@ -806,6 +806,11 @@ make install   # uv sync (dev group + grpc extra, from uv.lock) + install pre-co
 | `make gincommon-parity` | Registry, reference rules and inventory identical to the sibling platform-gincommon checkout (`GINCOMMON_DIR`) |
 | `make release-guard TAG=vX.Y.Z` | Package version == tag and a dated CHANGELOG section (run before tagging) |
 | `make pin-base-images` | Re-pin the Dockerfile base images to their current `@sha256` digests |
+| `make show-config` | Print `PlatformSettings` and the tracing config `create_platform_app` would install (`.env` loaded) |
+| `make docs-serve` | Browse the package API docs with pydoc (`PYDOC_PORT`, default 8081) |
+| `make cover-check` / `make cover-func` | Tests + coverage gate / per-file coverage from the last run |
+| `make docker-reset` / `make docker-ps` | Restart the observability stack with empty data / list its containers |
+| `make help` | Every target |
 
 ### Example service (optional)
 
@@ -954,6 +959,7 @@ BCBP Solutions FZC LLC — internal platform shared library.
 | Document | Description |
 |----------|-------------|
 | [ARCHITECTURE.md](./ARCHITECTURE.md) | Module graph, flow diagrams, key invariants, full public API tables |
+| [docs/lld/platform-fastapicommon-lld.md](./docs/lld/platform-fastapicommon-lld.md) | Low-level design (structure of platform-gincommon's LLD): contracts, algorithms, flows, error taxonomy, open questions |
 | [VERSIONING.md](./VERSIONING.md) | SemVer rules, supported versions, release process |
 | [CHANGELOG.md](./CHANGELOG.md) | Per-version changes |
 | [CONTRIBUTING.md](./CONTRIBUTING.md) | Development setup, adding capabilities, PR checklist |

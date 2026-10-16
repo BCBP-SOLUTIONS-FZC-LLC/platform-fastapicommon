@@ -12,18 +12,19 @@ cut a release.
   or see uv's install docs; `make install` does not install `uv` itself.
 - Docker (for `tests/e2e`, and for the local observability stack — see the README's
   "Local testing with the observability stack")
-- `pre-commit` is installed as part of `make install` — no separate install needed
+- `pre-commit` is installed as part of `make setup` (`make install-hooks` on its own) — no separate install needed
 
 ## Development setup
 
 ```bash
 git clone https://github.com/BCBP-SOLUTIONS-FZC-LLC/platform-fastapicommon
 cd platform-fastapicommon
-make setup     # copies .env-example -> .env, creates logs/
-make install   # uv sync (dev group + grpc extra, from uv.lock) + install pre-commit hooks
+make setup     # uv sync (dev group + grpc extra, from uv.lock), .env from .env-example,
+               # logs/, and the pre-commit git hook
 make lint      # verify ruff passes
 make typecheck # verify mypy --strict passes
-make test-all  # run all tests with the coverage gate
+make test      # run all tests with the coverage gate (alias: test-all; requires Docker)
+make ci        # every gate CI runs, before pushing
 ```
 
 ## Project layout
@@ -101,11 +102,13 @@ that).
 | Command | Runs |
 |---------|------|
 | `make test-unit` | `tests/unit` only |
-| `make test-int` | `tests/integration` only (`-m integration`) |
+| `make test-int` | `tests/integration` only (`-m integration`, `--no-cov`: a subset, so the 90% gate does not apply) |
 | `make test-e2e` | `tests/e2e` only (`-m e2e`, `--no-cov` — see below) |
-| `make test-all` | All three tiers together (requires Docker) |
+| `make test` / `make test-all` | All three tiers together (requires Docker) |
 | `make test-ci` | Unit + integration with coverage data — what CI's `Validate / Test` and `make ci` run |
-| `make cover` | `test-all` + opens an HTML coverage report |
+| `make cover` | `test` + an HTML coverage report |
+| `make cover-check` | `test-ci` + the coverage gate |
+| `make cover-func` | Per-file coverage (missing lines) from the last run |
 
 Aside from `tests/e2e`, all tests must pass without a running server or Docker stack — the
 observability stack in `docker-compose.yml` is for manual/local verification (see the
