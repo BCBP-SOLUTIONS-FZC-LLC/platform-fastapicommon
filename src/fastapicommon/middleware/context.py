@@ -4,9 +4,9 @@ import uuid
 from collections.abc import Mapping
 
 from opentelemetry import trace
-from starlette.middleware.base import BaseHTTPMiddleware, RequestResponseEndpoint
+from starlette.datastructures import MutableHeaders
 from starlette.requests import Request
-from starlette.responses import Response
+from starlette.types import ASGIApp, Message, Receive, Scope, Send
 
 from fastapicommon.auth.headers import (
     CORRELATION_ID_HEADER,
@@ -53,13 +53,24 @@ def _current_trace_id() -> str:
     return trace.format_trace_id(span_context.trace_id)
 
 
-class ContextMiddleware(BaseHTTPMiddleware):
+class ContextMiddleware:
     """Populates the platform RequestContext from inbound auth/tracing headers for the
     duration of the request, generating request/correlation ids when absent, and echoes
     request/trace ids back on the response.
+
+    Pure ASGI (not ``BaseHTTPMiddleware``): the context stays bound while a streaming body is
+    produced, and a response cut short by ``UnhandledErrorMiddleware`` stays incomplete, so the
+    server drops the connection instead of this layer terminating the stream as a clean 200.
     """
 
-    async def dispatch(self, request: Request, call_next: RequestResponseEndpoint) -> Response:
+    def __init__(self, app: ASGIApp) -> None:
+        self.app = app
+
+    async def __call__(self, scope: Scope, receive: Receive, send: Send) -> None:
+        if scope["type"] != "http":
+            await self.app(scope, receive, send)
+            return
+        request = Request(scope)
         headers = request.headers
         request_id = normalize_request_id(headers.get(REQUEST_ID_HEADER)) or str(uuid.uuid4())
         correlation_id = headers.get(CORRELATION_ID_HEADER) or request_id
@@ -78,15 +89,18 @@ class ContextMiddleware(BaseHTTPMiddleware):
             client_ip=_client_ip(request),
         )
 
+        async def send_with_ids(message: Message) -> None:
+            if message["type"] == "http.response.start":
+                response_headers = MutableHeaders(scope=message)
+                response_headers[REQUEST_ID_HEADER] = request_id
+                response_headers[CORRELATION_ID_HEADER] = correlation_id
+                response_headers[REQUEST_ID_RESPONSE_HEADER] = request_id
+                if context.trace_id:
+                    response_headers[TRACE_ID_RESPONSE_HEADER] = context.trace_id
+            await send(message)
+
         token = bind_request_context(context)
         try:
-            response = await call_next(request)
+            await self.app(scope, receive, send_with_ids)
         finally:
             reset_request_context(token)
-
-        response.headers[REQUEST_ID_HEADER] = request_id
-        response.headers[CORRELATION_ID_HEADER] = correlation_id
-        response.headers[REQUEST_ID_RESPONSE_HEADER] = request_id
-        if context.trace_id:
-            response.headers[TRACE_ID_RESPONSE_HEADER] = context.trace_id
-        return response

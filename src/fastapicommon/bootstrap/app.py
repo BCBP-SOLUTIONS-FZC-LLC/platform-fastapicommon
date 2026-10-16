@@ -4,6 +4,8 @@ from collections.abc import AsyncIterator, Callable
 from contextlib import AbstractAsyncContextManager, asynccontextmanager
 from typing import Any
 
+import anyio
+import anyio.to_thread
 from fastapi import FastAPI
 
 from fastapicommon.config import PlatformSettings
@@ -66,7 +68,7 @@ def create_platform_app(
 
     # Middleware added last runs outermost.
     app.add_middleware(
-        TimeoutMiddleware,  # type: ignore[arg-type]
+        TimeoutMiddleware,
         timeout_seconds=settings.request_timeout_seconds,
     )
     if settings.enable_metrics:
@@ -110,6 +112,8 @@ def _flush_tracing_on_shutdown(inner: _Lifespan) -> _Lifespan:
             async with inner(app) as state:
                 yield state
         finally:
-            flush_tracing()
+            # force_flush blocks for up to SHUTDOWN_TIMEOUT_MILLIS (an unreachable collector):
+            # off the event loop, so other apps and lifespans keep running meanwhile.
+            await anyio.to_thread.run_sync(flush_tracing)
 
     return lifespan

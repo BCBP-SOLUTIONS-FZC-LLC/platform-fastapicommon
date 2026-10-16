@@ -59,7 +59,7 @@ from opentelemetry.trace import NonRecordingSpan, Span, Status, StatusCode, Trac
 from opentelemetry.trace.propagation.tracecontext import TraceContextTextMapPropagator
 
 from fastapicommon.logging import get_logger
-from fastapicommon.logging.config import is_dev_env
+from fastapicommon.logging.config import env_bool, is_dev_env
 
 if TYPE_CHECKING:
     from fastapi import FastAPI
@@ -69,19 +69,6 @@ DEFAULT_ENDPOINT = "localhost:4317"
 SHUTDOWN_TIMEOUT_MILLIS = 5000
 
 _logger = get_logger("fastapicommon.otel")
-
-
-def _env_bool(key: str, fallback: bool) -> bool:
-    raw = os.environ.get(key, "").strip().lower()
-    if raw in ("true", "1", "yes"):
-        return True
-    if raw in ("false", "0", "no"):
-        return False
-    if raw:
-        print(
-            f"fastapicommon: invalid {key}={raw!r}; using {str(fallback).lower()}", file=sys.stderr
-        )
-    return fallback
 
 
 _DISABLED_ENDPOINTS = ("none", "off", "disabled")
@@ -158,10 +145,10 @@ class TracingConfig:
             domain=(domain or os.environ.get("OBSERVABILITY_DOMAIN", "")).strip().lower(),
             environment=environment.strip().lower(),
             endpoint=endpoint,
-            insecure=_env_bool("OTEL_EXPORTER_OTLP_INSECURE", dev),
+            insecure=env_bool("OTEL_EXPORTER_OTLP_INSECURE", dev),
             sample_ratio=_sample_ratio(dev),
-            enable_baggage=_env_bool("OTEL_PROPAGATOR_BAGGAGE", False),
-            ignore_remote_parent_sampled=_env_bool(
+            enable_baggage=env_bool("OTEL_PROPAGATOR_BAGGAGE", False),
+            ignore_remote_parent_sampled=env_bool(
                 "OTEL_TRACES_IGNORE_REMOTE_PARENT_SAMPLED", False
             ),
             provisional=provisional,
@@ -318,14 +305,22 @@ def _install(config: TracingConfig, exporter: SpanExporter | None) -> _Generatio
     return old
 
 
-def _flush(generation: _Generation | None) -> None:
-    if generation is None:
-        return
-    provider = generation.provider
+def _force_flush(provider: TracerProvider) -> None:
+    """Export buffered spans, logging ``otel_shutdown_flush_failed`` on a timeout or error."""
     try:
         if not provider.force_flush(SHUTDOWN_TIMEOUT_MILLIS):
             _logger.warning("otel_shutdown_flush_failed", error="force_flush timed out")
-        provider.shutdown()
+    except Exception as exc:  # pragma: no cover - SDK flush errors are rare
+        _logger.warning("otel_shutdown_flush_failed", error=f"{type(exc).__name__}: {exc}")
+
+
+def _flush(generation: _Generation | None) -> None:
+    """Flush and stop a replaced or shut-down generation."""
+    if generation is None:
+        return
+    _force_flush(generation.provider)
+    try:
+        generation.provider.shutdown()
     except Exception as exc:  # pragma: no cover - SDK shutdown errors are rare
         _logger.warning("otel_shutdown_flush_failed", error=f"{type(exc).__name__}: {exc}")
 
@@ -333,8 +328,20 @@ def _flush(generation: _Generation | None) -> None:
 def init_tracing(config: TracingConfig, exporter: SpanExporter | None = None) -> TracerProvider:
     """Install a tracer provider for ``config`` (replacing and flushing one this library
     installed earlier) and return it (Go ``InitTracingWithConfig``). ``exporter`` replaces the
-    OTLP exporter (tests: an ``InMemorySpanExporter``)."""
+    OTLP exporter (tests: an ``InMemorySpanExporter``).
+
+    A ``TracerProvider`` the service installed itself is never replaced (OpenTelemetry would
+    refuse anyway): it is returned unchanged, the propagator is left alone, and
+    ``otel_provider_kept`` is logged."""
     with _lock:
+        current = trace.get_tracer_provider()
+        if not _is_global(current) and isinstance(current, TracerProvider):
+            _logger.warning(
+                "otel_provider_kept",
+                reason="a TracerProvider is already installed by the service",
+                service=config.service_name,
+            )
+            return current
         old = _install(config, exporter)
         assert _active is not None
         provider = _active.provider
@@ -382,13 +389,8 @@ def flush_tracing() -> None:
     itself is not touched."""
     with _lock:
         generation = _active if _is_global(trace.get_tracer_provider()) else None
-    if generation is None:
-        return
-    try:
-        if not generation.provider.force_flush(SHUTDOWN_TIMEOUT_MILLIS):
-            _logger.warning("otel_shutdown_flush_failed", error="force_flush timed out")
-    except Exception as exc:  # pragma: no cover - SDK flush errors are rare
-        _logger.warning("otel_shutdown_flush_failed", error=f"{type(exc).__name__}: {exc}")
+    if generation is not None:
+        _force_flush(generation.provider)
 
 
 def shutdown_tracing() -> None:
@@ -434,9 +436,14 @@ def record_span_error(
     error: BaseException, description: str, context: otel_context.Context | None = None
 ) -> None:
     """Record ``error`` on the current span and mark it failed with ``description`` (Go
-    ``RecordSpanError``); a no-op without a recording span."""
+    ``RecordSpanError``); a no-op without a recording span.
+
+    Only the exception **type** is recorded (an ``exception`` event with ``exception.type``),
+    like the library's own server spans: unlike Go's ``span.RecordError``, neither the message
+    nor the stack trace is exported, since they may carry SQL, PII, tokens or secrets.
+    ``description`` is written as given: keep it a fixed sentence."""
     span = trace.get_current_span(context)
-    span.record_exception(error)
+    span.add_event("exception", {"exception.type": type(error).__qualname__})
     span.set_status(Status(StatusCode.ERROR, description))
 
 

@@ -3,6 +3,7 @@ metrics, the grpc_request log, and exception sanitizing (no message reaches clie
 
 from __future__ import annotations
 
+import asyncio
 import logging
 from collections.abc import AsyncIterator, Iterator
 from concurrent import futures
@@ -75,6 +76,11 @@ def _sync_aborted(request: bytes, context: grpc.ServicerContext) -> bytes:
     return b""  # pragma: no cover
 
 
+async def _slow(request: bytes, context: grpc.aio.ServicerContext) -> bytes:
+    await asyncio.sleep(5)
+    return b""  # pragma: no cover
+
+
 @pytest.fixture
 async def channel() -> AsyncIterator[tuple[grpc.aio.Channel, CollectorRegistry]]:
     configure_logging("INFO")
@@ -90,6 +96,7 @@ async def channel() -> AsyncIterator[tuple[grpc.aio.Channel, CollectorRegistry]]
         "SyncWhoami": grpc.unary_unary_rpc_method_handler(_sync_whoami, _ident, _ident),
         "SyncStream": grpc.unary_stream_rpc_method_handler(_sync_stream, _ident, _ident),
         "SyncAborted": grpc.unary_unary_rpc_method_handler(_sync_aborted, _ident, _ident),
+        "Slow": grpc.unary_unary_rpc_method_handler(_slow, _ident, _ident),
     }
     server = grpc.aio.server(
         futures.ThreadPoolExecutor(max_workers=2),
@@ -265,3 +272,62 @@ async def test_sync_handlers_still_run_in_the_thread_pool(
         )
         == 1.0
     )
+
+
+async def _until(predicate: Any, seconds: float = 3.0) -> None:
+    for _ in range(int(seconds / 0.02)):
+        if predicate():
+            return
+        await asyncio.sleep(0.02)
+
+
+@pytest.mark.parametrize(
+    ("cancel", "code", "status_class", "error_class"),
+    [
+        (False, "DeadlineExceeded", "4xx", "client_error"),
+        (True, "Canceled", "4xx", "client_error"),
+    ],
+)
+async def test_deadline_and_cancel_are_not_ok(
+    channel: tuple[grpc.aio.Channel, CollectorRegistry],
+    caplog: pytest.LogCaptureFixture,
+    cancel: bool,
+    code: str,
+    status_class: str,
+    error_class: str,
+) -> None:
+    """Regression: the handler task's CancelledError skipped the error path, so a timed-out or
+    cancelled RPC was logged and counted as OK."""
+    ch, registry = channel
+
+    def counted() -> float:
+        return _value(
+            registry,
+            "platform_grpc_server_handled_total",
+            grpc_method="/test.Aio/Slow",
+            grpc_code=code,
+            status_class=status_class,
+            error_class=error_class,
+        )
+
+    with caplog.at_level(logging.INFO):
+        if cancel:
+            call = ch.unary_unary("/test.Aio/Slow")(b"")
+            await asyncio.sleep(0.2)
+            call.cancel()
+            with pytest.raises(asyncio.CancelledError):
+                await call
+        else:
+            with pytest.raises(grpc.aio.AioRpcError) as err:
+                await ch.unary_unary("/test.Aio/Slow")(b"", timeout=0.2)
+            assert err.value.code() == grpc.StatusCode.DEADLINE_EXCEEDED
+        await _until(lambda: counted() == 1.0)
+    assert counted() == 1.0
+    (entry,) = (
+        r.msg
+        for r in caplog.records
+        if isinstance(r.msg, dict)
+        and r.msg["event"] == "grpc_request"
+        and r.msg["method"] == "/test.Aio/Slow"
+    )
+    assert entry["grpc_code"] == code

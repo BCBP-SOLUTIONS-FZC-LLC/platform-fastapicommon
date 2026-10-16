@@ -196,6 +196,31 @@ and the span name.
   `<family>_created` timestamp samples of counters, histograms and summaries are removed.
 - **The `LOG_SAMPLING` counter table is bounded** (expired windows swept, at most 4096 keys).
 - The HTTP and gRPC server-span code obtains its tracer once instead of per request.
+- **A response cut short by an exception now drops the connection.** `ContextMiddleware`,
+  `PrometheusMiddleware` and `TimeoutMiddleware` are pure ASGI instead of Starlette
+  `BaseHTTPMiddleware`, which always ended the body cleanly, so the client got a truncated but
+  complete-looking 200. The request context also stays bound while a streaming body is produced.
+  `PrometheusMiddleware` records when the request finishes (latency includes the body, response
+  size is the bytes sent, as in Go), and an exception after the response started keeps the status
+  sent and is not a panic. `TimeoutMiddleware` still only times out a response that has not
+  started.
+- **`grpc.aio` deadlines and cancellations are recorded as `DeadlineExceeded` / `Canceled`**, not
+  `OK` (the handler task's `CancelledError` skipped the error path).
+- **The end of an RPC can no longer leave the request context bound.** Each step (metrics, log,
+  context reset, span end) is guarded, so a failing metric or logger cannot leave a stale
+  `RequestContext` on a reused worker thread or the span unended.
+- **App shutdown flushes spans off the event loop** (`force_flush` waits up to 5 s).
+- **`init_tracing` / `setup_tracing` keep a `TracerProvider` the service installed itself**
+  (returned unchanged, propagator untouched, `otel_provider_kept` logged), as `ensure_tracing`
+  already did.
+- **`record_span_error` records the exception type only.** It called `span.record_exception`,
+  exporting the message and stack trace. A deliberate difference from Go's `span.RecordError`,
+  consistent with the library's own spans.
+- **Cheaper logging.** Loggers are cached on first use (level and stack threshold are read per
+  entry, so `configure_logging` still applies), and `stacktrace` uses Zap's layout (function,
+  then `file:line`, innermost first) without reading source lines: error entries cost about half.
+- Internal: one boolean environment parser (`env_bool`, invalid values warned once), one
+  force-flush helper, and a scope flag instead of reading SDK span internals.
 - Internal: one Gin `ClientIP()` (`fastapicommon.middleware.context.client_ip`), one UTF-8
   truncation (`fastapicommon.logging.sanitize.truncate_utf8`), one panic-span helper, and no
   serialise-then-parse of the 500 problem body. The caller field no longer uses structlog's private

@@ -7,7 +7,7 @@ from typing import Any
 import anyio
 import grpc
 import pytest
-from fastapi import FastAPI
+from fastapi import FastAPI, Response
 from fastapi.responses import StreamingResponse
 from fastapi.testclient import TestClient
 from prometheus_client import REGISTRY, CollectorRegistry
@@ -363,22 +363,36 @@ def test_platform_http_metrics(monkeypatch: pytest.MonkeyPatch) -> None:
     assert not any(line.startswith("http_request") for line in scrape.splitlines())
 
 
-def test_streaming_response_without_body_iterator_observes_zero(
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    from starlette.responses import Response
+def test_bodyless_and_failed_streams_are_measured_as_sent(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Pure ASGI recording (Go: at the end of the request, the bytes written). A stream that
+    fails after it started keeps the status already sent and is not a panic (Go: an
+    http.ErrAbortHandler abort)."""
+    _clear_identity_env(monkeypatch)
+    registry = CollectorRegistry()
+    init_metrics(IAM, registry=registry)
+    app = FastAPI()
+    app.add_middleware(PrometheusMiddleware)
 
-    from fastapicommon.metrics.middleware import _content_length, _count_body
+    @app.get("/empty")
+    async def empty() -> Response:
+        return Response(status_code=204)
 
-    observed: list[float] = []
-    response = Response(status_code=204)
-    del response.headers["content-length"]
-    assert _content_length(response) is None
-    _count_body(response, observed.append)
-    assert observed == [0.0]
+    @app.get("/broken")
+    async def broken() -> StreamingResponse:
+        async def body() -> AsyncIterator[bytes]:
+            yield b"abc"
+            raise RuntimeError("mid-stream")
 
-    response.headers["content-length"] = "nan"
-    assert _content_length(response) is None
+        return StreamingResponse(body())
+
+    client = TestClient(app, raise_server_exceptions=False)
+    assert client.get("/empty").status_code == 204
+    client.get("/broken")
+    ok = {"method": "GET", "status_class": "2xx", "error_class": "success"}
+    assert _value(registry, "platform_http_response_size_bytes_sum", route="/empty", **ok) == 0
+    assert _value(registry, "platform_http_requests_total", route="/broken", **ok) == 1
+    assert _value(registry, "platform_http_response_size_bytes_sum", route="/broken", **ok) == 3
+    assert not _value(registry, "platform_http_panics_total", method="GET", route="/broken")
 
 
 # --------------------------------------------------------------------------------------- gRPC

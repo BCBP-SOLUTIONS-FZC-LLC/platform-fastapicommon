@@ -21,7 +21,7 @@ from opentelemetry import propagate, trace
 from opentelemetry.trace import SpanKind, Status, StatusCode
 from starlette.types import ASGIApp, Message, Receive, Scope, Send
 
-from fastapicommon._scope import ABORTED
+from fastapicommon._scope import ABORTED, PANICKED
 from fastapicommon.logging.sanitize import truncate_utf8
 from fastapicommon.metrics.platform import http_method_label, http_route_label
 from fastapicommon.middleware.context import client_ip
@@ -132,7 +132,7 @@ def _annotate(
         span.add_event("http.aborted")
     elif error is not None and status_code == 0:
         mark_span_panic(span, error)
-    elif code >= 500 and not _already_error(span):
+    elif code >= 500 and not scope.get(PANICKED):
         # UnhandledErrorMiddleware answers an unclassified exception itself and marks the
         # span (exception event, "panic"); keep that status rather than the status text.
         span.set_status(Status(StatusCode.ERROR, _status_text(code)))
@@ -144,11 +144,6 @@ def mark_span_panic(span: Any, error: BaseException) -> None:
     ``UnhandledErrorMiddleware`` for one it answered itself."""
     span.add_event("exception", {"exception.type": type(error).__qualname__})
     span.set_status(Status(StatusCode.ERROR, "panic"))
-
-
-def _already_error(span: Any) -> bool:
-    status = getattr(span, "status", None)
-    return getattr(status, "status_code", None) is StatusCode.ERROR
 
 
 def _status_text(code: int) -> str:

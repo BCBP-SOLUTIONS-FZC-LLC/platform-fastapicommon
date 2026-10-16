@@ -54,7 +54,10 @@ def test_error_entries_carry_a_stacktrace(capsys: pytest.CaptureFixture[str]) ->
     assert warn["level"] == "warn" and "stacktrace" not in warn
     assert error["level"] == "error" and "test_log_contract.py" in error["stacktrace"]
     assert list(error)[-1] == "stacktrace"
-    assert error["stacktrace"].count('File "') <= log_config.MAX_STACK_FRAMES
+    frames = error["stacktrace"].split("\n")
+    assert frames[0] == "test_log_contract.test_error_entries_carry_a_stacktrace"  # innermost
+    assert frames[1].startswith("\t") and "test_log_contract.py:" in frames[1]
+    assert len(frames) <= 2 * log_config.MAX_STACK_FRAMES
 
 
 def test_development_console_layout(capsys: pytest.CaptureFixture[str]) -> None:
@@ -68,7 +71,9 @@ def test_development_console_layout(capsys: pytest.CaptureFixture[str]) -> None:
     assert (level, msg, json.loads(fields)) == ("DEBUG", "hello", {"user": "u1"})
     assert caller.startswith("logging/test_log_contract.py:")
     warn_index = next(i for i, line in enumerate(rest) if "\tWARN\t" in line)
-    assert rest[warn_index + 1].lstrip().startswith("File ")  # stack from warn in dev
+    # stack from warn in dev, in Zap's layout: function, then a tab and file:line
+    assert rest[warn_index + 1] == "test_log_contract.test_development_console_layout"
+    assert rest[warn_index + 2].startswith("\t") and "test_log_contract.py:" in rest[warn_index + 2]
     assert rest[-1].split("\t")[3] == "bare" and len(rest[-1].split("\t")) == 4
 
 
@@ -238,3 +243,20 @@ def test_sanitize_fields_and_values() -> None:
 def test_is_dev_env() -> None:
     assert log_config.is_dev_env(" LOCAL ") and log_config.is_dev_env("dev")
     assert not log_config.is_dev_env("development") and not log_config.is_dev_env(None)
+
+
+def test_cached_loggers_follow_reconfiguration(capsys: pytest.CaptureFixture[str]) -> None:
+    """Loggers are cached on first use; the level and stack threshold are read per entry, so a
+    later configure_logging still applies to a logger obtained (and used) before it."""
+    logger = get_logger("svc.cached")
+    configure_logging("info", environment="prod")
+    logger.info("first")
+    configure_logging("error", environment="prod")
+    logger.info("dropped")
+    logger.error("kept")
+    configure_logging("debug", environment="dev")
+    logger.warning("dev warn")
+    out = capsys.readouterr().err
+    assert '"msg": "first"' in out and "dropped" not in out and '"msg": "kept"' in out
+    dev_line = next(line for line in out.splitlines() if "\tWARN\t" in line)
+    assert "dev warn" in dev_line

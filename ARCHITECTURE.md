@@ -132,7 +132,7 @@ dependency.
 | `TracingMiddleware` | One OTel SERVER span per request, continuing the inbound `traceparent`; renamed `METHOD route` (Gin syntax, e.g. `GET /items/:item_id`) with gincommon's attributes and status rules |
 | `ContextMiddleware` | Reads auth/tracing headers, generates `request_id`/`correlation_id` if absent, binds `RequestContext`, echoes both ids back on the response |
 | `LoggingMiddleware` | The `http_request` access log (gincommon's `LoggingMiddleware`): route template, status, `duration_ms`, ids, verified or `claimed_*` identity; level by status |
-| `TimeoutMiddleware(timeout_seconds=30.0)` | Wraps `call_next` in `asyncio.wait_for`; returns a 503 `service-unavailable` problem (`REQUEST_TIMEOUT`) on timeout |
+| `TimeoutMiddleware(timeout_seconds=30.0)` | Runs the app as a task and returns a 503 `service-unavailable` problem (`REQUEST_TIMEOUT`) if no response has started within the timeout; a started (streaming) response is not cut off |
 
 ### fastapicommon.logging
 
@@ -281,15 +281,15 @@ sequenceDiagram
     TR ->>+ CM: app(scope)
     Note over CM: read + validate x-user-id, x-tenant-id, x-tenant-roles,<br/>x-request-id, x-correlation-id (Go gincommon validation rules)<br/>generate request_id/correlation_id if absent<br/>compute trace_id from the active OTel span, client_ip from X-Forwarded-For/X-Real-IP/peer<br/>bind_request_context(...)
 
-    CM ->>+ LM: call_next(request)
+    CM ->>+ LM: app(scope)
     LM ->>+ UE: app(scope)
     UE ->>+ PM: app(scope)
     Note over PM: start = time.perf_counter()
 
-    PM ->>+ TM: call_next(request)
-    Note over TM: asyncio.wait_for(call_next(request), timeout_seconds)
+    PM ->>+ TM: app(scope)
+    Note over TM: run the app; 503 if no response has started within timeout_seconds
 
-    TM ->>+ H: call_next(request)
+    TM ->>+ H: app(scope)
     H -->>- TM: response
 
     alt handler exceeded timeout_seconds
@@ -468,10 +468,11 @@ flowchart TD
     end
 
     subgraph http["Per HTTP request — PrometheusMiddleware"]
-        B([call_next request]) --> C["route = http_route_label(scope)\n(Gin-style template or 'unknown')"]
-        C --> D["platform_http_active_requests +1\nawait call_next request"]
-        D --> F["platform_http_requests_total / _request_duration_seconds\n_request_size_bytes / _response_size_bytes\n{method, route, status_class, error_class}"]
-        D -.->|exception| P["recorded as 500 + platform_http_panics_total, re-raised"]
+        B([ASGI request]) --> C["route = http_route_label(scope)\n(Gin-style template or 'unknown'; resolved once per request)"]
+        C --> D["platform_http_active_requests +1\nawait app(scope, receive, send)"]
+        D --> F["when the request finishes: platform_http_requests_total /\n_request_duration_seconds / _request_size_bytes / _response_size_bytes (bytes sent)\n{method, route, status_class, error_class}"]
+        D -.->|exception before the response started| P["recorded as 500 + platform_http_panics_total, re-raised"]
+        D -.->|exception after it started| Q["recorded with the status sent, not a panic (Go: ErrAbortHandler)"]
     end
 
     subgraph grpcflow["Per gRPC unary-unary call — ContextServerInterceptor"]
@@ -514,8 +515,11 @@ in short: `platform_build_info{version}`; `platform_http_requests_total`,
 The platform `route` label is resolved *before* the handler runs by matching the request
 against the app's routes (recursing into `Mount`s), like Gin's `FullPath()`, so the in-flight
 gauge and the counters share one value; it is rendered Gin-style (`/items/:item_id`) and is
-`unknown` for unmatched requests. An exception escaping `call_next` (Go: a recovered panic) is
-recorded as a 500 plus `platform_http_panics_total`, then re-raised. Because the raw URL path
+`unknown` for unmatched requests. The request is recorded when it finishes (the latency
+includes the body; the response size is the bytes sent), as in Go. An exception before the
+response started (Go: a recovered panic) is recorded as a 500 plus `platform_http_panics_total`,
+then re-raised; one after it started keeps the status already sent and is not a panic (Go: an
+`http.ErrAbortHandler` abort). Because the raw URL path
 is never a label value, scanner probes and typos cannot grow label cardinality.
 
 The pre-standard metric names were removed without a compatibility period (nothing had been
@@ -736,7 +740,7 @@ since the *last*-added middleware is *outermost*, the real request-time nesting 
 ContextMiddleware ──────────────────────────────────────── (5) echo headers, reset context
   UnhandledErrorMiddleware ─────────────────────────────── (4) unclassified exception → 500 problem, not re-raised
     PrometheusMiddleware ────────────────────────────────── (3) observe duration + status (records the 500 first)
-      TimeoutMiddleware ─────────────────────────────────── (2) asyncio.wait_for(...)
+      TimeoutMiddleware ─────────────────────────────────── (2) 503 if no response within timeout_seconds
         Route handler / FastAPI dependency resolution       (1) executes here
 ```
 
@@ -745,8 +749,13 @@ out). Because `ContextMiddleware` is outermost, `get_request_context()` is safe 
 from *any* dependency or handler, as well as from inside `PrometheusMiddleware` and
 `TimeoutMiddleware` if they needed it (they currently don't).
 
-**Cooperative cancellation caveat:** `TimeoutMiddleware` cancels the `call_next(request)`
-task via `asyncio.wait_for`. Python cancellation is cooperative — if the handler is
+All platform HTTP middleware are pure ASGI (none is a Starlette `BaseHTTPMiddleware`): the
+request context stays bound while a streaming body is produced, and a body cut short by an
+exception stays incomplete, so the server drops the connection rather than a layer ending it as
+a clean 200.
+
+**Cooperative cancellation caveat:** `TimeoutMiddleware` cancels the app's task when no response
+has started in time. Python cancellation is cooperative — if the handler is
 executing a long synchronous, blocking call with no `await` point, cancellation only takes
 effect the next time the handler actually yields control. The client still receives the 503
 promptly; a slow handler is not guaranteed to stop executing instantly.
@@ -805,6 +814,6 @@ anything, but produces broken tracing, misleading metrics, or an unintended trus
 | `PrometheusMiddleware` labels by the matched route's path *template*, not the raw URL, when a route matches | `metrics/middleware.py` — keeps cardinality bounded for real traffic; see the caveat above for the unmatched-route (404) case |
 | No gRPC exception message reaches a client or a log | `grpc/server.py` `_sanitize` — every arity; the handler's own status is kept, anything else is `INTERNAL "internal server error"` + `unclassified error` (types, frames) |
 | Streaming RPCs are never double-instrumented | `grpc/server.py` — only unary-unary calls get context binding and metrics |
-| `TimeoutMiddleware(timeout_seconds=...)` always wraps `call_next` in `asyncio.wait_for`, even for very large timeouts | `middleware/timeout.py` — there's no "disabled" sentinel value; set a large `request_timeout_seconds` to effectively disable it |
+| `TimeoutMiddleware(timeout_seconds=...)` always runs the app under a timeout, even for very large values | `middleware/timeout.py` — there's no "disabled" sentinel value; set a large `request_timeout_seconds` to effectively disable it |
 | Every registered exception handler (and `TimeoutMiddleware`) renders through `problem_response`, producing an RFC 9457 problem identical to gincommon v2's (types, titles, error codes, traceId order, validation messages) | `exceptions/handlers.py`, `problem/` — `tests/unit/problem` checks the platform types against gincommon's `docs/problem-details/registry.md` |
 | `fastapicommon.grpc` is never imported by `fastapicommon/__init__.py` | Base install has no `grpcio` dependency; only importing `fastapicommon.grpc` directly requires the `grpc` extra |

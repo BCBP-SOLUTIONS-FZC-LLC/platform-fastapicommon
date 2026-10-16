@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import asyncio
 import contextlib
 import inspect
 import time
@@ -263,20 +264,53 @@ class _UnaryRpc:
         self.start = time.perf_counter()
         self.error: BaseException | None = None
         self.unclassified = False
+        self.cancelled_code: str | None = None
 
     def failed(self, exc: Exception, context: Any) -> None:
         self.error = exc
         self.unclassified = _explicit_code(context) is None
 
+    def cancelled(self, context: Any) -> None:
+        """The handler task was cancelled (grpc.aio: the deadline passed or the client
+        cancelled). ``context.code()`` is still unset then; record what the client received."""
+        remaining_fn = getattr(context, "time_remaining", None)
+        remaining = remaining_fn() if callable(remaining_fn) else None
+        expired = remaining is not None and remaining <= 0
+        self.cancelled_code = "DeadlineExceeded" if expired else "Canceled"
+
     def finish(self, context: Any, request: Any, response: Any) -> None:
+        """Record the outcome. Each step is guarded so a failing one (a metric, a logger) never
+        leaves the RequestContext or OTel context bound on a reused worker thread, nor the span
+        unended."""
         duration = time.perf_counter() - self.start
-        code, panicked = _platform_grpc_code(context, self.error is not None)
-        # An unclassified exception is grpc-python's handler panic (Go: a recovered panic),
-        # now sent as INTERNAL.
-        panicked = panicked or self.unclassified
+        if self.cancelled_code is not None:
+            code, panicked = self.cancelled_code, False
+        else:
+            code, panicked = _platform_grpc_code(context, self.error is not None)
+            # An unclassified exception is grpc-python's handler panic (Go: a recovered panic),
+            # now sent as INTERNAL.
+            panicked = panicked or self.unclassified
+        try:
+            try:
+                self._record(code, panicked, duration, request, response)
+            finally:
+                with contextlib.suppress(Exception):
+                    _log_grpc_request(self.method, code, duration, self.rpc_context)
+        finally:
+            reset_request_context(self.token)
+            try:
+                _finish_server_span(self.span, code, self.error if panicked else None)
+            finally:
+                self.span.end()
+                otel_context.detach(self.span_token)
+
+    def _record(
+        self, code: str, panicked: bool, duration: float, request: Any, response: Any
+    ) -> None:
         platform = self.platform
-        if platform is not None:
-            platform.grpc_inflight_dec(self.grpc_method)
+        if platform is None:
+            return
+        try:
             platform.record_grpc(
                 self.grpc_method,
                 code,
@@ -286,13 +320,8 @@ class _UnaryRpc:
             )
             if panicked:
                 platform.record_grpc_panic(self.grpc_method)
-        _log_grpc_request(self.method, code, duration, self.rpc_context)
-        reset_request_context(self.token)
-        try:
-            _finish_server_span(self.span, code, self.error if panicked else None)
         finally:
-            self.span.end()
-            otel_context.detach(self.span_token)
+            platform.grpc_inflight_dec(self.grpc_method)
 
 
 class ContextServerInterceptor(grpc.ServerInterceptor):  # type: ignore[misc]
@@ -470,6 +499,9 @@ def _wrap_async(handler: grpc.RpcMethodHandler, method: str, service: str) -> gr
             try:
                 response = await original(request, context)
                 return response
+            except asyncio.CancelledError:
+                rpc.cancelled(context)
+                raise
             except Exception as exc:
                 rpc.failed(exc, context)
                 await on_error(exc, context)

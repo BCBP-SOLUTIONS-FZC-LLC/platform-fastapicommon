@@ -71,7 +71,7 @@ This library **standardises** these concerns once so every service gets:
 | **Auth** | `Depends(require_authenticated_user)` — `401` if `x-user-id` unset (opt-in per route) | **Not provided** — no gRPC equivalent exists; check `get_request_context().user_id` yourself |
 | **Tenant context** | `RequestContext{request_id, correlation_id, user: CurrentUser, trace_id, client_ip}` via `get_request_context()` | Same struct, same accessor, bound by `ContextServerInterceptor` |
 | **RBAC** | `RequireRole` / `RequireAnyRole` / `RequireAllRoles` as FastAPI dependencies | **Not provided** — these are FastAPI `Depends`-based; there is no gRPC interceptor equivalent |
-| **Timeout** | `TimeoutMiddleware(timeout_seconds=...)` — `asyncio.wait_for` around the handler, a `503` `service-unavailable` problem (`REQUEST_TIMEOUT`) on expiry | **Not provided** — set a deadline on the gRPC channel/client call yourself |
+| **Timeout** | `TimeoutMiddleware(timeout_seconds=...)` — a `503` `service-unavailable` problem (`REQUEST_TIMEOUT`) if no response has started in time | **Not provided** — set a deadline on the gRPC channel/client call yourself |
 | **Health** | `health_router` — `/health`, `/live`, `/ready` (200 unless custom readiness checks fail) | — |
 | **Error type** | `PlatformException` hierarchy → RFC 9457 problems via `register_exception_handlers` | `ContextServerInterceptor` sanitizes every RPC (unary and streaming): a status the handler chose (`context.abort` / `set_code`) is kept; any other exception becomes `INTERNAL "internal server error"` and is logged as `unclassified error` (types and frames, never the message). Without it grpcio sends `UNKNOWN "Exception calling application: <message>"` and logs the message |
 | **Outbound propagation** | `create_platform_http_client()` — `httpx.AsyncClient` that stamps identity/trace headers on every request | `ContextClientInterceptor` — stamps identity metadata on outbound unary-unary calls |
@@ -142,7 +142,7 @@ Incoming request
   → LoggingMiddleware        (the http_request access log)
   → UnhandledErrorMiddleware (unclassified exception → 500 problem; never re-raised to the server)
   → PrometheusMiddleware     (records the platform_http_* metrics)
-  → TimeoutMiddleware        (innermost — asyncio.wait_for around the handler)
+  → TimeoutMiddleware        (innermost — 503 if no response has started in time)
   ╠═ always public (no auth) ══════════════════════════════════╗
   ║   GET  /health, /live, /ready  → health_router               ║
   ║   GET  /metrics                → metrics_router               ║

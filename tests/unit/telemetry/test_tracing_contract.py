@@ -239,6 +239,18 @@ def test_consumer_provider_is_never_replaced(monkeypatch: pytest.MonkeyPatch) ->
     assert ensure_tracing(TracingConfig(service_name="svc", endpoint="")) is None
 
 
+def test_init_and_setup_tracing_keep_a_consumer_provider(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Regression: init_tracing / setup_tracing built an exporter that never got spans (OTel
+    refuses the override) and swapped the propagator anyway."""
+    own = TracerProvider()
+    monkeypatch.setattr(trace, "get_tracer_provider", lambda: own)
+    before = tracing_module.propagate.get_global_textmap()
+    assert init_tracing(TracingConfig(service_name="svc", endpoint="")) is own
+    assert setup_tracing(FastAPI(), "svc") is own
+    assert tracing_module.propagate.get_global_textmap() is before
+    assert active_tracing_config() is None
+
+
 def test_initialized_log_and_otlp_exporter(
     capsys: pytest.CaptureFixture[str],
 ) -> None:
@@ -276,11 +288,17 @@ def test_helpers() -> None:
         assert len(trace_id) == 32
         headers = inject_trace_context({})
         assert headers["traceparent"].split("-")[1] == trace_id
-        record_span_error(ValueError("x"), "lookup failed")
+        record_span_error(ValueError("email=alice@example.com"), "lookup failed")
     assert span_trace_id(extract_trace_context(headers)) == trace_id
     provider.force_flush()
     (finished,) = exporter.get_finished_spans()
     assert finished.status.description == "lookup failed"
+    # Type only: the message and stack trace (which may hold PII / secrets) are never exported.
+    (event,) = finished.events
+    assert event.name == "exception" and dict(event.attributes or {}) == {
+        "exception.type": "ValueError"
+    }
+    assert "alice@example.com" not in str(finished.to_json())
     assert not noop_tracer().start_span("n").is_recording()
 
 

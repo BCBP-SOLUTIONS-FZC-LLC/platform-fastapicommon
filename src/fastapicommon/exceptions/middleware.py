@@ -4,7 +4,7 @@ from opentelemetry import trace
 from starlette.requests import Request
 from starlette.types import ASGIApp, Message, Receive, Scope, Send
 
-from fastapicommon._scope import ABORTED
+from fastapicommon._scope import ABORTED, PANICKED
 from fastapicommon.exceptions.handlers import (
     log_unclassified,
     problem_trace_id,
@@ -64,6 +64,7 @@ class UnhandledErrorMiddleware:
                 )
                 return
             _record_on_span(exc)
+            scope[PANICKED] = True
             response = await unhandled_exception_handler(request, exc)
             await response(scope, receive, send)
 

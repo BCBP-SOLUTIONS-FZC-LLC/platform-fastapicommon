@@ -8,10 +8,11 @@ flowchart TD
     end
 
     subgraph http["Per HTTP request — PrometheusMiddleware"]
-        B([call_next request]) --> C["route = http_route_label(scope)\n(Gin-style template or 'unknown')"]
-        C --> D["platform_http_active_requests +1\nawait call_next request"]
-        D --> F["platform_http_requests_total / _request_duration_seconds\n_request_size_bytes / _response_size_bytes\n{method, route, status_class, error_class}"]
-        D -.->|exception| P["recorded as 500 + platform_http_panics_total, re-raised"]
+        B([ASGI request]) --> C["route = http_route_label(scope)\n(Gin-style template or 'unknown'; resolved once per request)"]
+        C --> D["platform_http_active_requests +1\nawait app(scope, receive, send)"]
+        D --> F["when the request finishes: platform_http_requests_total /\n_request_duration_seconds / _request_size_bytes / _response_size_bytes (bytes sent)\n{method, route, status_class, error_class}"]
+        D -.->|exception before the response started| P["recorded as 500 + platform_http_panics_total, re-raised"]
+        D -.->|exception after it started| Q["recorded with the status sent, not a panic (Go: ErrAbortHandler)"]
     end
 
     subgraph grpcflow["Per gRPC unary-unary call — ContextServerInterceptor"]

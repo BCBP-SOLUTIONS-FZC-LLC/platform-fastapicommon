@@ -16,15 +16,15 @@ sequenceDiagram
     TR ->>+ CM: app(scope)
     Note over CM: read + validate x-user-id, x-tenant-id, x-tenant-roles,<br/>x-request-id, x-correlation-id (Go gincommon validation rules)<br/>generate request_id/correlation_id if absent<br/>compute trace_id from the active OTel span, client_ip from X-Forwarded-For/X-Real-IP/peer<br/>bind_request_context(...)
 
-    CM ->>+ LM: call_next(request)
+    CM ->>+ LM: app(scope)
     LM ->>+ UE: app(scope)
     UE ->>+ PM: app(scope)
     Note over PM: start = time.perf_counter()
 
-    PM ->>+ TM: call_next(request)
-    Note over TM: asyncio.wait_for(call_next(request), timeout_seconds)
+    PM ->>+ TM: app(scope)
+    Note over TM: run the app; 503 if no response has started within timeout_seconds
 
-    TM ->>+ H: call_next(request)
+    TM ->>+ H: app(scope)
     H -->>- TM: response
 
     alt handler exceeded timeout_seconds

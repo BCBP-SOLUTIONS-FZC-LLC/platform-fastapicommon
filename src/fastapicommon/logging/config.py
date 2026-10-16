@@ -28,7 +28,6 @@ import os
 import sys
 import threading
 import time
-import traceback
 from collections.abc import MutableMapping
 from datetime import UTC, datetime
 from pathlib import Path
@@ -104,13 +103,22 @@ def resolve_level(level: int | str | None, dev: bool) -> int:
     return default
 
 
-def sampling_enabled() -> bool:
-    raw = os.environ.get("LOG_SAMPLING", "").strip().lower()
+def env_bool(key: str, fallback: bool) -> bool:
+    """A boolean environment variable (``true`` / ``1`` / ``yes``, ``false`` / ``0`` / ``no``,
+    case-insensitive); unset gives ``fallback``, and an invalid value gives ``fallback`` with a
+    one-time warning on stderr. Shared by the logging and tracing configuration."""
+    raw = os.environ.get(key, "").strip().lower()
     if raw in ("true", "1", "yes"):
         return True
-    if raw not in ("", "false", "0", "no"):
-        _warn_once("LOG_SAMPLING", raw, "false")
-    return False
+    if raw in ("false", "0", "no"):
+        return False
+    if raw:
+        _warn_once(key, raw, str(fallback).lower())
+    return fallback
+
+
+def sampling_enabled() -> bool:
+    return env_bool("LOG_SAMPLING", False)
 
 
 # --------------------------------------------------------------------------------------------
@@ -216,22 +224,46 @@ def _stack_from(dev: bool) -> int:
     return logging.WARNING if dev else logging.ERROR
 
 
-def _make_caller_and_stack(dev: bool) -> structlog.typing.Processor:
+#: The level from which entries carry ``stacktrace`` (set by :func:`configure_logging`; read
+#: per entry so cached loggers follow a reconfiguration).
+_stack_threshold = logging.ERROR
+
+
+def _zap_stack(frame: FrameType) -> str:
+    """Zap's stacktrace layout, innermost first: ``function`` then ``\tfile:line`` per frame, at
+    most ``MAX_STACK_FRAMES``. Built from the frames alone (no source lines are read)."""
+    lines: list[str] = []
+    current: FrameType | None = frame
+    while current is not None and len(lines) < 2 * MAX_STACK_FRAMES:
+        code = current.f_code
+        module = current.f_globals.get("__name__") or "?"
+        lines.append(f"{module}.{getattr(code, 'co_qualname', code.co_name)}")
+        lines.append(f"\t{code.co_filename}:{current.f_lineno}")
+        current = current.f_back
+    return "\n".join(lines)
+
+
+def _caller_and_stack(logger: WrappedLogger, method_name: str, event_dict: EventDict) -> EventDict:
     """Zap's ``AddCaller`` (``dir/file.py:line`` of the logging call) and ``AddStacktrace``
     (the call stack, from warn in dev / from error in production)."""
-    threshold = _stack_from(dev)
+    frame = _first_app_frame()
+    path = Path(frame.f_code.co_filename)
+    event_dict["_caller"] = f"{path.parent.name}/{path.name}:{frame.f_lineno}"
+    level = _LEVELS.get(_ZAP_LEVEL.get(method_name, method_name), logging.INFO)
+    if level >= _stack_threshold:
+        event_dict["_stacktrace"] = _zap_stack(frame)
+    return event_dict
 
-    def processor(logger: WrappedLogger, method_name: str, event_dict: EventDict) -> EventDict:
-        frame = _first_app_frame()
-        path = Path(frame.f_code.co_filename)
-        event_dict["_caller"] = f"{path.parent.name}/{path.name}:{frame.f_lineno}"
-        level = _LEVELS.get(_ZAP_LEVEL.get(method_name, method_name), logging.INFO)
-        if level >= threshold:
-            frames = traceback.format_stack(frame)[-MAX_STACK_FRAMES:]
-            event_dict["_stacktrace"] = "".join(frames).rstrip("\n")
-        return event_dict
 
-    return processor
+#: One processor chain for every configuration: what changes between calls (stack threshold,
+#: level, handlers) is read at log time, so loggers can be cached on first use.
+_SHARED: list[structlog.typing.Processor] = [
+    structlog.contextvars.merge_contextvars,
+    structlog.stdlib.add_log_level,
+    _add_request_context,
+    _caller_and_stack,
+    structlog.processors.format_exc_info,
+]
 
 
 def _zap_entry(event_dict: EventDict, method_name: str) -> tuple[dict[str, Any], dict[str, Any]]:
@@ -315,18 +347,11 @@ def configure_logging(level: int | str | None = None, environment: str | None = 
         if environment is not None
         else (os.environ.get("APP_ENV") or os.environ.get("ENVIRONMENT", ""))
     )
+    global _stack_threshold
     dev = is_dev_env(env)
     resolved = resolve_level(level, dev)
-
-    shared: list[structlog.typing.Processor] = [
-        structlog.contextvars.merge_contextvars,
-        structlog.stdlib.add_log_level,
-        _add_request_context,
-    ]
-    shared += [
-        _make_caller_and_stack(dev),
-        structlog.processors.format_exc_info,
-    ]
+    _stack_threshold = _stack_from(dev)
+    shared = _SHARED
 
     root = logging.getLogger()
     for handler in [h for h in root.handlers if getattr(h, _HANDLER_MARKER, False)]:
@@ -361,8 +386,18 @@ def configure_logging(level: int | str | None = None, environment: str | None = 
     root.setLevel(resolved)
 
     structlog.configure(
-        processors=[*shared, structlog.stdlib.ProcessorFormatter.wrap_for_formatter],
-        logger_factory=structlog.stdlib.LoggerFactory(),
-        wrapper_class=structlog.make_filtering_bound_logger(resolved),
-        cache_logger_on_first_use=False,
+        # filter_by_level checks the stdlib level at call time (set above), so a cached logger
+        # follows a later configure_logging, and a disabled entry costs one level check.
+        processors=_PROCESSORS,
+        logger_factory=_LOGGER_FACTORY,
+        wrapper_class=structlog.stdlib.BoundLogger,
+        cache_logger_on_first_use=True,
     )
+
+
+_PROCESSORS: list[structlog.typing.Processor] = [
+    structlog.stdlib.filter_by_level,
+    *_SHARED,
+    structlog.stdlib.ProcessorFormatter.wrap_for_formatter,
+]
+_LOGGER_FACTORY = structlog.stdlib.LoggerFactory()

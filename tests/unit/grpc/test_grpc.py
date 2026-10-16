@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import contextlib
 from types import SimpleNamespace
 from typing import Any
 
@@ -152,3 +153,34 @@ def test_context_client_interceptor_no_headers_when_unbound() -> None:
 
     ContextClientInterceptor().intercept_unary_unary(continuation, details, "request")
     assert captured["metadata"] == []
+
+
+def test_failing_metric_still_resets_context_and_ends_span(monkeypatch: Any) -> None:
+    """Regression: finish() ran metrics, log, context reset and span end in sequence, so a
+    failing step left the RequestContext / OTel context bound on the reused worker thread."""
+    from opentelemetry import trace
+
+    from fastapicommon.grpc import server as server_module
+
+    class _Broken:
+        def grpc_inflight_inc(self, method: str) -> None:
+            pass
+
+        def grpc_inflight_dec(self, method: str) -> None:
+            self.decremented = True
+
+        def record_grpc(self, *args: Any) -> None:
+            raise RuntimeError("bad label")
+
+    broken = _Broken()
+    monkeypatch.setattr(server_module, "platform_metrics", lambda: broken)
+    handler = grpc.unary_unary_rpc_method_handler(lambda request, context: "ok")
+    wrapped = ContextServerInterceptor().intercept_service(
+        lambda details: handler, SimpleNamespace(method="/svc/Method")
+    )
+    outer_span = trace.get_current_span()
+    with contextlib.suppress(RuntimeError):
+        wrapped.unary_unary("request", _FakeServicerContext((("x-user-id", "u1"),)))
+    assert get_request_context_or_none() is None
+    assert trace.get_current_span() is outer_span
+    assert broken.decremented
