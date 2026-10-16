@@ -27,7 +27,7 @@ The public surface is each subpackage's `__all__` (SemVer over it, [`VERSIONING.
 
 | Subpackage | `__all__` (abridged where noted) |
 |---|---|
-| `bootstrap` | `create_platform_app` |
+| `bootstrap` | `create_platform_app`, `FASTAPI_NATIVE_TELEMETRY_OFF` |
 | `config` | `PlatformSettings` |
 | `context` | `CurrentUser`, `RequestContext`, `get_request_context`, `get_request_context_or_none`, `get_request_id`, `get_correlation_id`, `get_tenant_id`, `get_user_id`, `get_roles`, `get_trace_id`, `get_client_ip`, `bind_request_context`, `reset_request_context`, `request_context_scope` |
 | `auth` | header constants (`USER_ID_HEADER`, `TENANT_ID_HEADER`, `TENANT_ROLES_HEADER`, `TENANT_ROLES_SEPARATOR`, `REQUEST_ID_HEADER`, `CORRELATION_ID_HEADER`, `TRACEPARENT_HEADER`), `MAX_HEADER_VALUE_LEN`, `MAX_ROLE_LEN`, `MAX_REQUEST_ID_LEN`, `CurrentUser`, `get_current_user`, `require_authenticated_user`, `normalize_header_value`, `normalize_request_id`, `parse_roles` |
@@ -41,6 +41,8 @@ The public surface is each subpackage's `__all__` (SemVer over it, [`VERSIONING.
 | `metrics` | `init_metrics`, `init_metrics_from_settings`, `resolve_metrics_options`, `MetricsOptions`, `MetricsIdentity`, `metrics_identity`, `identity_labels`, `metrics_registry`, `platform_metrics`, `platform_metrics_enabled`, `PlatformMetrics`, `PrometheusMiddleware`, `metrics_router`, `new_counter` / `new_gauge` / `new_histogram`, `new_shared_counter` / `new_shared_gauge` / `new_shared_histogram`, `register_labeled`, `ObservabilityRegistry`, `default_registry`, `http_method_label`, `MetricsNotInitializedError`; module `fastapicommon.metrics.compliance` (`validate`, `validate_text`, `Report`) |
 | `health` | `health_router`, `create_health_router(readiness_checks=...)`, `ReadinessCheck` |
 | `middleware` | `ContextMiddleware(app, trusted_proxies=None)`, `TracingMiddleware`, `LoggingMiddleware`, `TimeoutMiddleware(app, timeout_seconds)` |
+
+FastAPI ≥ 0.143 instruments itself with OpenTelemetry; `create_platform_app` passes `telemetry=` with tracing, metrics, logs, operation spans and auto-configuration off (a service's own `telemetry=` wins). A hand-built app with `TracingMiddleware` needs `FastAPI(**FASTAPI_NATIVE_TELEMETRY_OFF)`, or each request has two server spans.
 
 `instrument_grpc_server()` nests a second span under the interceptor's; use `init_tracing_from_env()` with the interceptor instead.
 

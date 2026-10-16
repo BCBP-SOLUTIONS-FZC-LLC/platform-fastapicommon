@@ -12,8 +12,9 @@ services:
         condition: service_healthy
 
   tempo:
-    # Pin 2.7.x: :latest is Tempo 3.x with a different config schema.
-    image: grafana/tempo:2.7.2
+    # Pinned (not :latest) so a schema change cannot break the stack unnoticed. 3.1.0 is checked
+    # against docker/tempo/tempo.yaml: ready, accepts OTLP, serves /api/traces/<id>.
+    image: grafana/tempo:3.1.0
     command: ["-config.file=/etc/tempo.yaml"]
     volumes:
       - ./docker/tempo/tempo.yaml:/etc/tempo.yaml:ro

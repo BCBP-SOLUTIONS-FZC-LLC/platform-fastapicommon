@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import inspect
 from collections.abc import AsyncIterator, Callable
 from contextlib import AbstractAsyncContextManager, asynccontextmanager
 from typing import Any
@@ -17,6 +18,25 @@ from fastapicommon.middleware import ContextMiddleware, TimeoutMiddleware
 from fastapicommon.middleware.logging import LoggingMiddleware
 from fastapicommon.middleware.tracing import TracingMiddleware
 from fastapicommon.telemetry import TracingConfig, ensure_tracing, flush_tracing
+
+#: FastAPI ≥ 0.143 instruments itself with OpenTelemetry by default: a second server span per
+#: request (route in ``{param}`` syntax, outside the platform span), operation spans, HTTP
+#: metrics outside the registry, and OTel log records that carry exception messages. This
+#: library owns all three signals, so its apps turn FastAPI's off unless the service passes its
+#: own ``telemetry=``. Older FastAPI has no ``telemetry`` parameter: nothing is passed there.
+FASTAPI_NATIVE_TELEMETRY_OFF: dict[str, Any] = (
+    {
+        "telemetry": {
+            "tracing": False,
+            "metrics": False,
+            "logs": False,
+            "operation_spans": False,
+            "auto_configure": False,
+        }
+    }
+    if "telemetry" in inspect.signature(FastAPI.__init__).parameters
+    else {}
+)
 
 
 def create_platform_app(
@@ -47,6 +67,10 @@ def create_platform_app(
     accepts), ``on_startup`` / ``on_shutdown`` and ``@app.on_event`` handlers all still run; the
     flush runs after them. The flush leaves the provider running for any other app or gRPC
     server in the process (the SDK shuts it down at interpreter exit).
+
+    FastAPI's own OpenTelemetry instrumentation (FastAPI ≥ 0.143) is turned off, so each request
+    has exactly one server span and every metric is a registry metric; a ``telemetry=`` in
+    ``fastapi_kwargs`` replaces that default (see :data:`FASTAPI_NATIVE_TELEMETRY_OFF`).
     """
     settings = settings or PlatformSettings()
     if app_name:
@@ -60,7 +84,7 @@ def create_platform_app(
     if settings.enable_tracing:
         ensure_tracing(_tracing_config(settings, environment))
 
-    app = FastAPI(title=settings.app_name, **fastapi_kwargs)
+    app = FastAPI(title=settings.app_name, **{**FASTAPI_NATIVE_TELEMETRY_OFF, **fastapi_kwargs})
     if settings.enable_tracing:
         # Wrap the router's lifespan after FastAPI has normalised it (a generator function, an
         # async context manager factory, or the default that runs on_startup / on_event).

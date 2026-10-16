@@ -12,6 +12,7 @@ from opentelemetry.sdk.trace import ReadableSpan, TracerProvider
 from opentelemetry.sdk.trace.export.in_memory_span_exporter import InMemorySpanExporter
 from opentelemetry.trace import StatusCode
 
+from fastapicommon.bootstrap import FASTAPI_NATIVE_TELEMETRY_OFF
 from fastapicommon.middleware import ContextMiddleware
 from fastapicommon.middleware.tracing import TracingMiddleware
 from fastapicommon.telemetry import TracingConfig, init_tracing, shutdown_tracing
@@ -40,7 +41,8 @@ def spans() -> Iterator[_Spans]:
 
 
 def _app(with_context: bool = False, trusted_proxies: str | None = None) -> FastAPI:
-    app = FastAPI()
+    # A hand-built app turns FastAPI's own server span off, as create_platform_app does.
+    app = FastAPI(**FASTAPI_NATIVE_TELEMETRY_OFF)
 
     @app.get("/status/{code}")
     async def status(code: int) -> Response:

@@ -1,4 +1,4 @@
-# Single-binary Tempo for local docker-compose (compatible with Tempo 2.7+).
+# Single-binary Tempo for local docker-compose (checked with Tempo 2.7 and 3.1).
 stream_over_http_enabled: true
 
 server:

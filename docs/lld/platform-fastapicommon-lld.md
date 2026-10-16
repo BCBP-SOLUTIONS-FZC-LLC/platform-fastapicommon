@@ -7,7 +7,7 @@
 | Document type | Low-Level Design (LLD) |
 | Component | `platform-fastapicommon` (shared FastAPI HTTP + gRPC transport and observability library; the Python port of `platform-gincommon`) |
 | Python package | `platform-fastapicommon` (import name `fastapicommon`), `requires-python >= 3.11`; CI tests 3.11, 3.12, 3.13 and 3.14, plus every runtime dependency at its floor |
-| Status | `0.2.0` released 2026-07-27. `[Unreleased]` (target **`0.3.0`**, breaking) on `feat/observability-standard`, PR #25: logs, metrics and traces aligned with platform-gincommon `v2.0.0`; CI/CD port; four production-readiness review rounds; OQ-2 … OQ-4 resolved; 100% line and branch coverage; repository docs aligned with platform-gincommon's |
+| Status | `0.2.0` released 2026-07-27. `[Unreleased]` (target **`0.3.0`**, breaking) on `main` (PR #25 merged 2026-10-16, `ba1f90f`): logs, metrics and traces aligned with platform-gincommon `v2.0.0`; CI/CD port; four production-readiness review rounds; OQ-2 … OQ-4 resolved; 100% line and branch coverage; repository docs aligned with platform-gincommon's |
 | Previous release | `0.1.1` (2026-07-26) |
 | Governing standard | Enterprise Platform Observability Standard ([`docs/observability/README.md`](../observability/README.md)); the registry is gincommon's, vendored byte for byte |
 | Reference design | [`platform-gincommon` LLD](../../../../platform-gincommon/docs/lld/platform-gincommon-lld.md) — this library implements the same contracts in Python; where they differ, §16 records why |
@@ -19,6 +19,7 @@
 
 | Rev | Date | Change |
 |---|---|---|
+| 1.3 | 2026-10-17 | **Dependencies to latest.** Every locked package upgraded (FastAPI 0.143.3, Starlette 1.8.0, OpenTelemetry 1.45.1, grpcio 1.84.0, ruff 0.17.1, black 26.10.1, …), GitHub Actions (`setup-uv` v10.3.0, `upload-artifact` v7.0.2, `download-artifact` v8.0.2, `codeql-action` v4.38.3), pre-commit hooks, promtool image v3.15.0, local Tempo 3.1.0. FastAPI 0.143's native OpenTelemetry duplicated the server span: `create_platform_app` turns it off (`FASTAPI_NATIVE_TELEMETRY_OFF`, B-2). §3.1, §5.3, §5.4.1, §14.5 (T-17) updated. |
 | 1.2 | 2026-10-16 | **Tests and documentation.** 423 tests (388 unit, 29 integration, 6 e2e), **100%** line and branch coverage: `TracingMiddleware` unit tests (client address without `ContextMiddleware`, span status per response class, an escaped exception as a `panic` span), non-IP and IPv6 proxy peers, a handler failing while cancelled after a timeout, `grpc.aio` bidirectional streams / unknown methods / `settings`, a context that cannot abort. The dead `PlatformMetrics.observe_http_response_size` path is removed; the `X-Forwarded-For` walk has no unreachable branch (same behaviour). README, ARCHITECTURE, CHANGELOG, CONTRIBUTING, SECURITY and VERSIONING follow platform-gincommon's structure; `.claude/` added. §1, §3, §5.4.2, §14, Appendix updated. |
 | 1.1 | 2026-10-16 | **OQ-2 / OQ-3 / OQ-4 resolved.** A repeated `x-user-id` / `x-tenant-id` is ambiguous and roles are capped at 4096 bytes / 64 roles, on HTTP and gRPC, with gincommon's 401 details (`resolve_identity`, `RequestContext.identity_rejection`). `client_ip` believes forwarding headers only from `trusted_proxies` (Gin `SetTrustedProxies`; default: the socket peer). §4.1, §4.2, §5.4.2, §8.3, §10, §12 updated. |
 | 1.0 | 2026-10-16 | First LLD, written against `feat/observability-standard` at `db99e50` (PR #25, CI green), with the structure of platform-gincommon's LLD rev 1.10. Records the state after the gincommon alignment and four review rounds (Appendix), and the remaining gaps against gincommon's contract as open questions (§16). |
@@ -72,7 +73,7 @@ This document is the low-level design for **`platform-fastapicommon`**, the shar
 
 It refines the gincommon contracts into Python specifics: exact public signatures, validation rules, initialisation algorithms, error codes and messages, flows, invariants and test obligations. Integration is in [README.md](../../README.md); diagrams and the invariant catalogue are in [ARCHITECTURE.md](../../ARCHITECTURE.md).
 
-**The code is at this state.** Every behaviour below is implemented on `feat/observability-standard` and covered by tests under `tests/` (423 tests: 388 unit, 29 integration, 6 e2e; **100%** line and branch coverage of `src/fastapicommon` over unit + integration). §14.5 lists the canonical tests that pin the load-bearing invariants.
+**The code is at this state.** Every behaviour below is implemented on `main` and covered by tests under `tests/` (425 tests: 388 unit, 31 integration, 6 e2e; **100%** line and branch coverage of `src/fastapicommon` over unit + integration). §14.5 lists the canonical tests that pin the load-bearing invariants.
 
 ### 1.1 Relationship to gincommon and the observability standard
 
@@ -200,16 +201,16 @@ platform-fastapicommon/
 
 | Package | Floor (`pyproject.toml`) | Locked (`uv.lock`, tested) | Notes |
 |---|---|---|---|
-| `fastapi` | `>=0.115.10` | 0.140.0 | |
-| `starlette` | `>=0.46` | 1.3.1 | below 0.46 a post-start exception reaches handlers wrapped in an `ExceptionGroup` |
-| `pydantic` / `pydantic-settings` | `>=2.6` / `>=2.2` | 2.13.4 / 2.14.2 | |
+| `fastapi` | `>=0.115.10` | 0.143.3 | ≥ 0.143 instruments itself with OpenTelemetry by default; `create_platform_app` turns that off (`FASTAPI_NATIVE_TELEMETRY_OFF`, §5.4.1) |
+| `starlette` | `>=0.46` | 1.8.0 | below 0.46 a post-start exception reaches handlers wrapped in an `ExceptionGroup` |
+| `pydantic` / `pydantic-settings` | `>=2.6` / `>=2.2` | 2.14.1 / 2.16.0 | |
 | `structlog` | `>=24.1` | 26.1.0 | only public API is used (no `structlog._frames`) |
 | `prometheus-client` | `>=0.20` | 0.26.0 | |
 | `httpx` | `>=0.27` | 0.28.1 | outbound propagation client |
-| `opentelemetry-api` / `-sdk` / `-exporter-otlp-proto-grpc` | `>=1.28` | 1.44.0 | the OTLP exporter pulls `grpcio` in |
-| `opentelemetry-instrumentation-grpc` | `>=0.49b0` | 0.65b0 | below 0.49b0 imports `pkg_resources` |
-| extra `grpc`: `grpcio` | `>=1.62` | 1.83.0 | `fastapicommon.grpc` needs it; never imported by the top-level package |
-| extra `examples`: `uvicorn` | `>=0.29` | 0.51.0 | plain uvicorn (not `[standard]`) for the image; the dev group keeps `[standard]` for `make run` |
+| `opentelemetry-api` / `-sdk` / `-exporter-otlp-proto-grpc` | `>=1.28` | 1.45.1 | the OTLP exporter pulls `grpcio` in |
+| `opentelemetry-instrumentation-grpc` | `>=0.49b0` | 0.66b1 | below 0.49b0 imports `pkg_resources` |
+| extra `grpc`: `grpcio` | `>=1.62` | 1.84.0 | `fastapicommon.grpc` needs it; never imported by the top-level package |
+| extra `examples`: `uvicorn` | `>=0.29` | 0.54.0 | plain uvicorn (not `[standard]`) for the image; the dev group keeps `[standard]` for `make run` |
 
 The `lowest-deps` CI job installs every runtime dependency at its floor and runs unit + integration. The build backend is pinned with hashes in `build-constraints.txt`.
 
@@ -363,6 +364,7 @@ Key vocabularies (same as gincommon): `domain` ∈ `iam`, `workflow`, `billing`,
 | # | Signature | Behaviour |
 |---|---|---|
 | B-1 | `create_platform_app(app_name: str \| None = None, settings: PlatformSettings \| None = None, **fastapi_kwargs) -> FastAPI` | §5.4.1 |
+| B-2 | `FASTAPI_NATIVE_TELEMETRY_OFF: dict[str, Any]` | `FastAPI(**FASTAPI_NATIVE_TELEMETRY_OFF)` for an app built by hand with `TracingMiddleware`; `{}` before FastAPI 0.143 |
 | B-2 | `class PlatformSettings(BaseSettings)` | §12.2; reads `.env` and the environment |
 | B-3 | `__version__` | the installed distribution's version |
 
@@ -457,7 +459,7 @@ Key vocabularies (same as gincommon): `domain` ∈ `iam`, `workflow`, `billing`,
 2. `init_metrics_from_settings(settings)` (§6.2): with `enable_metrics` (default) a missing domain, an invalid service label or an environment outside the vocabulary raises `ValueError`; without it, a configured identity is still validated.
 3. `configure_logging(settings.log_level or None, settings.environment or None)`.
 4. With `enable_tracing` (default): `ensure_tracing(TracingConfig.from_env(service_name=app_name, service_version=build_version, domain, environment, endpoint=otlp_endpoint))` (§6.3).
-5. `app = FastAPI(title=app_name, **fastapi_kwargs)`. With tracing, the **router's** lifespan is wrapped after FastAPI normalised it, so any lifespan form, `on_startup` / `on_shutdown` and `@app.on_event` handlers still run; the wrapper flushes spans on shutdown in a worker thread (`flush_tracing`, ≤ 5 s).
+5. `app = FastAPI(title=app_name, **{**FASTAPI_NATIVE_TELEMETRY_OFF, **fastapi_kwargs})`. On FastAPI ≥ 0.143 the default is `telemetry={tracing, metrics, logs, operation_spans, auto_configure: False}`: FastAPI's own instrumentation would add a second root server span per request (`{param}` route syntax), operation spans, HTTP metrics outside the registry, and OTel log records with exception messages. A `telemetry=` from the service replaces it; on older FastAPI the constant is `{}`. With tracing, the **router's** lifespan is wrapped after FastAPI normalised it, so any lifespan form, `on_startup` / `on_shutdown` and `@app.on_event` handlers still run; the wrapper flushes spans on shutdown in a worker thread (`flush_tracing`, ≤ 5 s).
 6. Middleware in ORD-1 order (`TracingMiddleware` only with tracing; `PrometheusMiddleware` and `/metrics` only with metrics); `TimeoutMiddleware(timeout_seconds=request_timeout_seconds)`.
 7. `health_router`; `register_exception_handlers(app, type_base=problem_type_base, service=app_name)`.
 
@@ -1083,7 +1085,7 @@ Two-stage `Dockerfile`, both bases digest-pinned (`ghcr.io/astral-sh/uv:0.13.1`,
 
 ## 14. Testing Strategy
 
-423 tests (388 unit, 29 integration, 6 e2e); `make ci` / CI `Validate / Test` run unit + integration with coverage (gate 90%, `coverage-gate.sh`; current **100%** line and branch, with no `pragma: no cover` in `src/`). e2e runs in the smoke job against the built image. New code is expected to keep 100%: an unreachable branch is restructured away rather than excluded.
+425 tests (388 unit, 31 integration, 6 e2e); `make ci` / CI `Validate / Test` run unit + integration with coverage (gate 90%, `coverage-gate.sh`; current **100%** line and branch, with no `pragma: no cover` in `src/`). e2e runs in the smoke job against the built image. New code is expected to keep 100%: an unreachable branch is restructured away rather than excluded.
 
 ### 14.1 Unit tests (`tests/unit/`, no Docker)
 
@@ -1100,7 +1102,7 @@ Two-stage `Dockerfile`, both bases digest-pinned (`ghcr.io/astral-sh/uv:0.13.1`,
 
 ### 14.2 Integration tests (`tests/integration/`, in-process)
 
-`create_platform_app()` end to end through `TestClient` and direct ASGI calls (29 tests): bootstrap wiring and lifespans (`on_event`, generator lifespans), observability signals (spans, logs, metrics for success, 404, 500, aborted streams, cancelled requests), metrics compliance of the library's own scrape, mounted routes without metrics.
+`create_platform_app()` end to end through `TestClient` and direct ASGI calls (31 tests): bootstrap wiring and lifespans (`on_event`, generator lifespans), observability signals (spans, logs, metrics for success, 404, 500, aborted streams, cancelled requests), metrics compliance of the library's own scrape, mounted routes without metrics.
 
 ### 14.3 Contract tests
 
@@ -1135,6 +1137,7 @@ Two-stage `Dockerfile`, both bases digest-pinned (`ghcr.io/astral-sh/uv:0.13.1`,
 | T-14 | `test_vendored_registry_is_identical_to_gincommon` | CONS-3 |
 | T-15 | `test_client_address_without_context_middleware_is_the_peer`, `test_forwarding_headers_ignored_when_the_peer_is_not_an_ip` | SEC client IP: forwarding headers never believed without a trusted proxy |
 | T-16 | `test_escaped_exception_marks_the_span_panic_without_its_message`, `test_wrapper_reraises_when_the_context_cannot_abort` | OBS-8 without `UnhandledErrorMiddleware` / without an aborting context |
+| T-17 | `test_fastapi_native_telemetry_is_off`, `test_a_services_own_telemetry_setting_is_kept` | TRC: exactly one server span per request (FastAPI ≥ 0.143) |
 
 ---
 
