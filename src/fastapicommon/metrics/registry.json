@@ -87,7 +87,9 @@
       32768,
       65536,
       262144,
-      1048576
+      1048576,
+      4194304,
+      16777216
     ],
     "dependency_request": [
       0.005,
@@ -157,6 +159,17 @@
       0.5,
       1,
       10
+    ],
+    "lifecycle_event_lag": [
+      0.05,
+      0.1,
+      0.5,
+      1,
+      5,
+      15,
+      60,
+      300,
+      1800
     ]
   },
   "labels": {
@@ -358,6 +371,16 @@
       "description": "Build version of the emitting binary (Config.BuildVersion / BUILD_VERSION; unknown when unset). Only on build-info metrics: a per-build label on every series would multiply series on each deploy.",
       "pattern": "^[0-9A-Za-z][0-9A-Za-z._+-]{0,63}$",
       "cardinality": "one value per deployment"
+    },
+    "violation_type": {
+      "description": "Row-level-security violation class recorded in rls_violation_log by rls_check_tenant() and the service's own checks, snake_case; other for anything outside the set.",
+      "values": [
+        "cross_tenant_access",
+        "missing_or_invalid_guc",
+        "missing_primary_email",
+        "other"
+      ],
+      "cardinality": "fixed"
     }
   },
   "metrics": [
@@ -412,7 +435,7 @@
       "unit": "bytes",
       "buckets": "payload_size",
       "status": "proposed",
-      "help": "HTTP request body size in bytes from Content-Length (0 when unknown).",
+      "help": "HTTP request body size in bytes from Content-Length (not observed when the length is unknown, e.g. chunked uploads).",
       "labels": [
         "method",
         "route",
@@ -1286,6 +1309,72 @@
         "outcome"
       ],
       "aggregation": "sum by (environment, operation, outcome) of rate()."
+    },
+    {
+      "name": "iam_rls_violations_total",
+      "tier": "domain",
+      "domain": "iam",
+      "type": "counter",
+      "status": "proposed",
+      "help": "Row-level-security violations recorded in the service's rls_violation_log, by violation_type. Fed from a periodic scrape of the log table, not from the request path.",
+      "labels": [
+        "violation_type"
+      ],
+      "aggregation": "sum by (environment, service, violation_type) of increase(); any increase is a security signal, so alert on > 0 rather than on a ratio.",
+      "cardinality": "violation_type (4).",
+      "governance_notes": "Emitted today by iam-org-membership, iam-audit-log and iam-user-profile with the same name and label set (iam-user-profile LLD §11.2 established it). missing_primary_email is written only by iam-user-profile; iam-audit-log maps unknown values to other, the other two pass the stored value through, so the set is bounded by the services' own SQL. Needs an IAM owner before ratification."
+    },
+    {
+      "name": "iam_auth_session_revoke_failed_total",
+      "tier": "domain",
+      "domain": "iam",
+      "type": "counter",
+      "status": "proposed",
+      "help": "Calls to the realm provisioner's RevokeUserSessions that errored or returned non-2xx. The caller fails open (AUTH-8), so every increment is a user session that may outlive its membership.",
+      "labels": [
+        "reason"
+      ],
+      "label_values": {
+        "reason": [
+          "transport",
+          "http_4xx",
+          "http_5xx",
+          "http_other"
+        ]
+      },
+      "aggregation": "sum by (environment, service, reason) of rate(); alert on sustained rate > 0.",
+      "cardinality": "reason (4).",
+      "governance_notes": "Emitted today only by iam-org-membership; registered as domain-shared because any IAM service that revokes sessions must report through the same name. iam-org-membership currently emits the raw HTTP status code (e.g. \"503\") as reason, which the reason vocabulary rejects: it must map codes to http_4xx / http_5xx / http_other before metricslint check passes."
+    },
+    {
+      "name": "iam_lifecycle_event_skipped_total",
+      "tier": "domain",
+      "domain": "iam",
+      "type": "counter",
+      "status": "proposed",
+      "help": "Tenant lifecycle events skipped by the recency guard (EVT-14: event time <= the tenant's last applied event time), by event_type.",
+      "labels": [
+        "event_type"
+      ],
+      "aggregation": "sum by (environment, service, event_type) of rate(); a sustained rate means out-of-order delivery or a replay.",
+      "cardinality": "event_type (tenant lifecycle events, ≤10).",
+      "governance_notes": "Emitted today only by iam-org-membership."
+    },
+    {
+      "name": "iam_lifecycle_event_lag_seconds",
+      "tier": "domain",
+      "domain": "iam",
+      "type": "histogram",
+      "unit": "seconds",
+      "buckets": "lifecycle_event_lag",
+      "status": "proposed",
+      "help": "Seconds from a tenant lifecycle event's envelope time to the moment the consumer applied it, by event_type. Sustained high p99 flags a consumer backlog (SLO-3).",
+      "labels": [
+        "event_type"
+      ],
+      "aggregation": "histogram_quantile(0.99, sum by (le, environment, service, event_type) (rate(iam_lifecycle_event_lag_seconds_bucket[5m]))). Includes producer clock skew.",
+      "cardinality": "event_type (≤10) × 10 buckets.",
+      "governance_notes": "Emitted today only by iam-org-membership; the lifecycle_event_lag preset is that service's existing bucket set. Overlaps platform_event_propagation_seconds (envelope time to first receipt) but measures to apply time and includes retries; governance to decide whether to keep both or move to the platform metric and its event_propagation preset."
     },
     {
       "name": "build_info",
