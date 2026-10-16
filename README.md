@@ -52,9 +52,9 @@ This library **standardises** these concerns once so every service gets:
   (`request_id`, `correlation_id`, `tenant_id`, `user_id`)
 - OTel spans with the same instrumentation (`FastAPIInstrumentor`)
 - A `RequestContext`/`CurrentUser` available in every handler via one dependency
-- The same error JSON shape (`{"error": ..., "status": ..., "trace_id": ..., "request_id": ...}`)
-  across all services — matching the Go `gincommon` library's `ErrorResponse` exactly, so a Go
-  client parsing either language's error body succeeds unchanged
+- The same RFC 9457 Problem Details error contract (`application/problem+json`) across all
+  services — the same types, titles, error codes, trace ids and validation messages as the Go
+  `gincommon` v2 library (see [docs/problem-details.md](docs/problem-details.md))
 
 ---
 
@@ -69,9 +69,9 @@ This library **standardises** these concerns once so every service gets:
 | **Auth** | `Depends(require_authenticated_user)` — `401` if `x-user-id` unset (opt-in per route) | **Not provided** — no gRPC equivalent exists; check `get_request_context().user_id` yourself |
 | **Tenant context** | `RequestContext{request_id, correlation_id, user: CurrentUser, trace_id, client_ip}` via `get_request_context()` | Same struct, same accessor, bound by `ContextServerInterceptor` |
 | **RBAC** | `RequireRole` / `RequireAnyRole` / `RequireAllRoles` as FastAPI dependencies | **Not provided** — these are FastAPI `Depends`-based; there is no gRPC interceptor equivalent |
-| **Timeout** | `TimeoutMiddleware(timeout_seconds=...)` — `asyncio.wait_for` around the handler, `504` JSON on expiry | **Not provided** — set a deadline on the gRPC channel/client call yourself |
+| **Timeout** | `TimeoutMiddleware(timeout_seconds=...)` — `asyncio.wait_for` around the handler, a `503` `service-unavailable` problem (`REQUEST_TIMEOUT`) on expiry | **Not provided** — set a deadline on the gRPC channel/client call yourself |
 | **Health** | `health_router` — `/health`, `/live`, `/ready` (200 unless custom readiness checks fail) | — |
-| **Error type** | `PlatformException` hierarchy → `{"error": ..., "status": ..., "trace_id": ..., "request_id": ...}` JSON via `register_exception_handlers` | Exceptions raised in a unary-unary handler propagate to the client as-is (gRPC has no equivalent exception-handler registry) |
+| **Error type** | `PlatformException` hierarchy → RFC 9457 problems via `register_exception_handlers` | Exceptions raised in a unary-unary handler propagate to the client as-is (gRPC has no equivalent exception-handler registry) |
 | **Outbound propagation** | `create_platform_http_client()` — `httpx.AsyncClient` that stamps identity/trace headers on every request | `ContextClientInterceptor` — stamps identity metadata on outbound unary-unary calls |
 | **OpenTelemetry init** | `setup_tracing(app, service_name, exporter=None)` (called automatically by `create_platform_app`) | `instrument_grpc_server()` / `instrument_grpc_client()` (call explicitly) |
 
@@ -215,25 +215,38 @@ async def list_items_handler() -> dict:
 
 ### Error response shape
 
-All `PlatformException` subclasses (and the generic-exception fallback) produce the same
-JSON body — matching `platform-gincommon`'s `ErrorResponse` exactly, field-for-field, so a
-Go client parsing either language's error response succeeds unchanged:
+Every error — `PlatformException` subclasses, request validation, `HTTPException`, unmatched
+routes, timeouts and the unhandled-exception fallback — is an RFC 9457 problem
+(`application/problem+json`), identical to `platform-gincommon` v2's:
 
 ```json
-{"error": "widget 42 not found", "status": 404, "trace_id": "...", "request_id": "..."}
+{
+  "type": "https://errors.company.com/platform/not-found",
+  "title": "Not Found",
+  "status": 404,
+  "detail": "Widget 42 was not found.",
+  "instance": "/widgets/42",
+  "traceId": "4bf92f3577b34da6a3ce929d0e0e4736",
+  "errorCode": "NOT_FOUND",
+  "timestamp": "2026-10-15T10:45:22Z"
+}
 ```
-
-`trace_id` is `""` when no OTel span is active for the request. The same `request_id`/
-`trace_id` values are also echoed as response headers (`X-Request-ID`/`X-Trace-ID`, plus the
-lowercase `x-request-id`/`x-correlation-id` pair) on every response, success or error:
 
 ```python
-import httpx
+from fastapicommon.exceptions import NotFoundException, PlatformException
+from fastapicommon.problem import problem_type
 
-resp = httpx.get("http://localhost:8080/widgets/nonexistent")
-print(resp.json())                       # {"error": "...", "status": 404, "trace_id": "...", "request_id": "..."}
-print(resp.headers["X-Request-ID"])      # same request_id as the JSON body
+TENDER_NOT_FOUND = problem_type("tender", "not-found", "Tender not found", 404, "TENDER_NOT_FOUND")
+
+raise NotFoundException("Widget 42 was not found.")
+raise PlatformException("Tender 123 was not found.", problem_type=TENDER_NOT_FOUND)
 ```
+
+Validation failures are `400 platform/validation-failed` with `validationErrors`
+(`[{"field": "items[0].sku", "message": "must be at most 8 characters"}]`), a 5xx never carries
+a `detail`, and `tenantId` is present only for an authenticated identity (never on a 401).
+Clients parse problems with `fastapicommon.problem.problem_from_response(resp)`. Full contract,
+mapping and migration: [docs/problem-details.md](docs/problem-details.md).
 
 ---
 
@@ -407,7 +420,7 @@ Const labels on every `platform_*` series: `domain`, `service`, `environment`.
 | `platform_http_active_requests` | gauge | `route` | `PrometheusMiddleware` |
 | `platform_http_panics_total` | counter | `method`, `route` | `PrometheusMiddleware` — unhandled exceptions (also counted as 5xx above) |
 | `platform_http_rate_limited_requests_total` | counter | `method`, `route` | `PrometheusMiddleware` — any 429 response |
-| `platform_http_request_timeouts_total` | counter | `method`, `route` | `TimeoutMiddleware` — each 504 it returns |
+| `platform_http_request_timeouts_total` | counter | `method`, `route` | `TimeoutMiddleware` — each 503 timeout problem it returns |
 | `platform_grpc_server_handled_total` | counter | `grpc_method`, `grpc_code`, `status_class`, `error_class` | `ContextServerInterceptor` (unary-unary) |
 | `platform_grpc_server_handling_seconds` | histogram (`request_duration` buckets) | `grpc_method`, `status_class`, `error_class` | same |
 | `platform_grpc_server_request_size_bytes` / `_response_size_bytes` | histogram (`payload_size` buckets) | same | same (protobuf `ByteSize()`, 0 for non-protobuf messages) |

@@ -49,10 +49,12 @@ def test_platform_exception_handled_through_bootstrap() -> None:
     client = TestClient(_build_app())
     response = client.get("/boom")
     assert response.status_code == 404
+    assert response.headers["content-type"] == "application/problem+json"
     body = response.json()
-    assert body["error"] == "nope"
+    assert body["detail"] == "nope"
     assert body["status"] == 404
-    assert set(body) == {"error", "status", "trace_id", "request_id"}
+    assert body["type"] == "https://errors.company.com/platform/not-found"
+    assert {"type", "title", "status", "instance", "traceId", "errorCode", "timestamp"} <= set(body)
 
 
 def test_metrics_disabled_removes_endpoint() -> None:

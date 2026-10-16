@@ -7,6 +7,41 @@ pre-1.0 caveat on what SemVer guarantees currently apply.
 
 ## [Unreleased]
 
+### Changed (breaking) — RFC 9457 Problem Details (parity with `platform-gincommon` v2.0.0)
+
+- Every HTTP error is an RFC 9457 problem (`application/problem+json`) instead of
+  `{error, status, trace_id, request_id}`: `type`, `title`, `status`, `detail`, `instance`,
+  `traceId`, `errorCode`, `tenantId`, `timestamp`, `validationErrors`. The types, titles, error
+  codes, trace-id resolution and validation messages are gincommon v2's; see
+  [docs/problem-details.md](docs/problem-details.md).
+- `ValidationException` and `RequestValidationError` are **400** `platform/validation-failed`
+  (was 422), with `validationErrors` carrying JSON field paths and gincommon's fixed messages.
+- `TimeoutMiddleware` answers **503** `platform/service-unavailable` with `errorCode`
+  `REQUEST_TIMEOUT` (was 504), the response gincommon's `TimeoutMiddleware` sends.
+- `PlatformException.code` is now the upper-snake `errorCode` (`NOT_FOUND`); `status_code` derives
+  from the new `problem_type`. Default messages of `UnauthorizedException` and
+  `ForbiddenException` are gincommon's details. A 5xx never carries a detail.
+
+### Added
+
+- `fastapicommon.problem`: `ProblemType`, the 15 platform types, `problem_type(...)` for domain
+  types, `build_problem`, `resolve_trace_id`, `problem_from_response` / `parse_problem` for
+  clients.
+- Exceptions `BusinessException` (alias of `PlatformException`, which now takes
+  `problem_type=`, `code=` and `validation_errors=`), `ResourceNotFoundException`,
+  `BusinessRuleViolationException` (422), `RateLimitException` (429),
+  `UnsupportedOperationException` (501), `ServiceUnavailableException` (503); `NotImplementedError`
+  maps to 501. Unmatched routes are `ROUTE_NOT_FOUND`; 405 is `method-not-allowed`.
+- `PlatformSettings.problem_type_base` (`PROBLEM_TYPE_BASE`) and
+  `register_exception_handlers(app, type_base=, service=)`; `problem_response(request, type, ...)`.
+- One WARN `problem response` log line per problem (`traceId`, `type`, `status`, `errorCode`,
+  `service`, `tenantId`).
+
+### Fixed
+
+- Re-vendored `src/fastapicommon/metrics/registry.json` from gincommon (it had drifted behind
+  gincommon v1.5.0's four Tier 2 `iam_*` metrics).
+
 ### Added — Enterprise Platform Observability Standard (parity with `platform-gincommon`)
 
 - `platform_*` metrics — now the only HTTP/gRPC metrics the library emits — for the registry

@@ -20,7 +20,7 @@ sequenceDiagram
     H -->>- TM: response
 
     alt handler exceeded timeout_seconds
-        TM -->> Client: 504 {"error":"...", "status":504, "trace_id":"...", "request_id":"..."}
+        TM -->> Client: 503 application/problem+json (service-unavailable, REQUEST_TIMEOUT)
     else within timeout
         TM -->>- PM: response
     end
