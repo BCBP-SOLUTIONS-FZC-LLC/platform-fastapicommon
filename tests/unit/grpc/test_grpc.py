@@ -186,6 +186,14 @@ def test_failing_metric_still_resets_context_and_ends_span(monkeypatch: Any) -> 
     assert broken.decremented
 
 
+def test_context_from_metadata_skips_binary_values() -> None:
+    """``-bin`` metadata arrives as bytes: it is never read as an id or identity value."""
+    context = _context_from_metadata(
+        (("x-user-id-bin", b"\x00admin"), ("x-user-id", "u1"), ("x-tenant-id", "t1"))  # type: ignore[arg-type]
+    )
+    assert (context.user_id, context.tenant_id, context.identity_rejection) == ("u1", "t1", None)
+
+
 def test_context_from_metadata_validates_ids() -> None:
     """Regression: gRPC used x-request-id / x-correlation-id verbatim (Go's request_id
     interceptor applies NormalizeRequestID); invalid ones are replaced like on HTTP."""

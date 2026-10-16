@@ -147,6 +147,21 @@ def test_invalid_trusted_proxy_fails_at_startup() -> None:
         TestClient(_build_app("10.0.0.0/33")).get("/whoami")
 
 
+def test_forwarding_headers_ignored_when_the_peer_is_not_an_ip() -> None:
+    """A peer that is not an IP address (a Unix socket, TestClient's "testclient") is never a
+    trusted proxy, even with every address trusted: the forwarding headers are not believed."""
+    client = TestClient(_build_app("0.0.0.0/0,::/0"))
+    assert client.get("/whoami", headers=XFF).json()["client_ip"] == "testclient"
+
+
+def test_client_ip_from_an_ipv6_trusted_proxy() -> None:
+    client = TestClient(_build_app("fd00::/8"), client=("fd00::2", 50000))
+    headers = {"x-forwarded-for": "2001:db8::7, fd00::9"}
+    assert client.get("/whoami", headers=headers).json()["client_ip"] == "2001:db8::7"
+    untrusted = TestClient(_build_app("fd00::/8"), client=("2001:db8::1", 1))
+    assert untrusted.get("/whoami", headers=headers).json()["client_ip"] == "2001:db8::1"
+
+
 @pytest.mark.parametrize("header", ["x-user-id", "x-tenant-id"])
 def test_repeated_identity_header_is_ambiguous(header: str) -> None:
     """Regression: the first value won. gincommon rejects a repeated identity header (SEC-3); the

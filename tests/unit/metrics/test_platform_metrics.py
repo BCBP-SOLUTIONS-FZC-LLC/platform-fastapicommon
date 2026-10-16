@@ -606,3 +606,44 @@ def test_route_table_matched_once_per_request(monkeypatch: pytest.MonkeyPatch) -
 
     assert TestClient(app).get("/items/1").status_code == 200
     assert calls == 1
+
+
+async def test_response_size_counts_body_bytes_only() -> None:
+    """Messages other than the start and body (HTTP trailers) pass through and add nothing to
+    the response size, which is the body bytes sent (Go ``c.Writer.Size()``)."""
+    registry = CollectorRegistry()
+    init_metrics(IAM, registry=registry)
+
+    async def app(scope: Any, receive: Any, send: Any) -> None:
+        await send({"type": "http.response.start", "status": 200, "trailers": True})
+        await send({"type": "http.response.body", "body": b"abc", "more_body": False})
+        await send({"type": "http.response.trailers", "headers": [], "more_trailers": False})
+
+    sent: list[str] = []
+
+    async def receive() -> dict[str, Any]:
+        return {"type": "http.request", "body": b"", "more_body": False}
+
+    async def send(message: Any) -> None:
+        sent.append(message["type"])
+
+    scope = {"type": "http", "method": "GET", "path": "/x", "headers": []}
+    await PrometheusMiddleware(app)(scope, receive, send)
+    assert sent == ["http.response.start", "http.response.body", "http.response.trailers"]
+    labels = {"method": "GET", "route": "unknown", "status_class": "2xx", "error_class": "success"}
+    assert _value(registry, "platform_http_response_size_bytes_sum", **labels) == 3.0
+
+
+def test_route_label_without_iter_route_contexts(monkeypatch: pytest.MonkeyPatch) -> None:
+    """FastAPI before ``iter_route_contexts`` (the lowest-deps floor) keeps routes flat on the
+    app's router; the label is still the template."""
+    from fastapicommon.metrics import platform as platform_module
+
+    monkeypatch.setattr(platform_module, "_iter_route_contexts", None)
+    app = FastAPI()
+
+    @app.get("/items/{item_id}")
+    async def item(item_id: str) -> None: ...
+
+    scope = {"type": "http", "method": "GET", "path": "/items/7", "app": app}
+    assert http_route_label(scope) == "/items/:item_id"

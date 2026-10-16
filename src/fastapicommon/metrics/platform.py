@@ -451,10 +451,10 @@ class PlatformMetrics:
         status_code: int,
         seconds: float,
         request_size: float,
-        response_size: float | None,
+        response_size: float,
     ) -> None:
-        """One completed request. ``response_size=None`` defers that observation to
-        :meth:`observe_http_response_size` (body still streaming)."""
+        """One completed request; ``response_size`` is the body bytes sent (Go's
+        ``c.Writer.Size()``)."""
         labels = (
             *self._const,
             http_method_label(method),
@@ -465,21 +465,9 @@ class PlatformMetrics:
         self.http_requests.labels(*labels).inc()
         self.http_duration.labels(*labels).observe(seconds)
         self.http_request_size.labels(*labels).observe(request_size)
-        if response_size is not None:
-            self.http_response_size.labels(*labels).observe(response_size)
+        self.http_response_size.labels(*labels).observe(response_size)
         if status_code == 429:
             self.record_http_rate_limited(method, route)
-
-    def observe_http_response_size(
-        self, method: str, route: str, status_code: int, size: float
-    ) -> None:
-        self.http_response_size.labels(
-            *self._const,
-            http_method_label(method),
-            route,
-            http_status_class(status_code),
-            http_error_class(status_code),
-        ).observe(size)
 
     def record_http_panic(self, method: str, route: str) -> None:
         self.http_panics.labels(*self._const, http_method_label(method), route).inc()

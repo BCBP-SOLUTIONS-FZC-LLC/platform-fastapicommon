@@ -7,22 +7,57 @@ pre-1.0 caveat on what SemVer guarantees currently apply.
 
 ## [Unreleased]
 
-### Changed (breaking) — raised dependency floors
+> **Versioning:** this will be **0.3.0**, a MINOR that breaks, as SemVer allows while the
+> package is `0.y.z` (see *Recorded exceptions* in `VERSIONING.md`). It aligns the library with
+> platform-gincommon `v2.0.0`. Follow *Upgrading to 0.3.0* in `README.md` and
+> `docs/observability/migration.md`.
 
-The new `lowest-deps` CI job installs every runtime dependency at its declared floor. The old
-floors did not work:
+### Security
 
-- `opentelemetry-instrumentation-fastapi` / `-grpc` below 0.49b0 import `pkg_resources`, so
-  `fastapicommon` failed to import on an environment without setuptools.
-- With `starlette` below 0.46, an exception raised after a streaming response has started
-  reaches the error handling wrapped in an `ExceptionGroup`, which hides its real type from
-  the error logs.
+#### Unclassified errors (platform-gincommon OQ-24 / OQ-25)
 
-New floors: `fastapi>=0.115.10`, `starlette>=0.46`, `opentelemetry-api` / `-sdk` /
-`-exporter-otlp-proto-grpc>=1.28`, and `opentelemetry-instrumentation-fastapi` /
-`-grpc>=0.49b0`. The locked (tested) versions are unchanged.
+- **gRPC exception messages no longer reach clients or logs.** grpcio answered a handler exception with `UNKNOWN "Exception calling application: <message>"` and logged the traceback with the message. `ContextServerInterceptor` now sanitizes every RPC (unary and streaming). A status the handler chose (`context.abort`, or `set_code` then raise) is kept, re-aborted with its own details. Any other exception is aborted as `INTERNAL "internal server error"` and logged at ERROR as `unclassified error` (`grpc_method`, `grpc_code=Internal`, ids, `error_type` / `error_chain`, `stack`; never the message). This is the same contract as platform-gincommon's gRPC error sanitizer. Callers that matched on `UNKNOWN` or on the details text must use status codes. Unclassified exceptions still count in `platform_grpc_panics_total`, now with code `Internal`.
+- **Unclassified exceptions are logged as a defect, without their message** (parity with platform-gincommon's OQ-24 resolution). `unhandled_exception_handler` used to call `logger.exception(...)`, which logged the exception text and the full traceback. It now logs one error-level `unclassified error` entry: `classified=false`, ids, `service`, `method`, `route`, `operation`, `status`, `errorCode`, `error_type` / `error_chain` (exception types) and `stack` (`file:line in function` frames, no source lines). The client response is unchanged: a 500 `internal-error` without detail.
+- **New `UnhandledErrorMiddleware`**, installed by `create_platform_app` just inside `LoggingMiddleware` (so `http_request` logs the 500). It also records the exception type on the server span (`exception` event, status `panic`). Starlette's `ServerErrorMiddleware` re-raises after the `Exception` handler, so the server (uvicorn) logged the traceback *with the message*. The middleware answers the 500 problem itself and does not re-raise. Apps that call `register_exception_handlers` without `create_platform_app` should add it.
+- **`platform_unclassified_errors_total{transport}`** (platform-gincommon registry, `approved`): incremented for every unclassified exception, HTTP (`transport="http"`) and gRPC (`transport="grpc"`). Both series start at 0. This is the alerting signal; the `unclassified error` log event stays for diagnostics. The vendored `registry.json` is re-synced (new label `transport`).
 
-### Changed (breaking) — logs and traces aligned with `platform-gincommon`
+#### Gateway identity and request ids
+
+- **repeated identity headers are ambiguous, and roles are capped** (platform-gincommon
+  SEC-3, `ParseRolesStrict`), on HTTP and gRPC. A repeated `x-user-id` or `x-tenant-id` was
+  resolved first-value-wins (gRPC: last-value-wins), so a client-appended value could be ignored
+  or used; `x-tenant-roles` had no total caps (500 roles were kept). Now a repeated id, or a
+  joined roles header over 4096 bytes or 64 distinct roles, makes the whole identity absent
+  (`RequestContext.identity_rejection`), and `require_authenticated_user` answers gincommon's 401
+  (`Ambiguous x-user-id header.`, `Ambiguous x-tenant-id header.`, `Invalid tenant roles.`) with
+  the matching `auth: request rejected` reason. Repeated `x-tenant-roles` values are joined. New:
+  `resolve_identity`, `parse_roles_strict`, `InvalidRolesError`, `MAX_ROLES_HEADER_LEN`,
+  `MAX_ROLES` in `fastapicommon.auth.validation` (not re-exported from `fastapicommon.auth`).
+- **the client IP can no longer be spoofed.** `X-Forwarded-For` / `X-Real-IP` were
+  believed from any client. They are now believed only when the socket peer is a trusted proxy
+  (new `PlatformSettings.trusted_proxies` / `TRUSTED_PROXIES`, IPs or CIDRs; Gin's
+  `SetTrustedProxies` algorithm, walking `X-Forwarded-For` from the right); by default the client
+  IP is the peer. **Behind a proxy or load balancer, set `TRUSTED_PROXIES`**, or the logged and
+  traced client IP is the proxy's.
+- **`x-correlation-id` is validated** like `x-request-id` (`[A-Za-z0-9._-]`, at most 128 bytes) on
+  HTTP and gRPC; an invalid one falls back to the request id instead of being echoed on the
+  response, logged and propagated verbatim. On gRPC, `x-request-id` itself was not validated
+  either (Go's request-id interceptor applies `NormalizeRequestID`); an invalid one is now
+  replaced by a new UUID, as on HTTP.
+- **gRPC validates the identity like HTTP.** `x-user-id` / `x-tenant-id` went through unchecked
+  and `x-tenant-roles` was split without validation, so an identity the HTTP path rejects (over
+  256 bytes, control characters, role tokens like `admin;drop`) was authenticated, checked by
+  RBAC and logged as verified on gRPC. It now uses the same `normalize_header_value` /
+  `parse_roles` as `ContextMiddleware`.
+
+#### Dependencies
+
+- Locked dependency upgrades for the `pip-audit` gate: `cryptography` 50.0.2 (PYSEC-2026-3552), `urllib3` 2.8.0 (PYSEC-2026-4175/4176/4177), `virtualenv` 21.14.5 (PYSEC-2026-4011–4014) and `pip` 26.2.1 (PYSEC-2026-3721).
+- The example service image removes `pip` from its runtime stage. pip's vendored `urllib3`, `msgpack` and `setuptools` were what Trivy flagged, even with the base image's current pip, and nothing runs pip at runtime.
+
+### Changed (breaking)
+
+#### Logs and traces aligned with platform-gincommon
 
 **Logs** now use gincommon's Zap output contract:
 
@@ -98,7 +133,89 @@ now resolved through FastAPI's public `iter_route_contexts`, so they get their f
 (`/widgets/:widget_id`). This applies to the metrics label, the `http_request` log `path`
 and the span name.
 
-### Added — the observability standard's metrics schema strategy (parity with `platform-gincommon`)
+#### RFC 9457 Problem Details (platform-gincommon v2.0.0)
+
+- Every HTTP error is an RFC 9457 problem (`application/problem+json`) instead of
+  `{error, status, trace_id, request_id}`: `type`, `title`, `status`, `detail`, `instance`,
+  `traceId`, `errorCode`, `tenantId`, `timestamp`, `validationErrors`. The types, titles, error
+  codes, trace-id resolution and validation messages are gincommon v2's; see
+  [docs/problem-details.md](docs/problem-details.md).
+- `ValidationException` and `RequestValidationError` are **400** `platform/validation-failed`
+  (was 422), with `validationErrors` carrying JSON field paths and gincommon's fixed messages.
+- `TimeoutMiddleware` answers **503** `platform/service-unavailable` with `errorCode`
+  `REQUEST_TIMEOUT` (was 504), the response gincommon's `TimeoutMiddleware` sends.
+- `PlatformException.code` is now the upper-snake `errorCode` (`NOT_FOUND`); `status_code` derives
+  from the new `problem_type`. Default messages of `UnauthorizedException` and
+  `ForbiddenException` are gincommon's details. A 5xx never carries a detail.
+
+#### Observability identity is required
+
+- `OBSERVABILITY_DOMAIN` (or `PlatformSettings.observability_domain`) is now
+  mandatory whenever metrics are enabled (the default). `create_platform_app()`,
+  `init_metrics()`, `init_metrics_from_settings()` and `ContextServerInterceptor(settings)` raise
+  `ValueError` without one; set `enable_metrics=False` to run without metrics.
+
+#### `PlatformSettings.environment` defaults to `""`
+
+It defaulted to `"development"`, which is not in the registry's vocabulary (`local`, `dev`,
+`test`, `staging`, `prod`) and was ignored everywhere. Unset now reads as unset: production log
+and trace defaults, and `create_platform_app` still rejects it while metrics are enabled. Code
+reading `settings.environment == "development"` must set `APP_ENV`.
+
+#### Raised dependency floors
+
+The new `lowest-deps` CI job installs every runtime dependency at its declared floor. The old
+floors did not work:
+
+- `opentelemetry-instrumentation-fastapi` / `-grpc` below 0.49b0 import `pkg_resources`, so
+  `fastapicommon` failed to import on an environment without setuptools.
+- With `starlette` below 0.46, an exception raised after a streaming response has started
+  reaches the error handling wrapped in an `ExceptionGroup`, which hides its real type from
+  the error logs.
+
+New floors: `fastapi>=0.115.10`, `starlette>=0.46`, `opentelemetry-api` / `-sdk` /
+`-exporter-otlp-proto-grpc>=1.28`, and `opentelemetry-instrumentation-fastapi` /
+`-grpc>=0.49b0`. The locked (tested) versions are unchanged.
+
+### Added
+
+#### Enterprise Platform Observability Standard (platform-gincommon parity)
+
+- `platform_*` metrics — now the only HTTP/gRPC metrics the library emits — for the registry
+  domain (`PlatformSettings.observability_domain` / `OBSERVABILITY_DOMAIN`), with the const labels
+  `domain`, `service` (`app_name`) and `environment` on every series:
+  `platform_build_info{version}`, `platform_http_requests_total`,
+  `platform_http_request_duration_seconds`, `platform_http_request_size_bytes`,
+  `platform_http_response_size_bytes` (all `{method, route, status_class, error_class}`),
+  `platform_http_active_requests{route}`, `platform_http_panics_total`,
+  `platform_http_rate_limited_requests_total`, `platform_http_request_timeouts_total` (all
+  `{method, route}`), `platform_grpc_server_handled_total{grpc_method, grpc_code, status_class,
+  error_class}`, `platform_grpc_server_handling_seconds`,
+  `platform_grpc_server_request_size_bytes`, `platform_grpc_server_response_size_bytes` (all
+  `{grpc_method, status_class, error_class}`), `platform_grpc_server_inflight_requests`,
+  `platform_grpc_rate_limited_requests_total` and `platform_grpc_panics_total` (all
+  `{grpc_method}`). Names, help, label order and buckets come from the Platform Observability
+  Registry, vendored byte-for-byte from gincommon at `src/fastapicommon/metrics/registry.json`.
+- The platform `method` label is bounded (standard methods, else `OTHER`); `route` is the
+  Gin-style route template (`/items/:item_id`) or `unknown`, never the raw path.
+- New `PlatformSettings` fields `observability_domain` (required while `enable_metrics` is on)
+  and `build_version` (`BUILD_VERSION`). The environment label is the explicitly provided `environment`
+  (`APP_ENV`, then `ENVIRONMENT`), trimmed and lowercased, and must be one of
+  `local, dev, test, staging, prod` (no aliases).
+- `create_platform_app()` raises `ValueError` at startup on a missing domain (the message names
+  `OBSERVABILITY_DOMAIN`), an unknown domain, an invalid service label
+  (`^[a-z][a-z0-9_-]{0,62}$`), or a missing/out-of-vocabulary environment. With
+  `enable_metrics=False` no domain is needed; a configured one is still validated.
+- `ContextServerInterceptor(settings=None)`: pass `PlatformSettings` to initialize metrics in a
+  gRPC-only service (same validation; nothing is initialized with `enable_metrics=False`).
+- `fastapicommon.metrics`: `MetricsOptions`, `MetricsIdentity`, `init_metrics`,
+  `init_metrics_from_settings`, `resolve_metrics_options`, `platform_metrics`,
+  `platform_metrics_enabled`, `metrics_identity`, `metrics_registry`, `http_method_label`,
+  `PlatformMetrics`, `ObservabilityRegistry`, `default_registry`.
+- Compliance test `tests/integration/test_metrics_compliance.py` checks every emitted
+  `platform_*` sample against the vendored registry's labels and vocabularies.
+
+#### The standard's metrics schema strategy
 
 - **Registry re-synced** with platform-gincommon v2.0.0 (adds the `transport` label and the
   `platform_unclassified_errors_total` entry; fastapicommon does not emit it yet).
@@ -127,48 +244,29 @@ and the span name.
   with platform-gincommon at `GINCOMMON_REF`; this is required on `main` and for a release.
   The integration test validates the scrape with `validate()` (0 errors).
 
-### Changed — CI/CD pipeline (parity with `platform-gincommon`)
+#### RFC 9457 Problem Details
 
-- **Makefile restructured after `platform-pgcommon-py`'s**: per-target `.PHONY` and comments,
-  `UV` / test-directory / image variables, and its aliases (`fmt`, `fmt-check`, `vuln-check`,
-  `hadolint`, `test`, `test-integration`, `test-smoke-image`, `metrics-doc`). New targets:
-  `install-hooks`, `docs-serve`, `show-config`, `cover-check`, `cover-func`, `docker-reset`,
-  `docker-ps`. `make setup` now also runs `uv sync` and installs the git hook (`make install`
-  is `uv sync` only), `make format` also applies ruff's autofixes, `make lint-docker` falls back
-  to the pinned hadolint image without a local hadolint, `make pin-base-images` reports what
-  changed, and `make ci` sequences the coverage gate after `test-ci` (safe under `make -j`).
-  `make test-int` runs with `--no-cov`: the integration subset alone failed the 90% gate
-  although every test passed.
+- `fastapicommon.problem`: `ProblemType`, the 15 platform types, `problem_type(...)` for domain
+  types, `build_problem`, `resolve_trace_id`, `problem_from_response` / `parse_problem` for
+  clients.
+- Exceptions `BusinessException` (alias of `PlatformException`, which now takes
+  `problem_type=`, `code=` and `validation_errors=`), `ResourceNotFoundException`,
+  `BusinessRuleViolationException` (422), `RateLimitException` (429),
+  `UnsupportedOperationException` (501), `ServiceUnavailableException` (503); `NotImplementedError`
+  maps to 501. Unmatched routes are `ROUTE_NOT_FOUND`; 405 is `method-not-allowed`.
+- `PlatformSettings.problem_type_base` (`PROBLEM_TYPE_BASE`) and
+  `register_exception_handlers(app, type_base=, service=)`; `problem_response(request, type, ...)`.
+- One WARN `problem response` log line per problem (`traceId`, `type`, `status`, `errorCode`,
+  `service`, `tenantId`).
 
-- **Example image budget: 170 MB** (uncompressed, linux/amd64), measured for this Python image
-  (~154 MB) instead of gincommon's 150 MB Go budget, which it never met: the limit had been
-  calibrated on the compressed size Docker Desktop reports. To shrink it, the `examples` extra
-  installs plain `uvicorn` instead of `uvicorn[standard]` (no uvloop, httptools, watchfiles,
-  websockets, PyYAML or python-dotenv: about 26 MB; `make run` keeps them through the dev
-  group), and the runtime stage drops the stdlib's ensurepip, IDLE, Tk, turtle demos and pydoc
-  topic data.
+#### `AsyncContextServerInterceptor` for `grpc.aio` servers
 
-- `.github/` now follows platform-gincommon's pipeline, translated to Python as
-  platform-pgcommon-py and platform-eventcommon did: reusable `validate-test.yml` /
-  `validate-quality.yml` (replacing `validate.yml`, `quality.yml` and `test.yml`; the
-  required check names are unchanged), a `changes` job that skips build/test jobs on
-  documentation-only changes, SHA-pinned actions, and `changelog-check.yml` / `docs.yml`.
-- Tests run on Python 3.11–3.14 and with every runtime dependency at its floor (`lowest-deps`).
-- `api-compat` (griffe) reports public-API breaks against the last tag; `release.yml` fails a
-  release that may not break.
-- The example image is pushed (on `main` and on release) only when its content fingerprint
-  matches the image Trivy and the smoke tests judged. The image is Cosign keyless-signed.
-- `release.yml` checks the tag first: it must be at HEAD and on `main`, the package version
-  must match, and the CHANGELOG section must be dated. It builds the wheel and sdist once,
-  reproducibly, from the hash-locked `build-constraints.txt`. The GitHub Release carries
-  the wheel, the sdist, a Cosign-signed `SHA256SUMS`, the image's SLSA provenance and its
-  SBOM.
-- The example image's base images are digest-pinned (`make pin-base-images`). It installs
-  the locked dependency set with hashes and runs as numeric UID 10001. Its HEALTHCHECK now
-  uses Python instead of `curl`, which is no longer installed.
-- Dependabot uses the `uv` ecosystem.
+The asyncio counterpart of `ContextServerInterceptor`: server span, request context,
+`platform_grpc_*` metrics, `grpc_request` log, and exception sanitizing (unary and streaming).
 
-### Fixed — production-readiness review
+### Fixed
+
+#### Production-readiness reviews
 
 - **`@app.on_event` / `on_startup` / `on_shutdown` handlers run again with tracing on.**
   `create_platform_app` passed its own `lifespan` to FastAPI, which then skipped them. It now wraps
@@ -238,16 +336,6 @@ and the span name.
 - **Cheaper logging.** Loggers are cached on first use (level and stack threshold are read per
   entry, so `configure_logging` still applies), and `stacktrace` uses Zap's layout (function,
   then `file:line`, innermost first) without reading source lines: error entries cost about half.
-- **`x-correlation-id` is validated** like `x-request-id` (`[A-Za-z0-9._-]`, at most 128 bytes) on
-  HTTP and gRPC; an invalid one falls back to the request id instead of being echoed on the
-  response, logged and propagated verbatim. On gRPC, `x-request-id` itself was not validated
-  either (Go's request-id interceptor applies `NormalizeRequestID`); an invalid one is now
-  replaced by a new UUID, as on HTTP.
-- **gRPC validates the identity like HTTP.** `x-user-id` / `x-tenant-id` went through unchecked
-  and `x-tenant-roles` was split without validation, so an identity the HTTP path rejects (over
-  256 bytes, control characters, role tokens like `admin;drop`) was authenticated, checked by
-  RBAC and logged as verified on gRPC. It now uses the same `normalize_header_value` /
-  `parse_roles` as `ContextMiddleware`.
 - **A cancelled request is aborted, not a panic.** A request the server cancels (graceful
   shutdown, client disconnect) was recorded as a 500 panic in the span, the `http_request` log
   and the metrics, so every rollout raised panic and error-rate alerts. It is now an aborted
@@ -264,22 +352,6 @@ and the span name.
 - Span `exception.type` is the fully qualified type name (`module.Class`, builtins bare), the
   same as `error_type` in logs and OTel's convention; one helper writes it for every span, and
   HTTP and gRPC share one `unclassified error` builder.
-- **Security: repeated identity headers are ambiguous, and roles are capped** (platform-gincommon
-  SEC-3, `ParseRolesStrict`), on HTTP and gRPC. A repeated `x-user-id` or `x-tenant-id` was
-  resolved first-value-wins (gRPC: last-value-wins), so a client-appended value could be ignored
-  or used; `x-tenant-roles` had no total caps (500 roles were kept). Now a repeated id, or a
-  joined roles header over 4096 bytes or 64 distinct roles, makes the whole identity absent
-  (`RequestContext.identity_rejection`), and `require_authenticated_user` answers gincommon's 401
-  (`Ambiguous x-user-id header.`, `Ambiguous x-tenant-id header.`, `Invalid tenant roles.`) with
-  the matching `auth: request rejected` reason. Repeated `x-tenant-roles` values are joined. New:
-  `resolve_identity`, `parse_roles_strict`, `InvalidRolesError`, `MAX_ROLES_HEADER_LEN`,
-  `MAX_ROLES`.
-- **Security: the client IP can no longer be spoofed.** `X-Forwarded-For` / `X-Real-IP` were
-  believed from any client. They are now believed only when the socket peer is a trusted proxy
-  (new `PlatformSettings.trusted_proxies` / `TRUSTED_PROXIES`, IPs or CIDRs; Gin's
-  `SetTrustedProxies` algorithm, walking `X-Forwarded-For` from the right); by default the client
-  IP is the peer. **Behind a proxy or load balancer, set `TRUSTED_PROXIES`**, or the logged and
-  traced client IP is the proxy's.
 - Internal: one boolean environment parser (`env_bool`, invalid values warned once), one
   force-flush helper, and a scope flag instead of reading SDK span internals.
 - Internal: one Gin `ClientIP()` (`fastapicommon.middleware.context.client_ip`), one UTF-8
@@ -287,118 +359,109 @@ and the span name.
   serialise-then-parse of the 500 problem body. The caller field no longer uses structlog's private
   `_frames` API.
 
-### Changed (breaking) — `PlatformSettings.environment` defaults to `""`
-
-It defaulted to `"development"`, which is not in the registry's vocabulary (`local`, `dev`,
-`test`, `staging`, `prod`) and was ignored everywhere. Unset now reads as unset: production log
-and trace defaults, and `create_platform_app` still rejects it while metrics are enabled. Code
-reading `settings.environment == "development"` must set `APP_ENV`.
-
-### Added — `AsyncContextServerInterceptor` for `grpc.aio` servers
-
-The asyncio counterpart of `ContextServerInterceptor`: server span, request context,
-`platform_grpc_*` metrics, `grpc_request` log, and exception sanitizing (unary and streaming).
-
-### Security — unclassified errors (parity with `platform-gincommon` OQ-24 / OQ-25)
-
-- **gRPC exception messages no longer reach clients or logs.** grpcio answered a handler exception with `UNKNOWN "Exception calling application: <message>"` and logged the traceback with the message. `ContextServerInterceptor` now sanitizes every RPC (unary and streaming). A status the handler chose (`context.abort`, or `set_code` then raise) is kept, re-aborted with its own details. Any other exception is aborted as `INTERNAL "internal server error"` and logged at ERROR as `unclassified error` (`grpc_method`, `grpc_code=Internal`, ids, `error_type` / `error_chain`, `stack`; never the message). This is the same contract as platform-gincommon's gRPC error sanitizer. Callers that matched on `UNKNOWN` or on the details text must use status codes. Unclassified exceptions still count in `platform_grpc_panics_total`, now with code `Internal`.
-- **Unclassified exceptions are logged as a defect, without their message** (parity with platform-gincommon's OQ-24 resolution). `unhandled_exception_handler` used to call `logger.exception(...)`, which logged the exception text and the full traceback. It now logs one error-level `unclassified error` entry: `classified=false`, ids, `service`, `method`, `route`, `operation`, `status`, `errorCode`, `error_type` / `error_chain` (exception types) and `stack` (`file:line in function` frames, no source lines). The client response is unchanged: a 500 `internal-error` without detail.
-- **New `UnhandledErrorMiddleware`**, installed by `create_platform_app` just inside `LoggingMiddleware` (so `http_request` logs the 500). It also records the exception type on the server span (`exception` event, status `panic`). Starlette's `ServerErrorMiddleware` re-raises after the `Exception` handler, so the server (uvicorn) logged the traceback *with the message*. The middleware answers the 500 problem itself and does not re-raise. Apps that call `register_exception_handlers` without `create_platform_app` should add it.
-- **`platform_unclassified_errors_total{transport}`** (platform-gincommon registry, `approved`): incremented for every unclassified exception, HTTP (`transport="http"`) and gRPC (`transport="grpc"`). Both series start at 0. This is the alerting signal; the `unclassified error` log event stays for diagnostics. The vendored `registry.json` is re-synced (new label `transport`).
-
-### Security — dependencies
-
-- Locked dependency upgrades for the `pip-audit` gate: `cryptography` 50.0.2 (PYSEC-2026-3552), `urllib3` 2.8.0 (PYSEC-2026-4175/4176/4177), `virtualenv` 21.14.5 (PYSEC-2026-4011–4014) and `pip` 26.2.1 (PYSEC-2026-3721).
-- The example service image removes `pip` from its runtime stage. pip's vendored `urllib3`, `msgpack` and `setuptools` were what Trivy flagged, even with the base image's current pip, and nothing runs pip at runtime.
-
-### Changed (breaking) — RFC 9457 Problem Details (parity with `platform-gincommon` v2.0.0)
-
-- Every HTTP error is an RFC 9457 problem (`application/problem+json`) instead of
-  `{error, status, trace_id, request_id}`: `type`, `title`, `status`, `detail`, `instance`,
-  `traceId`, `errorCode`, `tenantId`, `timestamp`, `validationErrors`. The types, titles, error
-  codes, trace-id resolution and validation messages are gincommon v2's; see
-  [docs/problem-details.md](docs/problem-details.md).
-- `ValidationException` and `RequestValidationError` are **400** `platform/validation-failed`
-  (was 422), with `validationErrors` carrying JSON field paths and gincommon's fixed messages.
-- `TimeoutMiddleware` answers **503** `platform/service-unavailable` with `errorCode`
-  `REQUEST_TIMEOUT` (was 504), the response gincommon's `TimeoutMiddleware` sends.
-- `PlatformException.code` is now the upper-snake `errorCode` (`NOT_FOUND`); `status_code` derives
-  from the new `problem_type`. Default messages of `UnauthorizedException` and
-  `ForbiddenException` are gincommon's details. A 5xx never carries a detail.
-
-### Added
-
-- `fastapicommon.problem`: `ProblemType`, the 15 platform types, `problem_type(...)` for domain
-  types, `build_problem`, `resolve_trace_id`, `problem_from_response` / `parse_problem` for
-  clients.
-- Exceptions `BusinessException` (alias of `PlatformException`, which now takes
-  `problem_type=`, `code=` and `validation_errors=`), `ResourceNotFoundException`,
-  `BusinessRuleViolationException` (422), `RateLimitException` (429),
-  `UnsupportedOperationException` (501), `ServiceUnavailableException` (503); `NotImplementedError`
-  maps to 501. Unmatched routes are `ROUTE_NOT_FOUND`; 405 is `method-not-allowed`.
-- `PlatformSettings.problem_type_base` (`PROBLEM_TYPE_BASE`) and
-  `register_exception_handlers(app, type_base=, service=)`; `problem_response(request, type, ...)`.
-- One WARN `problem response` log line per problem (`traceId`, `type`, `status`, `errorCode`,
-  `service`, `tenantId`).
-
-### Fixed
+#### Registry
 
 - Re-vendored `src/fastapicommon/metrics/registry.json` from gincommon (it had drifted behind
   gincommon v1.5.0's four Tier 2 `iam_*` metrics).
 
-### Added — Enterprise Platform Observability Standard (parity with `platform-gincommon`)
-
-- `platform_*` metrics — now the only HTTP/gRPC metrics the library emits — for the registry
-  domain (`PlatformSettings.observability_domain` / `OBSERVABILITY_DOMAIN`), with the const labels
-  `domain`, `service` (`app_name`) and `environment` on every series:
-  `platform_build_info{version}`, `platform_http_requests_total`,
-  `platform_http_request_duration_seconds`, `platform_http_request_size_bytes`,
-  `platform_http_response_size_bytes` (all `{method, route, status_class, error_class}`),
-  `platform_http_active_requests{route}`, `platform_http_panics_total`,
-  `platform_http_rate_limited_requests_total`, `platform_http_request_timeouts_total` (all
-  `{method, route}`), `platform_grpc_server_handled_total{grpc_method, grpc_code, status_class,
-  error_class}`, `platform_grpc_server_handling_seconds`,
-  `platform_grpc_server_request_size_bytes`, `platform_grpc_server_response_size_bytes` (all
-  `{grpc_method, status_class, error_class}`), `platform_grpc_server_inflight_requests`,
-  `platform_grpc_rate_limited_requests_total` and `platform_grpc_panics_total` (all
-  `{grpc_method}`). Names, help, label order and buckets come from the Platform Observability
-  Registry, vendored byte-for-byte from gincommon at `src/fastapicommon/metrics/registry.json`.
-- The platform `method` label is bounded (standard methods, else `OTHER`); `route` is the
-  Gin-style route template (`/items/:item_id`) or `unknown`, never the raw path.
-- New `PlatformSettings` fields `observability_domain` (required while `enable_metrics` is on)
-  and `build_version` (`BUILD_VERSION`). The environment label is the explicitly provided `environment`
-  (`APP_ENV`, then `ENVIRONMENT`), trimmed and lowercased, and must be one of
-  `local, dev, test, staging, prod` (no aliases).
-- `create_platform_app()` raises `ValueError` at startup on a missing domain (the message names
-  `OBSERVABILITY_DOMAIN`), an unknown domain, an invalid service label
-  (`^[a-z][a-z0-9_-]{0,62}$`), or a missing/out-of-vocabulary environment. With
-  `enable_metrics=False` no domain is needed; a configured one is still validated.
-- `ContextServerInterceptor(settings=None)`: pass `PlatformSettings` to initialize metrics in a
-  gRPC-only service (same validation; nothing is initialized with `enable_metrics=False`).
-- `fastapicommon.metrics`: `MetricsOptions`, `MetricsIdentity`, `init_metrics`,
-  `init_metrics_from_settings`, `resolve_metrics_options`, `platform_metrics`,
-  `platform_metrics_enabled`, `metrics_identity`, `metrics_registry`, `http_method_label`,
-  `PlatformMetrics`, `ObservabilityRegistry`, `default_registry`.
-- Compliance test `tests/integration/test_metrics_compliance.py` checks every emitted
-  `platform_*` sample against the vendored registry's labels and vocabularies.
-
 ### Changed
+
+#### CI/CD pipeline (platform-gincommon parity)
+
+- **Example image budget: 170 MB** (uncompressed, linux/amd64), measured for this Python image
+  (~154 MB) instead of gincommon's 150 MB Go budget, which it never met: the limit had been
+  calibrated on the compressed size Docker Desktop reports. To shrink it, the `examples` extra
+  installs plain `uvicorn` instead of `uvicorn[standard]` (no uvloop, httptools, watchfiles,
+  websockets, PyYAML or python-dotenv: about 26 MB; `make run` keeps them through the dev
+  group), and the runtime stage drops the stdlib's ensurepip, IDLE, Tk, turtle demos and pydoc
+  topic data.
+- `.github/` now follows platform-gincommon's pipeline, translated to Python as
+  platform-pgcommon-py and platform-eventcommon did: reusable `validate-test.yml` /
+  `validate-quality.yml` (replacing `validate.yml`, `quality.yml` and `test.yml`; the
+  required check names are unchanged), a `changes` job that skips build/test jobs on
+  documentation-only changes, SHA-pinned actions, and `changelog-check.yml` / `docs.yml`.
+- Tests run on Python 3.11–3.14 and with every runtime dependency at its floor (`lowest-deps`).
+- `api-compat` (griffe) reports public-API breaks against the last tag; `release.yml` fails a
+  release that may not break.
+- The example image is pushed (on `main` and on release) only when its content fingerprint
+  matches the image Trivy and the smoke tests judged. The image is Cosign keyless-signed.
+- `release.yml` checks the tag first: it must be at HEAD and on `main`, the package version
+  must match, and the CHANGELOG section must be dated. It builds the wheel and sdist once,
+  reproducibly, from the hash-locked `build-constraints.txt`. The GitHub Release carries
+  the wheel, the sdist, a Cosign-signed `SHA256SUMS`, the image's SLSA provenance and its
+  SBOM.
+- The example image's base images are digest-pinned (`make pin-base-images`). It installs
+  the locked dependency set with hashes and runs as numeric UID 10001. Its HEALTHCHECK now
+  uses Python instead of `curl`, which is no longer installed.
+- Dependabot uses the `uv` ecosystem.
+
+#### Metrics
 
 - `metrics_router` serves `metrics_registry()` (prometheus_client's default `REGISTRY` unless
   `init_metrics(..., registry=...)` was given one) instead of always the default registry.
-- **Breaking:** `OBSERVABILITY_DOMAIN` (or `PlatformSettings.observability_domain`) is now
-  mandatory whenever metrics are enabled (the default). `create_platform_app()`,
-  `init_metrics()`, `init_metrics_from_settings()` and `ContextServerInterceptor(settings)` raise
-  `ValueError` without one; set `enable_metrics=False` to run without metrics.
 - `init_metrics_from_settings()` honours `settings.enable_metrics` (initializes nothing when it
   is false). `PrometheusMiddleware` is a pass-through until metrics are initialized.
+- `PlatformMetrics.record_http` always takes the response size (the bytes sent); the unused
+  deferred path, `response_size=None` with `observe_http_response_size`, is removed. Both were
+  new in this release.
 
-### Removed
+#### Documentation and tooling
 
-- **Breaking:** the legacy metrics `http_requests_total`, `http_request_duration_seconds`,
+- **ARCHITECTURE.md rewritten after platform-gincommon's** (same sections: layer model, module
+  graph, stack composition, request / gRPC / identity / RBAC / abort / error / timeout / tracing /
+  metrics / registry flows, observability stack, wiring, concurrency, failure domains,
+  invariants, release, testing, conformance checklist, registry lifecycle, STRIDE threat model,
+  developer tools, decisions, documentation assets), from the current code. 16 diagrams: five new
+  (`layer-model`, `auth-context-flow`, `unhandled-error-flow`, `timeout-flow`,
+  `registry-governance`) and the stale ones regenerated. Every diagram (and the LLD's) is now
+  rendered with the Mermaid CLI; that found three `;` in sequence diagrams that broke them on
+  GitHub (`request-flow`, `rbac-dependency-flow`, an LLD diagram).
+- **Makefile restructured after `platform-pgcommon-py`'s**: per-target `.PHONY` and comments,
+  `UV` / test-directory / image variables, and its aliases (`fmt`, `fmt-check`, `vuln-check`,
+  `hadolint`, `test`, `test-integration`, `test-smoke-image`, `metrics-doc`). New targets:
+  `install-hooks`, `docs-serve`, `show-config`, `cover-check`, `cover-func`, `docker-reset`,
+  `docker-ps`. `make setup` now also runs `uv sync` and installs the git hook (`make install`
+  is `uv sync` only), `make format` also applies ruff's autofixes, `make lint-docker` falls back
+  to the pinned hadolint image without a local hadolint, `make pin-base-images` reports what
+  changed, and `make ci` sequences the coverage gate after `test-ci` (safe under `make -j`).
+  `make test-int` runs with `--no-cov`: the integration subset alone failed the 90% gate
+  although every test passed.
+- **README.md, CONTRIBUTING.md, SECURITY.md and VERSIONING.md rewritten after platform-gincommon's**
+  (same sections): the README's mental model, API overview, validation rules, integration guide
+  (HTTP, gRPC, authorization, outbound calls, custom metrics, errors, upgrading to 0.3.0),
+  observability walkthrough, environment, security, release and CI sections; CONTRIBUTING's
+  registry-first metric workflow and current layout; SECURITY's validated trust model and
+  scope; VERSIONING's recorded exception for 0.3.0 and the release pipeline as it runs. Stale
+  statements corrected (identity headers "read verbatim", no `LOG_FILE`, `metrics/definitions.py`,
+  a GitFlow `develop` branch that does not exist).
+- **`.claude/` added** in the Python siblings' layout (platform-pgcommon-py, platform-eventcommon):
+  `CLAUDE.md` (always-in-context rules, commands, status) and `architecture.md`, `api-reference.md`,
+  `request-flows.md`, `wire-contracts.md` (headers, problem types, log events, metric and span
+  contracts — this library has no database, so it replaces the siblings' `database-schema.md`),
+  `operations.md` and `settings.json`; `.gitignore` keeps personal settings and worktrees out.
+  The LLD (rev 1.2), README and ARCHITECTURE are updated to the current tests, coverage and doc
+  set, and no longer list `resolve_identity` / `parse_roles_strict` as exports of
+  `fastapicommon.auth` (they live in `fastapicommon.auth.validation`).
+- **Tests for the remaining untested paths**: `TracingMiddleware` on its own (client address
+  without `ContextMiddleware`, span status per response class, an escaped exception as a `panic`
+  span without its message), forwarding headers from a non-IP peer and an IPv6 trusted proxy, a
+  handler that fails while cancelled after a timeout, `grpc.aio` bidirectional streams, unknown
+  methods and `AsyncContextServerInterceptor(settings)`, the flush-timeout warning, false boolean
+  env values, non-JSON log field values and untyped OpenMetrics samples. Then every remaining
+  line and branch (coverage 100%): a gRPC context that cannot abort, binary `-bin` metadata,
+  HTTP trailers in the response size, the pre-`iter_route_contexts` route matching, an audit
+  entry outside a request, a prohibited label reported once per metric, and histogram suffixes
+  on non-histograms in `metricslint refs`. `X-Forwarded-For` parsing was restructured so it has
+  no unreachable branch (behaviour unchanged).
+
+### Removed (breaking)
+
+#### Legacy metrics
+
+- the legacy metrics `http_requests_total`, `http_request_duration_seconds`,
   `grpc_requests_total` and `grpc_request_duration_seconds` are no longer defined or emitted
   (status `removed` in the registry). Use the `platform_*` equivalents.
-- **Breaking:** the `fastapicommon.metrics` exports `HTTP_REQUESTS_TOTAL`,
+- the `fastapicommon.metrics` exports `HTTP_REQUESTS_TOTAL`,
   `HTTP_REQUEST_DURATION_SECONDS`, `GRPC_REQUESTS_TOTAL`, `GRPC_REQUEST_DURATION_SECONDS` and
   `record_grpc_request`, and the `fastapicommon.metrics.definitions` module.
 - The `disable_legacy_metrics` setting (`DISABLE_LEGACY_METRICS`) and

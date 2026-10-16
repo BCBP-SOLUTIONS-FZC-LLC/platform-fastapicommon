@@ -74,6 +74,15 @@ def test_scan_references() -> None:
     )
 
 
+def test_histogram_suffix_on_a_non_histogram_is_unregistered() -> None:
+    """``_count`` / ``_bucket`` resolve to their base only when it is a histogram: a counter's
+    ``platform_http_requests_total_count`` is no series, so it is reported, not accepted."""
+    text = io.StringIO("expr: platform_http_requests_total_count\n")
+    (ref,) = scan_references(default_registry(), "rules.yml", text)
+    assert (ref.metric, ref.severity) == ("platform_http_requests_total_count", "error")
+    assert "not in the Platform Observability Registry" in ref.message
+
+
 def test_scan_references_deprecated_and_size_limit() -> None:
     from fastapicommon.metrics.registry import load_registry
 

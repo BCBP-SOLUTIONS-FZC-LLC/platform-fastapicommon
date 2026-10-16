@@ -56,16 +56,15 @@ def _ip_from_header(value: str, trusted: TrustedProxies) -> str | None:
     and return the first that is not a trusted proxy (or the leftmost); stop at an invalid IP."""
     if not value:
         return None
-    hops = value.split(",")
-    for i in range(len(hops) - 1, -1, -1):
-        hop = hops[i].strip()
+    hop = ""
+    for hop in reversed([h.strip() for h in value.split(",")]):
         try:
             ip_address(hop)
         except ValueError:
-            break
-        if i == 0 or not _is_trusted(hop, trusted):
+            return None
+        if not _is_trusted(hop, trusted):
             return hop
-    return None
+    return hop  # every hop is a trusted proxy: the leftmost
 
 
 def client_ip(

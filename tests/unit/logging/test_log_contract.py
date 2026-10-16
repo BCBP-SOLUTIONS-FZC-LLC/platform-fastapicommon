@@ -46,6 +46,47 @@ def test_production_json_layout(capsys: pytest.CaptureFixture[str]) -> None:
     assert "stacktrace" not in entry
 
 
+def test_non_json_field_values_are_rendered(capsys: pytest.CaptureFixture[str]) -> None:
+    """Field values JSON cannot encode never break the entry: sets and tuples become arrays,
+    anything else its ``str()`` (as Zap's reflection encoder falls back to a string)."""
+
+    class Opaque:
+        def __str__(self) -> str:
+            return "opaque-value"
+
+    configure_logging("INFO", "prod")
+    capsys.readouterr()
+    get_logger("t").info("fields", tags=("a", "b"), ids=frozenset({"x"}), obj=Opaque())
+    (line,) = _lines(capsys)
+    entry = json.loads(line)
+    assert entry["tags"] == ["a", "b"] and entry["ids"] == ["x"]
+    assert entry["obj"] == "opaque-value"
+
+
+def test_renderers_omit_a_missing_caller() -> None:
+    """An entry without a resolved caller has no ``caller`` key / column (Zap with AddCaller
+    off) rather than an empty one."""
+    entry = json.loads(log_config.ZapJSONRenderer()(None, "info", {"event": "x", "k": 1}))
+    assert "caller" not in entry and entry["msg"] == "x" and entry["k"] == 1
+    line = log_config.ZapConsoleRenderer()(None, "info", {"event": "x"})
+    assert line.split("\t")[1:] == ["INFO", "x"]
+
+
+def test_auth_rejection_outside_a_request(capsys: pytest.CaptureFixture[str]) -> None:
+    """``log_auth_rejection`` with no request bound (a service calling it from its own code)
+    still writes the entry, without the request fields."""
+    from fastapicommon.logging.audit import log_auth_rejection
+
+    configure_logging("INFO", "prod")
+    capsys.readouterr()
+    log_auth_rejection("missing or invalid x-user-id")
+    (line,) = _lines(capsys)
+    entry = json.loads(line)
+    assert entry["msg"] == "auth: request rejected" and entry["level"] == "warn"
+    assert entry["reason"] == "missing or invalid x-user-id" and entry["status"] == 401
+    assert "request_id" not in entry and "client_ip" not in entry
+
+
 def test_error_entries_carry_a_stacktrace(capsys: pytest.CaptureFixture[str]) -> None:
     configure_logging(environment="staging")
     get_logger("svc").warning("w")

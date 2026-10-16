@@ -221,6 +221,29 @@ def test_flush_tracing_keeps_the_provider_running() -> None:
     shutdown_tracing()
 
 
+def test_flush_timeout_is_logged(
+    monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """A flush that times out (collector unreachable at shutdown) is a warning, never an error
+    raised into the app's shutdown."""
+    configure_logging("INFO", "prod")
+    provider = init_tracing(TracingConfig(service_name="svc", endpoint="", sample_ratio=1.0))
+    monkeypatch.setattr(provider, "force_flush", lambda timeout_millis=None: False)
+    capsys.readouterr()
+    flush_tracing()
+    entries = [json.loads(line) for line in capsys.readouterr().err.splitlines()]
+    assert [(e["msg"], e["level"], e["error"]) for e in entries] == [
+        ("otel_shutdown_flush_failed", "warn", "force_flush timed out")
+    ]
+    shutdown_tracing()
+
+
+@pytest.mark.parametrize("value", ["false", "0", "no", "FALSE"])
+def test_false_bools_override_the_dev_default(monkeypatch: pytest.MonkeyPatch, value: str) -> None:
+    monkeypatch.setenv("OTEL_EXPORTER_OTLP_INSECURE", value)
+    assert TracingConfig.from_env(environment="dev").insecure is False
+
+
 def test_ensure_tracing_rules() -> None:
     provisional = ensure_tracing(
         TracingConfig(service_name=UNKNOWN_SERVICE_NAME, provisional=True, endpoint="")
@@ -237,6 +260,15 @@ def test_consumer_provider_is_never_replaced(monkeypatch: pytest.MonkeyPatch) ->
     own = TracerProvider()
     monkeypatch.setattr(trace, "get_tracer_provider", lambda: own)
     assert ensure_tracing(TracingConfig(service_name="svc", endpoint="")) is None
+
+
+def test_flush_tracing_leaves_a_consumer_provider_alone(monkeypatch: pytest.MonkeyPatch) -> None:
+    own = TracerProvider()
+    flushed: list[object] = []
+    monkeypatch.setattr(own, "force_flush", lambda *a, **k: flushed.append(a) or True)
+    monkeypatch.setattr(trace, "get_tracer_provider", lambda: own)
+    flush_tracing()
+    assert flushed == []
 
 
 def test_init_and_setup_tracing_keep_a_consumer_provider(monkeypatch: pytest.MonkeyPatch) -> None:

@@ -193,6 +193,22 @@ def test_text_parser() -> None:
             parse_text(bad)
 
 
+def test_a_prohibited_label_is_reported_once_per_metric() -> None:
+    """Every series carries the label, but the finding is the metric's, not each series'."""
+    text = f"""# TYPE iam_event_consumer_jobs_total counter
+iam_event_consumer_jobs_total{{{CONST},tenant_id="t1"}} 1
+iam_event_consumer_jobs_total{{{CONST},tenant_id="t2"}} 1
+"""
+    assert _rules(text)["iam_event_consumer_jobs_total"] == ["error:prohibited-label"]
+
+
+def test_openmetrics_keeps_untyped_samples_and_skips_blank_lines() -> None:
+    """A sample with no ``# TYPE`` line belongs to no family: it is kept unchanged (Go
+    ``openMetricsToText``), and blank lines are dropped."""
+    text = "# TYPE c counter\n\nc_total 1\n\norphan_total 2\n# EOF\n"
+    assert openmetrics_to_text(text) == "# TYPE c_total counter\nc_total 1\norphan_total 2\n"
+
+
 def test_openmetrics_is_normalised() -> None:
     text = """# TYPE c counter
 # HELP c a counter

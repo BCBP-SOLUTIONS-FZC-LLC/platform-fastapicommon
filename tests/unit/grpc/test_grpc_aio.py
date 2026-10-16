@@ -15,11 +15,17 @@ from opentelemetry import trace
 from opentelemetry.sdk.trace.export.in_memory_span_exporter import InMemorySpanExporter
 from prometheus_client import CollectorRegistry
 
-from fastapicommon.context import get_request_context
+from fastapicommon.config import PlatformSettings
+from fastapicommon.context import get_request_context, get_request_context_or_none
 from fastapicommon.grpc import AsyncContextServerInterceptor
 from fastapicommon.grpc.server import MSG_INTERNAL
 from fastapicommon.logging import configure_logging
-from fastapicommon.metrics import MetricsOptions, init_metrics
+from fastapicommon.metrics import (
+    MetricsOptions,
+    init_metrics,
+    metrics_identity,
+    platform_metrics_enabled,
+)
 from fastapicommon.telemetry import TracingConfig, init_tracing
 
 SECRET = "pq: duplicate key users_email_key email=john@example.com"
@@ -55,6 +61,19 @@ async def _client_stream(requests: AsyncIterator[bytes], context: Any) -> bytes:
     async for _ in requests:
         pass
     raise RuntimeError(SECRET)
+
+
+async def _bidi(requests: AsyncIterator[bytes], context: Any) -> AsyncIterator[bytes]:
+    # Streaming RPCs are sanitized only (README "gRPC service"): no RequestContext is bound.
+    bound = "bound" if get_request_context_or_none() is not None else "unbound"
+    async for item in requests:
+        yield f"{bound}:{item.decode()}".encode()
+
+
+async def _bidi_fails(requests: AsyncIterator[bytes], context: Any) -> AsyncIterator[bytes]:
+    async for item in requests:
+        yield item
+        raise RuntimeError(SECRET)
 
 
 async def _write_stream(request: bytes, context: grpc.aio.ServicerContext) -> None:
@@ -93,6 +112,8 @@ async def channel() -> AsyncIterator[tuple[grpc.aio.Channel, CollectorRegistry]]
         "ServerStream": grpc.unary_stream_rpc_method_handler(_server_stream, _ident, _ident),
         "ClientStream": grpc.stream_unary_rpc_method_handler(_client_stream, _ident, _ident),
         "WriteStream": grpc.unary_stream_rpc_method_handler(_write_stream, _ident, _ident),
+        "Bidi": grpc.stream_stream_rpc_method_handler(_bidi, _ident, _ident),
+        "BidiFails": grpc.stream_stream_rpc_method_handler(_bidi_fails, _ident, _ident),
         "SyncWhoami": grpc.unary_unary_rpc_method_handler(_sync_whoami, _ident, _ident),
         "SyncStream": grpc.unary_stream_rpc_method_handler(_sync_stream, _ident, _ident),
         "SyncAborted": grpc.unary_unary_rpc_method_handler(_sync_aborted, _ident, _ident),
@@ -210,6 +231,64 @@ async def test_streaming_exceptions_sanitized(
             await ch.stream_unary("/test.Aio/ClientStream")(requests())
         assert err2.value.code() == grpc.StatusCode.INTERNAL
     _no_secret_logged(caplog)
+
+
+async def _requests(*items: bytes) -> AsyncIterator[bytes]:
+    for item in items:
+        yield item
+
+
+async def test_bidi_streams_keep_the_context_and_are_sanitized(
+    channel: tuple[grpc.aio.Channel, CollectorRegistry], caplog: pytest.LogCaptureFixture
+) -> None:
+    """Bidirectional streams get the same wrapper as the other streaming kinds: messages flow
+    both ways, and an exception is INTERNAL without its message. Like every streaming RPC they
+    get no request context (a documented gap: handlers bind one with request_context_scope)."""
+    ch, _ = channel
+    with caplog.at_level(logging.INFO):
+        bidi = ch.stream_stream("/test.Aio/Bidi")
+        received = [m async for m in bidi(_requests(b"a", b"b"), metadata=IDENTITY)]
+        assert received == [b"unbound:a", b"unbound:b"]
+
+        call = ch.stream_stream("/test.Aio/BidiFails")(_requests(b"x", b"y"))
+        with pytest.raises(grpc.aio.AioRpcError) as err:
+            async for _ in call:
+                pass
+        assert err.value.code() == grpc.StatusCode.INTERNAL
+        assert err.value.details() == MSG_INTERNAL
+    _no_secret_logged(caplog)
+
+
+async def test_unknown_method_passes_through(
+    channel: tuple[grpc.aio.Channel, CollectorRegistry], caplog: pytest.LogCaptureFixture
+) -> None:
+    """No handler for the method: the interceptor hands grpc.aio's ``None`` back unchanged, so
+    the client gets UNIMPLEMENTED instead of an interceptor failure."""
+    ch, _ = channel
+    with caplog.at_level(logging.INFO), pytest.raises(grpc.aio.AioRpcError) as err:
+        await ch.unary_unary("/test.Aio/Missing")(b"")
+    assert err.value.code() == grpc.StatusCode.UNIMPLEMENTED
+    assert not _grpc_errors(caplog)
+
+
+def test_settings_initialise_metrics_for_a_grpc_only_service() -> None:
+    """``AsyncContextServerInterceptor(settings)`` initialises the platform metrics with the
+    settings' identity, and rejects an invalid one at construction, like the threaded one."""
+    with pytest.raises(ValueError, match="OBSERVABILITY_DOMAIN"):
+        AsyncContextServerInterceptor(
+            PlatformSettings(_env_file=None, environment="prod", observability_domain="")
+        )
+    settings = PlatformSettings(
+        _env_file=None, app_name="orders-api", environment="prod", observability_domain="iam"
+    )
+    AsyncContextServerInterceptor(settings)
+    identity = metrics_identity()
+    assert platform_metrics_enabled() and identity is not None
+    assert (identity.domain, identity.service, identity.environment) == (
+        "iam",
+        "orders-api",
+        "prod",
+    )
 
 
 def _grpc_errors(caplog: pytest.LogCaptureFixture) -> list[logging.LogRecord]:
@@ -331,3 +410,42 @@ async def test_deadline_and_cancel_are_not_ok(
         and r.msg["method"] == "/test.Aio/Slow"
     )
     assert entry["grpc_code"] == code
+
+
+class _NoAbortContext:
+    """A servicer context without ``abort`` (or with a synchronous one): the sanitizer cannot
+    stop the RPC itself, so the wrapper re-raises and grpc.aio ends it."""
+
+    def __init__(self, abort: Any = None) -> None:
+        if abort is not None:
+            self.abort = abort
+
+
+async def test_wrapper_reraises_when_the_context_cannot_abort(
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    from fastapicommon.grpc.server import _wrap_async
+
+    async def stream(request: bytes, context: Any) -> AsyncIterator[bytes]:
+        yield b"one"
+        raise RuntimeError(SECRET)
+
+    async def unary(requests: Any, context: Any) -> bytes:
+        raise RuntimeError(SECRET)
+
+    stream_handler = _wrap_async(
+        grpc.unary_stream_rpc_method_handler(stream, _ident, _ident), "/t.S/Stream", "svc"
+    )
+    unary_handler = _wrap_async(
+        grpc.stream_unary_rpc_method_handler(unary, _ident, _ident), "/t.S/Unary", "svc"
+    )
+    aborted: list[tuple[Any, str]] = []
+    with caplog.at_level(logging.INFO):
+        with pytest.raises(RuntimeError):
+            async for _ in stream_handler.unary_stream(b"", _NoAbortContext()):
+                pass
+        sync_abort = _NoAbortContext(abort=lambda code, details: aborted.append((code, details)))
+        with pytest.raises(RuntimeError):
+            await unary_handler.stream_unary(iter(()), sync_abort)
+    assert aborted == [(grpc.StatusCode.INTERNAL, MSG_INTERNAL)]
+    _no_secret_logged(caplog)
