@@ -136,6 +136,7 @@ details.
 ```text
 Incoming request
   → ContextMiddleware        (outermost — binds RequestContext for the whole request)
+  → UnhandledErrorMiddleware (unclassified exception → 500 problem; never re-raised to the server)
   → PrometheusMiddleware     (records the platform_http_* metrics)
   → TimeoutMiddleware        (innermost — asyncio.wait_for around the handler)
   ╠═ always public (no auth) ══════════════════════════════════╗

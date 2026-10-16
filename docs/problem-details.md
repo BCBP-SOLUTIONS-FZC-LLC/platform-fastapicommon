@@ -55,7 +55,25 @@ Field paths drop the location (`body`, `query`, ...) and render indexes as `item
 
 ## Logging
 
-Each problem is logged once at WARN as `problem response` on the `fastapicommon.problem` logger, with `traceId`, `type`, `status`, `errorCode`, `service` (`app_name`) and `tenantId` (only when set). The detail is never logged. Unhandled exceptions are still logged with their traceback on `fastapicommon.exceptions`.
+Each problem is logged once at WARN as `problem response` on the `fastapicommon.problem` logger, with `traceId`, `type`, `status`, `errorCode`, `service` (`app_name`) and `tenantId` (only when set). The detail is never logged.
+
+### Unclassified exceptions
+
+An exception nothing classified (not a `PlatformException`, `HTTPException`, validation error or `NotImplementedError`) is a **programming defect**. The client gets a generic 500 `internal-error`, and one ERROR entry `unclassified error` is logged on `fastapicommon.exceptions`, the same contract as gincommon's:
+
+```json
+{"event": "unclassified error", "level": "error", "classified": false,
+ "traceId": "req-abc123", "trace_id": "4bf9…", "request_id": "req-abc123", "service": "orders-api",
+ "method": "POST", "route": "/tenders/:tender_id", "operation": "orders.api.create_tender",
+ "status": 500, "errorCode": "INTERNAL_ERROR",
+ "error_type": "orders.repo.RepoError", "error_chain": ["orders.repo.RepoError", "psycopg.errors.UniqueViolation"],
+ "stack": ["/app/orders/repo.py:42 in insert", "..."]}
+```
+
+- **Never the exception message.** `str(exc)` can carry SQL, row values, tokens or secrets. The entry has the types along `__cause__` / `__context__` and exception-group members (at most 8) and the stack frames as `file:line in function` (at most 30, no source lines).
+- **Not re-raised.** Starlette's `ServerErrorMiddleware` re-raises after the `Exception` handler, so the server would log the message ("Exception in ASGI application"). `UnhandledErrorMiddleware` stops the exception inside the stack; `create_platform_app` installs it just inside `ContextMiddleware`. An app built with `register_exception_handlers` alone should add it the same way: `app.add_middleware(UnhandledErrorMiddleware)` before `app.add_middleware(ContextMiddleware)`.
+- Classified errors, including a deliberate `PlatformException()` (500), are not flagged.
+- **Alert on it**: each entry is a defect; fix it by raising a `PlatformException` where the failure happens.
 
 ## Configuration
 

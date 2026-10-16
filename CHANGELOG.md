@@ -9,6 +9,11 @@ pre-1.0 caveat on what SemVer guarantees currently apply.
 
 ### Security
 
+- **Unclassified exceptions are logged as a defect, without their message** (parity with platform-gincommon's OQ-24 resolution). `unhandled_exception_handler` used to call `logger.exception(...)`, which logged the exception text and the full traceback. It now logs one structlog ERROR `unclassified error` entry: `classified=false`, ids, `service`, `method`, `route`, `operation`, `status`, `errorCode`, `error_type` / `error_chain` (exception types) and `stack` (`file:line in function` frames, no source lines). The client response is unchanged: a 500 `internal-error` without detail.
+- **New `UnhandledErrorMiddleware`**, installed by `create_platform_app` just inside `ContextMiddleware`. Starlette's `ServerErrorMiddleware` re-raises after the `Exception` handler, so the server (uvicorn) logged the traceback *with the message*. The middleware answers the 500 problem itself and does not re-raise. Apps that call `register_exception_handlers` without `create_platform_app` should add it.
+
+### Security
+
 - Locked dependency upgrades for the `pip-audit` gate: `cryptography` 50.0.2 (PYSEC-2026-3552), `urllib3` 2.8.0 (PYSEC-2026-4175/4176/4177), `virtualenv` 21.14.5 (PYSEC-2026-4011–4014) and `pip` 26.2.1 (PYSEC-2026-3721).
 - The example service image removes `pip` from its runtime stage. pip's vendored `urllib3`, `msgpack` and `setuptools` were what Trivy flagged, even with the base image's current pip, and nothing runs pip at runtime.
 

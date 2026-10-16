@@ -1,6 +1,7 @@
 sequenceDiagram
     participant Client
     participant CM as ContextMiddleware
+    participant UE as UnhandledErrorMiddleware
     participant PM as PrometheusMiddleware
     participant TM as TimeoutMiddleware
     participant H as Route handler
