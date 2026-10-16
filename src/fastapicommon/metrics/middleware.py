@@ -6,6 +6,7 @@ import time
 from starlette.datastructures import Headers
 from starlette.types import ASGIApp, Message, Receive, Scope, Send
 
+from fastapicommon._scope import request_outcome
 from fastapicommon.logging import get_logger
 from fastapicommon.logging.sanitize import sanitize_log_value
 from fastapicommon.metrics.platform import (
@@ -88,16 +89,16 @@ class PrometheusMiddleware:
 
         platform.http_active_inc(route)
         start = time.perf_counter()
-        raised = False
+        error: BaseException | None = None
         try:
             await self.app(scope, receive, send_wrapper)
-        except Exception:
-            raised = True
+        except BaseException as exc:  # CancelledError too: recorded as aborted (499)
+            error = exc
             raise
         finally:
             platform.http_active_dec(route)
-            code = status or 500
-            if raised and not status:
+            code, _, panicked = request_outcome(scope, status, error)
+            if panicked:
                 platform.record_http_panic(method, route)
             platform.record_http(
                 method, route, code, time.perf_counter() - start, request_size, float(response_size)

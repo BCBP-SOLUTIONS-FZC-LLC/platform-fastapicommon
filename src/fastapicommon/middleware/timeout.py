@@ -1,7 +1,6 @@
 from __future__ import annotations
 
 import asyncio
-import contextlib
 
 from starlette.requests import Request
 from starlette.types import ASGIApp, Message, Receive, Scope, Send
@@ -55,8 +54,17 @@ class TimeoutMiddleware:
             waiter.cancel()
         if not done:
             task.cancel()
-            with contextlib.suppress(asyncio.CancelledError, Exception):
+            try:
                 await task
+            except asyncio.CancelledError:
+                # The handler's own cancellation is expected; a cancellation of *this* request
+                # (server shutdown, client gone) while it unwinds must propagate, not be turned
+                # into a 503 for a client that has left.
+                current = asyncio.current_task()
+                if current is not None and current.cancelling():
+                    raise
+            except Exception:  # noqa: S110 - the handler's failure while cancelled is moot
+                pass
             platform = platform_metrics()
             if platform is not None:
                 platform.record_http_timeout(scope.get("method", ""), http_route_label(scope))

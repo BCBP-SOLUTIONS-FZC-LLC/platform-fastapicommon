@@ -296,3 +296,83 @@ def test_failure_after_response_started_marks_the_span_aborted(spans: _Spans) ->
     assert dict(span.attributes or {})["http.aborted"] is True
     assert [e.name for e in span.events] == ["http.aborted"]
     assert span.status.status_code.name == "UNSET"
+
+
+async def test_cancelled_request_is_aborted_not_a_panic(
+    spans: _Spans, caplog: pytest.LogCaptureFixture
+) -> None:
+    """Regression: a request the server cancels (graceful shutdown, client disconnect) was a
+    500 panic in the span, the access log and the metrics, so every rollout fired panic and
+    error-rate alerts. Go records such an abort as 499, not a failure."""
+    import asyncio
+
+    from prometheus_client import REGISTRY
+
+    app = _app()
+    entered = asyncio.Event()
+
+    @app.get("/hang")
+    async def hang() -> None:
+        entered.set()
+        await asyncio.sleep(30)
+
+    scope = {
+        "type": "http",
+        "asgi": {"version": "3.0"},
+        "http_version": "1.1",
+        "method": "GET",
+        "scheme": "http",
+        "path": "/hang",
+        "raw_path": b"/hang",
+        "root_path": "",
+        "query_string": b"",
+        "headers": [(b"host", b"t")],
+        "client": ("127.0.0.1", 1),
+        "server": ("t", 80),
+        "app": app,
+    }
+
+    async def receive() -> dict[str, Any]:
+        await asyncio.sleep(60)
+        return {"type": "http.disconnect"}  # pragma: no cover
+
+    async def send(message: dict[str, Any]) -> None:  # pragma: no cover - nothing is sent
+        pass
+
+    async def call() -> None:
+        await app(scope, receive, send)  # type: ignore[arg-type]
+
+    with caplog.at_level("DEBUG"):
+        task = asyncio.ensure_future(call())
+        await entered.wait()
+        task.cancel()
+        with pytest.raises(asyncio.CancelledError):
+            await task
+
+    (span,) = (s for s in spans.finished() if s.name == "GET /hang")
+    attrs = dict(span.attributes or {})
+    assert attrs["http.response.status_code"] == 499 and attrs["http.aborted"] is True
+    assert span.status.status_code.name == "UNSET"
+    (entry,) = (
+        r.msg
+        for r in caplog.records
+        if isinstance(r.msg, dict) and r.msg.get("event") == "http_request"
+    )
+    assert entry["status"] == 499 and entry["aborted"] is True and entry["level"] == "debug"
+    labels = {"domain": "iam", "environment": "prod", "service": "orders-api"}
+    assert not REGISTRY.get_sample_value(
+        "platform_http_panics_total", {**labels, "method": "GET", "route": "/hang"}
+    )
+    assert (
+        REGISTRY.get_sample_value(
+            "platform_http_requests_total",
+            {
+                **labels,
+                "method": "GET",
+                "route": "/hang",
+                "status_class": "4xx",
+                "error_class": "client_error",
+            },
+        )
+        == 1.0
+    )

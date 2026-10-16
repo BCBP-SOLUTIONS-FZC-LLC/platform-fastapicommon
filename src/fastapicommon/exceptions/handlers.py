@@ -1,7 +1,6 @@
 from __future__ import annotations
 
 import contextlib
-import traceback
 from collections.abc import Iterable
 from dataclasses import dataclass
 from typing import Any
@@ -11,6 +10,13 @@ from fastapi.exceptions import RequestValidationError
 from fastapi.responses import JSONResponse
 from starlette.exceptions import HTTPException as StarletteHTTPException
 
+from fastapicommon._errors import (  # noqa: F401 - re-exported
+    MAX_ERROR_CHAIN,
+    MAX_STACK_FRAMES,
+    emit_unclassified,
+    error_chain_types,
+    stack_frames,
+)
 from fastapicommon.context import get_request_context_or_none
 from fastapicommon.exceptions.errors import PlatformException
 from fastapicommon.logging import get_logger
@@ -29,7 +35,6 @@ from fastapicommon.problem import (
 from fastapicommon.problem.validation import validation_problem_parts
 
 _problem_log = get_logger("fastapicommon.problem")
-_unclassified_log = get_logger("fastapicommon.exceptions")
 
 DETAIL_ROUTE_NOT_FOUND = "No route matches the request path."
 DETAIL_METHOD_NOT_ALLOWED = "The route does not support the request method."
@@ -161,45 +166,6 @@ async def not_implemented_handler(request: Request, exc: Exception) -> JSONRespo
     return problem_response(request, TYPE_NOT_IMPLEMENTED)
 
 
-#: Bounds of the "unclassified error" entry (gincommon caps error_chain at 8 too).
-MAX_ERROR_CHAIN = 8
-MAX_STACK_FRAMES = 30
-
-
-def _type_name(exc: BaseException) -> str:
-    t = type(exc)
-    return t.__qualname__ if t.__module__ == "builtins" else f"{t.__module__}.{t.__qualname__}"
-
-
-def error_chain_types(exc: BaseException, limit: int = MAX_ERROR_CHAIN) -> list[str]:
-    """The exception types along ``__cause__`` / ``__context__`` and exception-group
-    members, outermost first, at most ``limit`` (gincommon's ``error_chain``). Type names
-    are code identifiers, never exception text."""
-    out: list[str] = []
-    seen: set[int] = set()
-    queue: list[BaseException] = [exc]
-    while queue and len(out) < limit:
-        e = queue.pop(0)
-        if id(e) in seen:
-            continue
-        seen.add(id(e))
-        out.append(_type_name(e))
-        if isinstance(e, BaseExceptionGroup):
-            queue.extend(e.exceptions)
-        nxt = e.__cause__ or (None if e.__suppress_context__ else e.__context__)
-        if nxt is not None:
-            queue.append(nxt)
-    return out
-
-
-def stack_frames(exc: BaseException, limit: int = MAX_STACK_FRAMES) -> list[str]:
-    """The traceback as ``file:line in function`` entries, innermost last, at most
-    ``limit`` (the innermost kept). No source lines and no exception message: frames are
-    code locations only."""
-    frames = traceback.extract_tb(exc.__traceback__)[-limit:]
-    return [f"{f.filename}:{f.lineno} in {f.name}" for f in frames]
-
-
 def _operation(request: Request) -> str:
     endpoint = request.scope.get("endpoint")
     if endpoint is None:
@@ -214,36 +180,17 @@ def log_unclassified(
 ) -> None:
     """Emit the error-level ``unclassified error`` entry (gincommon's contract): where it
     happened, the exception types and the stack frames — never the exception message."""
-    from fastapicommon.metrics.platform import (  # avoid an import cycle
-        TRANSPORT_HTTP,
-        http_route_label,
-        platform_metrics,
-    )
+    from fastapicommon.metrics.platform import TRANSPORT_HTTP, http_route_label  # import cycle
 
-    platform = platform_metrics()
-    if platform is not None:
-        platform.record_unclassified_error(TRANSPORT_HTTP)
-    context = get_request_context_or_none()
-    s = _settings(request)
-    chain = error_chain_types(exc)
-    fields: dict[str, object] = {
-        "classified": False,
+    where: dict[str, object] = {
         "traceId": trace_id,
-        "trace_id": context.trace_id if context is not None else "",
-        "request_id": context.request_id if context is not None else "",
         "method": request.method,
         "route": http_route_label(request.scope),
         "operation": _operation(request),
         "status": status,
         "errorCode": error_code,
-        "error_type": chain[0] if chain else "",
-        "error_chain": chain,
-        "stack": stack_frames(exc),
     }
-    if s.service:
-        fields["service"] = s.service
-    with contextlib.suppress(Exception):  # a failing logger must not break the response
-        _unclassified_log.error("unclassified error", **fields)
+    emit_unclassified(TRANSPORT_HTTP, exc, where, _settings(request).service)
 
 
 async def unhandled_exception_handler(request: Request, exc: Exception) -> JSONResponse:

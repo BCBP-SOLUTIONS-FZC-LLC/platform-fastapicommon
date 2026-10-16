@@ -224,6 +224,27 @@ and the span name.
   response, logged and propagated verbatim. On gRPC, `x-request-id` itself was not validated
   either (Go's request-id interceptor applies `NormalizeRequestID`); an invalid one is now
   replaced by a new UUID, as on HTTP.
+- **gRPC validates the identity like HTTP.** `x-user-id` / `x-tenant-id` went through unchecked
+  and `x-tenant-roles` was split without validation, so an identity the HTTP path rejects (over
+  256 bytes, control characters, role tokens like `admin;drop`) was authenticated, checked by
+  RBAC and logged as verified on gRPC. It now uses the same `normalize_header_value` /
+  `parse_roles` as `ContextMiddleware`.
+- **A cancelled request is aborted, not a panic.** A request the server cancels (graceful
+  shutdown, client disconnect) was recorded as a 500 panic in the span, the `http_request` log
+  and the metrics, so every rollout raised panic and error-rate alerts. It is now an aborted
+  request, as in Go: status 499 (or the status already sent), `http_request` at debug with
+  `"aborted": true`, the span annotated `http.aborted`, counted as `4xx` / `client_error` and
+  never in `platform_http_panics_total`. Tracing, logging and metrics share one outcome rule.
+- **`TimeoutMiddleware` no longer swallows the server's cancellation** of a request whose
+  handler is still unwinding after a timeout (it then sent a 503 to a gone client and could
+  stall shutdown).
+- **gRPC forwards inbound W3C baggage** to the handler and outbound calls (the server span was
+  attached on the current context instead of the extracted one).
+- **`LOG_LEVEL=critical` / `fatal` are accepted** again (they fell back to info with a warning).
+- Route matching iterates the routes lazily and stops at the first match.
+- Span `exception.type` is the fully qualified type name (`module.Class`, builtins bare), the
+  same as `error_type` in logs and OTel's convention; one helper writes it for every span, and
+  HTTP and gRPC share one `unclassified error` builder.
 - Internal: one boolean environment parser (`env_bool`, invalid values warned once), one
   force-flush helper, and a scope flag instead of reading SDK span internals.
 - Internal: one Gin `ClientIP()` (`fastapicommon.middleware.context.client_ip`), one UTF-8

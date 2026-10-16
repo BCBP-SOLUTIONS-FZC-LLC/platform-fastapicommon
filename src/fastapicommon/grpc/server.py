@@ -13,23 +13,21 @@ from opentelemetry import context as otel_context
 from opentelemetry import propagate, trace
 from opentelemetry.trace import SpanKind, Status, StatusCode
 
+from fastapicommon._errors import add_exception_event, emit_unclassified
 from fastapicommon.auth.headers import (
     CORRELATION_ID_HEADER,
     REQUEST_ID_HEADER,
     TENANT_ID_HEADER,
     TENANT_ROLES_HEADER,
-    TENANT_ROLES_SEPARATOR,
     USER_ID_HEADER,
 )
-from fastapicommon.auth.validation import resolve_ids
+from fastapicommon.auth.validation import normalize_header_value, parse_roles, resolve_ids
 from fastapicommon.context import (
     CurrentUser,
     RequestContext,
     bind_request_context,
-    get_request_context_or_none,
     reset_request_context,
 )
-from fastapicommon.exceptions.handlers import error_chain_types, stack_frames
 from fastapicommon.logging import get_logger
 from fastapicommon.logging.sanitize import sanitize_fields, sanitize_log_value
 from fastapicommon.metrics.platform import (
@@ -46,7 +44,6 @@ if TYPE_CHECKING:
     from fastapicommon.config import PlatformSettings
 
 _logger = get_logger("fastapicommon.grpc")
-_unclassified_log = get_logger("fastapicommon.exceptions")
 
 TRACER_SCOPE = "platform-fastapicommon/grpc"
 #: One tracer for every RPC: the global (proxy / delegating) tracer follows a provider installed
@@ -84,26 +81,11 @@ def _explicit_code(context: Any) -> Any:
 
 
 def _log_unclassified_grpc(method: str, exc: BaseException, service: str) -> None:
-    platform = platform_metrics()
-    if platform is not None:
-        platform.record_unclassified_error(TRANSPORT_GRPC)
-    context = get_request_context_or_none()
-    fields: dict[str, object] = {
-        "classified": False,
-        "trace_id": context.trace_id if context is not None else "",
-        "request_id": context.request_id if context is not None else "",
+    where: dict[str, object] = {
         "grpc_method": grpc_method_label(method),
         "grpc_code": grpc_code_label("INTERNAL"),
-        "error_type": "",
-        "error_chain": [],
-        "stack": stack_frames(exc),
     }
-    chain = error_chain_types(exc)  # never empty: it starts with exc itself
-    fields["error_type"], fields["error_chain"] = chain[0], chain
-    if service:
-        fields["service"] = service
-    with contextlib.suppress(Exception):  # a failing logger must not change the RPC result
-        _unclassified_log.error("unclassified error", **fields)
+    emit_unclassified(TRANSPORT_GRPC, exc, where, service)
 
 
 def _sanitized_status(method: str, exc: Exception, context: Any, service: str) -> tuple[Any, str]:
@@ -164,7 +146,9 @@ def _split_full_method(full: str) -> tuple[str, str]:
     return service, method or "unknown"
 
 
-def _start_server_span(method: str, metadata: tuple[tuple[str, str], ...]) -> trace.Span:
+def _start_server_span(
+    method: str, metadata: tuple[tuple[str, str], ...]
+) -> tuple[trace.Span, otel_context.Context]:
     """Go ``startServerSpan``: a server span named after the bounded method; an unrecognised
     method is ``rpc.method=_OTHER`` with the sanitized original in ``rpc.method_original``."""
     carrier = {key.lower(): value for key, value in metadata if isinstance(value, str)}
@@ -184,7 +168,7 @@ def _start_server_span(method: str, metadata: tuple[tuple[str, str], ...]) -> tr
         span.set_attributes(
             {"rpc.system.name": "grpc", "rpc.service": service, "rpc.method": rpc_method}
         )
-    return span
+    return span, parent
 
 
 def _finish_server_span(span: trace.Span, code: str, error: BaseException | None) -> None:
@@ -196,7 +180,7 @@ def _finish_server_span(span: trace.Span, code: str, error: BaseException | None
         {"rpc.response.status_code": status.name, "rpc.grpc.status_code": int(status.value[0])}
     )
     if error is not None:
-        span.add_event("exception", {"exception.type": type(error).__qualname__})
+        add_exception_event(span, error)
     if code != "OK":
         span.set_status(Status(StatusCode.ERROR, "panic" if error is not None else code))
 
@@ -229,14 +213,13 @@ def _context_from_metadata(metadata: tuple[tuple[str, str], ...]) -> RequestCont
     request_id, correlation_id = resolve_ids(
         headers.get(REQUEST_ID_HEADER), headers.get(CORRELATION_ID_HEADER)
     )
-    roles_header = headers.get(TENANT_ROLES_HEADER, "")
-    roles = tuple(
-        role.strip() for role in roles_header.split(TENANT_ROLES_SEPARATOR) if role.strip()
-    )
+    # The identity is validated exactly as on HTTP (ContextMiddleware; Go's ContextBuilder): an
+    # invalid user / tenant id is absent, invalid role tokens are dropped. So an identity the
+    # HTTP path rejects is never accepted on gRPC, nor logged as verified.
     user = CurrentUser(
-        user_id=headers.get(USER_ID_HEADER),
-        tenant_id=headers.get(TENANT_ID_HEADER),
-        roles=roles,
+        user_id=normalize_header_value(headers.get(USER_ID_HEADER)),
+        tenant_id=normalize_header_value(headers.get(TENANT_ID_HEADER)),
+        roles=parse_roles(headers.get(TENANT_ROLES_HEADER)),
     )
     return RequestContext(request_id=request_id, correlation_id=correlation_id, user=user)
 
@@ -249,8 +232,10 @@ class _UnaryRpc:
     def __init__(self, method: str, context: Any) -> None:
         self.method = method
         metadata = tuple(context.invocation_metadata() or ())
-        self.span = _start_server_span(method, metadata)
-        self.span_token = otel_context.attach(trace.set_span_in_context(self.span))
+        self.span, parent = _start_server_span(method, metadata)
+        # On top of the extracted context (not the current one), so inbound W3C baggage reaches
+        # the handler and outbound calls, as on HTTP.
+        self.span_token = otel_context.attach(trace.set_span_in_context(self.span, parent))
         rpc_context = _context_from_metadata(metadata)
         span_context = self.span.get_span_context()
         if span_context.is_valid:

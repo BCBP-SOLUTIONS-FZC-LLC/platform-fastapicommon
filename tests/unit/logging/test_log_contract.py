@@ -88,7 +88,14 @@ def test_environment_defaults_to_app_env(
 
 @pytest.mark.parametrize(
     ("raw", "level"),
-    [("debug", logging.DEBUG), ("WARN", logging.WARNING), ("warning", logging.WARNING)],
+    [
+        ("debug", logging.DEBUG),
+        ("WARN", logging.WARNING),
+        ("warning", logging.WARNING),
+        # Regression: stdlib CRITICAL (accepted before) fell back to info with a warning.
+        ("CRITICAL", logging.CRITICAL),
+        ("fatal", logging.CRITICAL),
+    ],
 )
 def test_log_level_env(raw: str, level: int, monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setenv("LOG_LEVEL", raw)

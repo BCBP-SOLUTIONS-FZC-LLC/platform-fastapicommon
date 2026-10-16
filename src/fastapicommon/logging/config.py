@@ -45,6 +45,10 @@ _LEVELS = {
     "warn": logging.WARNING,
     "warning": logging.WARNING,
     "error": logging.ERROR,
+    # Accepted for services configured before the gincommon contract (stdlib names) and for
+    # Zap's fatal: only critical / fatal entries are written; they render as "error".
+    "critical": logging.CRITICAL,
+    "fatal": logging.CRITICAL,
 }
 #: Zap's level names (``warning`` is ``warn``; ``critical`` / ``exception`` map to ``error``).
 _ZAP_LEVEL = {
@@ -98,7 +102,7 @@ def resolve_level(level: int | str | None, dev: bool) -> int:
     _warn_once(
         "LOG_LEVEL",
         raw,
-        f"{logging.getLevelName(default).lower()} (want debug, info, warn or error)",
+        f"{logging.getLevelName(default).lower()} (want debug, info, warn, error or critical)",
     )
     return default
 

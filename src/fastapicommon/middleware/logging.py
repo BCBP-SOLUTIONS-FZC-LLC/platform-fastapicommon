@@ -16,9 +16,10 @@ import time
 from contextvars import ContextVar
 from typing import Any
 
+from starlette.datastructures import Headers
 from starlette.types import ASGIApp, Message, Receive, Scope, Send
 
-from fastapicommon._scope import ABORTED
+from fastapicommon._scope import request_outcome
 from fastapicommon.auth.headers import TENANT_ID_HEADER, USER_ID_HEADER
 from fastapicommon.context import get_request_context_or_none
 from fastapicommon.logging import get_logger
@@ -37,11 +38,8 @@ def current_http_scope() -> Scope | None:
 
 
 def http_header(scope: Scope, name: str) -> str:
-    target = name.lower().encode("latin-1")
-    for key, value in scope.get("headers", []):
-        if key.lower() == target:
-            return str(value.decode("latin-1"))
-    return ""
+    """The first ``name`` header of the request (case-insensitive), ``""`` when absent."""
+    return Headers(scope=scope).get(name, "")
 
 
 def identity_log_fields(scope: Scope) -> dict[str, Any]:
@@ -84,33 +82,35 @@ class LoggingMiddleware:
 
         http_route_label(scope)  # resolve before routing rewrites the scope (Mount)
         token = _current_scope.set(scope)
-        raised = False
+        error: BaseException | None = None
         try:
             await self.app(scope, receive, send_wrapper)
-        except BaseException:
-            raised = True
+        except BaseException as exc:
+            error = exc
             raise
         finally:
             try:
-                self._log(scope, start, 500 if raised and status_code == 0 else status_code)
+                status, aborted, _ = request_outcome(scope, status_code, error)
+                self._log(scope, start, status, aborted)
             finally:
                 _current_scope.reset(token)
 
     @staticmethod
-    def _log(scope: Scope, start: float, status: int) -> None:
+    def _log(scope: Scope, start: float, status: int, aborted: bool = False) -> None:
         context = get_request_context_or_none()
         fields: dict[str, Any] = {
             "trace_id": context.trace_id if context is not None else "",
             "request_id": context.request_id if context is not None else "",
             "method": sanitize_log_value(scope.get("method", "")),
             "path": http_route_label(scope),
-            "status": status or 500,
+            "status": status,
             "duration_ms": (time.perf_counter() - start) * 1000.0,
         }
         fields.update(identity_log_fields(scope))
         safe = sanitize_fields(fields)
-        if scope.get(ABORTED):
-            # Go: an aborted request is not an error (its failure is logged on its own).
+        if aborted:
+            # Go: an aborted request (cut short, or cancelled by a client disconnect / server
+            # shutdown) is not an error; a cut-short one's failure is logged on its own.
             safe["aborted"] = True
             _logger.debug("http_request", **safe)
         elif fields["status"] >= 500:

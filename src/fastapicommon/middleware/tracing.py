@@ -14,14 +14,17 @@ message, which can carry request data).
 
 from __future__ import annotations
 
+from collections.abc import Mapping
 from typing import Any
 
 from opentelemetry import context as otel_context
 from opentelemetry import propagate, trace
 from opentelemetry.trace import SpanKind, Status, StatusCode
+from starlette.datastructures import Headers
 from starlette.types import ASGIApp, Message, Receive, Scope, Send
 
-from fastapicommon._scope import ABORTED, PANICKED
+from fastapicommon._errors import add_exception_event
+from fastapicommon._scope import PANICKED, request_outcome
 from fastapicommon.logging.sanitize import truncate_utf8
 from fastapicommon.metrics.platform import http_method_label, http_route_label
 from fastapicommon.middleware.context import client_ip
@@ -36,11 +39,7 @@ MAX_SPAN_METHOD_BYTES = 32
 truncate_span_attr = truncate_utf8
 
 
-def _headers(scope: Scope) -> dict[str, str]:
-    return {k.decode("latin-1").lower(): v.decode("latin-1") for k, v in scope.get("headers", [])}
-
-
-def client_address(scope: Scope, headers: dict[str, str]) -> str:
+def client_address(scope: Scope, headers: Mapping[str, str]) -> str:
     """Gin's default ``ClientIP()`` (see :func:`fastapicommon.middleware.context.client_ip`)."""
     client = scope.get("client")
     return client_ip(headers, str(client[0]) if client else None) or ""
@@ -62,7 +61,7 @@ class TracingMiddleware:
             await self.app(scope, receive, send)
             return
 
-        headers = _headers(scope)
+        headers = Headers(scope=scope)
         raw_method = scope.get("method", "")
         method, span_method = raw_method, raw_method
         if http_method_label(raw_method) != raw_method:
@@ -97,7 +96,7 @@ class TracingMiddleware:
 def _annotate(
     span: Any,
     scope: Scope,
-    headers: dict[str, str],
+    headers: Mapping[str, str],
     method: str,
     raw_method: str,
     span_method: str,
@@ -124,13 +123,13 @@ def _annotate(
         )
     # An exception that escaped the app is answered 500 by Starlette after this middleware;
     # without the override the span would report 0 (or a status already started).
-    code = 500 if error is not None and status_code == 0 else status_code or 500
+    code, aborted, panicked = request_outcome(scope, status_code, error)
     span.set_attribute("http.response.status_code", code)
-    if scope.get(ABORTED):
-        # Go spanAttrAborted: annotated, not an Error status.
+    if aborted:
+        # Go spanAttrAborted: annotated, not an Error status (a cut-short or cancelled request).
         span.set_attribute("http.aborted", True)
         span.add_event("http.aborted")
-    elif error is not None and status_code == 0:
+    elif panicked and error is not None:
         mark_span_panic(span, error)
     elif code >= 500 and not scope.get(PANICKED):
         # UnhandledErrorMiddleware answers an unclassified exception itself and marks the
@@ -142,7 +141,7 @@ def mark_span_panic(span: Any, error: BaseException) -> None:
     """Go's recovered-panic span: an ``exception`` event with the type only (never the message)
     and Error status ``panic``. Used for an exception that escaped the app, and by
     ``UnhandledErrorMiddleware`` for one it answered itself."""
-    span.add_event("exception", {"exception.type": type(error).__qualname__})
+    add_exception_event(span, error)
     span.set_status(Status(StatusCode.ERROR, "panic"))
 
 

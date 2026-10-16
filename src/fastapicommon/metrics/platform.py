@@ -167,14 +167,15 @@ def route_template_label(path: str) -> str:
     return _PATH_PARAM.sub(_replace, path)
 
 
-def _flatten_routes(routes: Sequence[Any]) -> Sequence[Any]:
+def _flatten_routes(routes: Sequence[Any]) -> Iterable[Any]:
     """FastAPI ≥ 0.12x keeps included routers as lazy entries without a ``path``; its public
     ``iter_route_contexts`` (what FastAPI's OpenAPI generation uses) yields each effective
     route with its full, prefixed template. Older versions copy the routes into the app's
     router, so they are already flat."""
     if _iter_route_contexts is None:
         return routes
-    return list(_iter_route_contexts(routes))
+    # Lazily: matching stops at the first full match instead of wrapping every route first.
+    return _iter_route_contexts(routes)
 
 
 def _match_routes(

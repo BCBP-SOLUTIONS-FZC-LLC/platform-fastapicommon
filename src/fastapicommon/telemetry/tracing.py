@@ -58,6 +58,7 @@ from opentelemetry.sdk.trace.sampling import (
 from opentelemetry.trace import NonRecordingSpan, Span, Status, StatusCode, Tracer
 from opentelemetry.trace.propagation.tracecontext import TraceContextTextMapPropagator
 
+from fastapicommon._errors import add_exception_event
 from fastapicommon.logging import get_logger
 from fastapicommon.logging.config import env_bool, is_dev_env
 
@@ -443,7 +444,7 @@ def record_span_error(
     nor the stack trace is exported, since they may carry SQL, PII, tokens or secrets.
     ``description`` is written as given: keep it a fixed sentence."""
     span = trace.get_current_span(context)
-    span.add_event("exception", {"exception.type": type(error).__qualname__})
+    add_exception_event(span, error)
     span.set_status(Status(StatusCode.ERROR, description))
 
 

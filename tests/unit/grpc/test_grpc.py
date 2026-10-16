@@ -196,3 +196,40 @@ def test_context_from_metadata_validates_ids() -> None:
     assert context.correlation_id == context.request_id
     kept = _context_from_metadata((("x-request-id", "req-9"), ("x-correlation-id", "corr-9")))
     assert (kept.request_id, kept.correlation_id) == ("req-9", "corr-9")
+
+
+def test_context_from_metadata_validates_identity_like_http() -> None:
+    """Regression: gRPC took x-user-id / x-tenant-id raw and split roles without validation, so
+    an identity the HTTP path rejects was authenticated (and logged as verified) on gRPC."""
+    context = _context_from_metadata(
+        (
+            ("x-user-id", "u" * 300),  # > 256 bytes
+            ("x-tenant-id", "t1\x00"),  # control character
+            ("x-tenant-roles", "admin;drop, operator, admin, " + "r" * 65),
+        )
+    )
+    assert context.user_id is None and context.tenant_id is None
+    assert not context.user.is_authenticated
+    assert context.roles == ("operator", "admin")
+
+
+def test_inbound_baggage_reaches_the_handler() -> None:
+    """Regression: the gRPC span was attached on the current context instead of the extracted
+    one, so W3C baggage was dropped (it worked on HTTP)."""
+    from opentelemetry import baggage
+
+    from fastapicommon.telemetry import TracingConfig, init_tracing
+
+    init_tracing(TracingConfig(service_name="svc", endpoint="", enable_baggage=True))
+    seen: dict[str, object] = {}
+
+    def behavior(request: Any, context: Any) -> Any:
+        seen["tenant"] = baggage.get_baggage("tenant")
+        return "ok"
+
+    handler = grpc.unary_unary_rpc_method_handler(behavior)
+    wrapped = ContextServerInterceptor().intercept_service(
+        lambda details: handler, SimpleNamespace(method="/svc/Method")
+    )
+    wrapped.unary_unary("request", _FakeServicerContext((("baggage", "tenant=acme"),)))
+    assert seen["tenant"] == "acme"
