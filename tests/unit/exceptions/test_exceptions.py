@@ -28,6 +28,7 @@ from fastapicommon.exceptions import (
 from fastapicommon.middleware import ContextMiddleware
 from fastapicommon.problem import (
     PROBLEM_MEDIA_TYPE,
+    TYPE_NOT_FOUND,
     TYPE_VALIDATION_FAILED,
     FieldError,
     problem_type,
@@ -271,3 +272,18 @@ def test_exception_classes() -> None:
     assert exc.status_code == 409 and exc.code == "TENDER_LOCKED" and str(exc) == "Locked."
     assert str(ConflictException()) == "Conflict"
     assert ValidationException().status_code == 400
+
+
+@pytest.mark.parametrize("attr", ["status_code", "code", "error_code"])
+def test_legacy_class_attributes_are_rejected(attr: str) -> None:
+    """Regression: `class X(PlatformException): status_code = 404` used to be accepted and then
+    silently answered 500 internal-error, because only problem_type selects the response."""
+    with pytest.raises(TypeError, match=f"'{attr}'.*problem_type"):
+        type("TenderNotFound", (PlatformException,), {attr: 404})
+
+
+def test_problem_type_subclass_still_allowed() -> None:
+    class Gone(PlatformException):
+        problem_type = TYPE_NOT_FOUND
+
+    assert Gone().status_code == 404 and Gone().code == TYPE_NOT_FOUND.code

@@ -144,6 +144,53 @@ and the span name.
   uses Python instead of `curl`, which is no longer installed.
 - Dependabot uses the `uv` ecosystem.
 
+### Fixed — production-readiness review
+
+- **`@app.on_event` / `on_startup` / `on_shutdown` handlers run again with tracing on.**
+  `create_platform_app` passed its own `lifespan` to FastAPI, which then skipped them. It now wraps
+  the router's lifespan after FastAPI built it, so every form FastAPI accepts runs: those
+  handlers, an `@asynccontextmanager` lifespan, and a plain (async) generator lifespan, which used
+  to fail at startup with `'async_generator' object does not support the asynchronous context
+  manager protocol`.
+- **An app's shutdown no longer stops tracing for the rest of the process.** It calls the new
+  `flush_tracing()` (export buffered spans, keep the provider) instead of `shutdown_tracing()`, so
+  other apps and gRPC servers sharing the provider keep recording. A provider the service
+  installed itself is not touched. The SDK shuts the provider down at interpreter exit.
+- **`LOG_SAMPLING=true` can no longer crash a request.** The sampler raised `structlog.DropEvent`
+  (a `BaseException`) out of the formatter into the caller of a stdlib logger, from the 101st
+  identical entry in a second. It is now a handler filter that drops the entry, and decides once
+  per record, so stderr and `LOG_FILE` count an entry once.
+- **`OTLP_ENDPOINT=none` (also `off` / `disabled`) disables export** instead of building an
+  exporter for the host `none`, and `OTEL_TRACES_EXPORTER=none` also applies when
+  `OTLP_ENDPOINT` is set.
+- **An explicit environment decides the dev trace defaults.** `TracingConfig.from_env(environment=
+  "local")` with `APP_ENV=prod` got the `local` label but production insecure / sampling defaults.
+- **`new_tracer(...).start_as_current_span(...)` as a decorator follows the provider per call.** It
+  bound the tracer when applied, so a function decorated at import never produced spans, or kept
+  writing to a provider that had been shut down.
+- **`PlatformException` subclasses with the old class attributes are rejected.** `status_code`,
+  `code` or `error_code` set on a subclass no longer select the response, so such a subclass
+  silently answered 500 `internal-error`. Defining one now raises `TypeError` pointing at
+  `problem_type`.
+- **The route label is matched once per request** and kept in the scope, instead of once each in
+  the tracing, logging, metrics, timeout and error paths.
+- Internal: one Gin `ClientIP()` (`fastapicommon.middleware.context.client_ip`), one UTF-8
+  truncation (`fastapicommon.logging.sanitize.truncate_utf8`), one panic-span helper, and no
+  serialise-then-parse of the 500 problem body. The caller field no longer uses structlog's private
+  `_frames` API.
+
+### Changed (breaking) — `PlatformSettings.environment` defaults to `""`
+
+It defaulted to `"development"`, which is not in the registry's vocabulary (`local`, `dev`,
+`test`, `staging`, `prod`) and was ignored everywhere. Unset now reads as unset: production log
+and trace defaults, and `create_platform_app` still rejects it while metrics are enabled. Code
+reading `settings.environment == "development"` must set `APP_ENV`.
+
+### Added — `AsyncContextServerInterceptor` for `grpc.aio` servers
+
+The asyncio counterpart of `ContextServerInterceptor`: server span, request context,
+`platform_grpc_*` metrics, `grpc_request` log, and exception sanitizing (unary and streaming).
+
 ### Security — unclassified errors (parity with `platform-gincommon` OQ-24 / OQ-25)
 
 - **gRPC exception messages no longer reach clients or logs.** grpcio answered a handler exception with `UNKNOWN "Exception calling application: <message>"` and logged the traceback with the message. `ContextServerInterceptor` now sanitizes every RPC (unary and streaming). A status the handler chose (`context.abort`, or `set_code` then raise) is kept, re-aborted with its own details. Any other exception is aborted as `INTERNAL "internal server error"` and logged at ERROR as `unclassified error` (`grpc_method`, `grpc_code=Internal`, ids, `error_type` / `error_chain`, `stack`; never the message). This is the same contract as platform-gincommon's gRPC error sanitizer. Callers that matched on `UNKNOWN` or on the details text must use status codes. Unclassified exceptions still count in `platform_grpc_panics_total`, now with code `Internal`.

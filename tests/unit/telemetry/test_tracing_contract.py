@@ -20,6 +20,7 @@ from fastapicommon.telemetry import (
     active_tracing_config,
     ensure_tracing,
     extract_trace_context,
+    flush_tracing,
     init_tracing,
     init_tracing_from_env,
     inject_trace_context,
@@ -92,9 +93,24 @@ def test_export_can_be_disabled(
     for key, val in env.items():
         monkeypatch.setenv(key, val)
     assert TracingConfig.from_env(service_name="svc").endpoint == value
-    assert (
-        TracingConfig.from_env(service_name="svc", endpoint="explicit:1").endpoint == "explicit:1"
-    )
+    # OTEL_TRACES_EXPORTER=none wins over an explicit endpoint (OTLP_ENDPOINT) too.
+    explicit = TracingConfig.from_env(service_name="svc", endpoint="explicit:1").endpoint
+    assert explicit == ("" if env.get("OTEL_TRACES_EXPORTER") == "none" else "explicit:1")
+
+
+@pytest.mark.parametrize("value", ["none", "Off", " disabled "])
+def test_explicit_endpoint_can_disable_export(value: str) -> None:
+    """Regression: OTLP_ENDPOINT=none used to build an exporter for the host 'none'."""
+    assert TracingConfig.from_env(service_name="svc", endpoint=value).endpoint == ""
+
+
+def test_explicit_environment_wins_for_dev_defaults(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Regression: APP_ENV decided the dev defaults even when an environment was passed."""
+    monkeypatch.setenv("APP_ENV", "prod")
+    local = TracingConfig.from_env(service_name="svc", environment="local")
+    assert local.environment == "local" and local.insecure and local.sample_ratio == 1.0
+    prod = TracingConfig.from_env(service_name="svc")
+    assert prod.environment == "prod" and not prod.insecure and prod.sample_ratio == 0.1
 
 
 @pytest.mark.parametrize(
@@ -156,6 +172,41 @@ def test_provider_swap_follows_old_tracers_and_flushes() -> None:
     # After shutdown the global provider records nothing but keeps the parent context.
     with tracer.start_as_current_span("dropped") as span:
         assert not span.is_recording()
+
+
+def test_decorator_follows_the_provider_per_call() -> None:
+    """Regression: start_as_current_span bound the tracer when the decorator was applied, so a
+    function decorated at import (before tracing was installed) never produced spans."""
+
+    @new_tracer("decorated").start_as_current_span("op")
+    def op() -> bool:
+        return trace.get_current_span().is_recording()
+
+    assert op() is False  # no provider yet
+    first, second = InMemorySpanExporter(), InMemorySpanExporter()
+    init_tracing(TracingConfig(service_name="a", endpoint="", sample_ratio=1.0), first)
+    assert op() is True
+    init_tracing(TracingConfig(service_name="b", endpoint="", sample_ratio=1.0), second)
+    assert op() is True
+    shutdown_tracing()
+    assert [s.name for s in first.get_finished_spans()] == ["op"]
+    assert [s.name for s in second.get_finished_spans()] == ["op"]
+
+
+def test_flush_tracing_keeps_the_provider_running() -> None:
+    """An app's shutdown flushes, but other apps / gRPC servers sharing the provider keep
+    recording (shutdown_tracing used to be called there)."""
+    exporter = InMemorySpanExporter()
+    init_tracing(TracingConfig(service_name="a", endpoint="", sample_ratio=1.0), exporter)
+    tracer = new_tracer("shared")
+    with tracer.start_as_current_span("before"):
+        pass
+    flush_tracing()
+    assert [s.name for s in exporter.get_finished_spans()] == ["before"]
+    with tracer.start_as_current_span("after") as span:
+        assert span.is_recording()
+    assert active_tracing_config() is not None
+    shutdown_tracing()
 
 
 def test_ensure_tracing_rules() -> None:

@@ -8,7 +8,6 @@ from collections.abc import Iterator
 from pathlib import Path
 
 import pytest
-import structlog
 
 from fastapicommon.context import CurrentUser, RequestContext, request_context_scope
 from fastapicommon.logging import config as log_config
@@ -119,15 +118,40 @@ def test_sampling(capsys: pytest.CaptureFixture[str], monkeypatch: pytest.Monkey
     assert "invalid LOG_SAMPLING" in capsys.readouterr().err
 
 
+def _record(msg: object, level: int = logging.INFO) -> logging.LogRecord:
+    return logging.LogRecord("t", level, __file__, 1, msg, None, None)
+
+
 def test_sampler_window_resets() -> None:
-    sampler = log_config._Sampler(tick=0.0, initial=1, thereafter=100)
+    sampler = log_config._SamplingFilter(tick=0.0, initial=1, thereafter=100)
     for _ in range(3):
-        assert sampler(None, "info", {"event": "x"}) == {"event": "x"}
-    strict = log_config._Sampler(tick=60, initial=1, thereafter=2)
-    strict(None, "info", {"event": "y"})
-    with pytest.raises(structlog.DropEvent):
-        strict(None, "info", {"event": "y"})
-    assert strict(None, "info", {"event": "y"}) == {"event": "y"}
+        assert sampler.filter(_record({"event": "x"}))
+    strict = log_config._SamplingFilter(tick=60, initial=1, thereafter=2)
+    assert strict.filter(_record({"event": "y"}))
+    assert not strict.filter(_record({"event": "y"}))
+    assert strict.filter(_record({"event": "y"}))
+
+
+def test_sampler_decides_once_per_record() -> None:
+    """stderr and LOG_FILE share the filter: one record is counted once, same decision in both."""
+    strict = log_config._SamplingFilter(tick=60, initial=1, thereafter=1000)
+    first, second = _record("z"), _record("z")
+    assert strict.filter(first) and strict.filter(first)
+    assert not strict.filter(second) and not strict.filter(second)
+
+
+def test_sampling_never_raises_into_stdlib_callers(
+    capsys: pytest.CaptureFixture[str], monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Regression: the sampler used to raise structlog.DropEvent (a BaseException) out of the
+    ProcessorFormatter into whoever called a stdlib logger, from the 101st identical entry."""
+    monkeypatch.setenv("LOG_SAMPLING", "true")
+    configure_logging(environment="prod")
+    lib = logging.getLogger("some.library")
+    for i in range(250):
+        lib.info("hot %s", i)  # must not raise
+    lines = _lines(capsys)
+    assert sum('"msg": "hot ' in line for line in lines) == 101
 
 
 def test_log_file_tees_json_with_iso_time(

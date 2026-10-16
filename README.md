@@ -319,6 +319,17 @@ pass the settings to the interceptor — `ContextServerInterceptor(PlatformSetti
 initializes metrics exactly like `create_platform_app()` does (and raises on the same missing
 domain or invalid identities). See [Platform Observability Standard metrics](#platform-observability-standard-metrics).
 
+### `grpc.aio` servers
+
+An asyncio server uses `AsyncContextServerInterceptor`, which does the same: server span,
+request context, `platform_grpc_*` metrics, the `grpc_request` log and exception sanitizing.
+
+```python
+from fastapicommon.grpc import AsyncContextServerInterceptor
+
+server = grpc.aio.server(interceptors=[AsyncContextServerInterceptor(PlatformSettings())])
+```
+
 ### Required gRPC metadata
 
 | Metadata key | Enforced? | Notes |
@@ -405,8 +416,8 @@ app = create_platform_app(settings=settings)
   in the registry, an `app_name` that is not a valid service label, or an environment that is
   missing or not one of
   `local, dev, test, staging, prod`. There are no aliases: `production` and `development` are
-  rejected. `PlatformSettings.environment`'s `"development"` default does not count as an
-  environment; set `APP_ENV`/`ENVIRONMENT` or pass `environment=` explicitly.
+  rejected. `PlatformSettings.environment` defaults to `""` (unset); set
+  `APP_ENV`/`ENVIRONMENT` or pass `environment=` explicitly.
 - With `enable_metrics=False` (`ENABLE_METRICS=false`) no domain is needed: no metrics are
   initialized and `/metrics` is not mounted. A domain that is configured is still validated.
 - Initialization is process-wide and the first app/interceptor created in the process sets the

@@ -14,7 +14,7 @@ from fastapicommon.metrics import PrometheusMiddleware, init_metrics_from_settin
 from fastapicommon.middleware import ContextMiddleware, TimeoutMiddleware
 from fastapicommon.middleware.logging import LoggingMiddleware
 from fastapicommon.middleware.tracing import TracingMiddleware
-from fastapicommon.telemetry import TracingConfig, ensure_tracing, shutdown_tracing
+from fastapicommon.telemetry import TracingConfig, ensure_tracing, flush_tracing
 
 
 def create_platform_app(
@@ -40,8 +40,11 @@ def create_platform_app(
 
     Tracing follows gincommon: the ``OTEL_*`` environment configures export and sampling
     (``settings.otlp_endpoint`` overrides ``OTEL_EXPORTER_OTLP_ENDPOINT``), the first configured
-    install in the process is kept, and the app's shutdown flushes buffered spans (a
-    ``lifespan`` passed in ``fastapi_kwargs`` still runs, inside it).
+    install in the process is kept, and the app's shutdown flushes buffered spans. The app's own
+    startup and shutdown are untouched: a ``lifespan`` in ``fastapi_kwargs`` (any form FastAPI
+    accepts), ``on_startup`` / ``on_shutdown`` and ``@app.on_event`` handlers all still run; the
+    flush runs after them. The flush leaves the provider running for any other app or gRPC
+    server in the process (the SDK shuts it down at interpreter exit).
     """
     settings = settings or PlatformSettings()
     if app_name:
@@ -49,14 +52,17 @@ def create_platform_app(
 
     init_metrics_from_settings(settings)
 
-    environment = settings.environment if "environment" in settings.model_fields_set else ""
+    environment = settings.environment.strip().lower()
     configure_logging(settings.log_level or None, environment or None)
 
     if settings.enable_tracing:
         ensure_tracing(_tracing_config(settings, environment))
-        fastapi_kwargs["lifespan"] = _flush_tracing_on_shutdown(fastapi_kwargs.get("lifespan"))
 
     app = FastAPI(title=settings.app_name, **fastapi_kwargs)
+    if settings.enable_tracing:
+        # Wrap the router's lifespan after FastAPI has normalised it (a generator function, an
+        # async context manager factory, or the default that runs on_startup / on_event).
+        app.router.lifespan_context = _flush_tracing_on_shutdown(app.router.lifespan_context)
 
     # Middleware added last runs outermost.
     app.add_middleware(
@@ -90,23 +96,20 @@ def _tracing_config(settings: PlatformSettings, environment: str) -> TracingConf
         service_version=settings.build_version,
         domain=settings.observability_domain,
         environment=environment,
-        endpoint=settings.otlp_endpoint or None,
+        endpoint=settings.otlp_endpoint,
     )
 
 
-_Lifespan = Callable[[FastAPI], AbstractAsyncContextManager[Any]]
+_Lifespan = Callable[[Any], AbstractAsyncContextManager[Any]]
 
 
-def _flush_tracing_on_shutdown(inner: _Lifespan | None) -> _Lifespan:
+def _flush_tracing_on_shutdown(inner: _Lifespan) -> _Lifespan:
     @asynccontextmanager
-    async def lifespan(app: FastAPI) -> AsyncIterator[Any]:
+    async def lifespan(app: Any) -> AsyncIterator[Any]:
         try:
-            if inner is None:
-                yield None
-            else:
-                async with inner(app) as state:
-                    yield state
+            async with inner(app) as state:
+                yield state
         finally:
-            shutdown_tracing()
+            flush_tracing()
 
     return lifespan

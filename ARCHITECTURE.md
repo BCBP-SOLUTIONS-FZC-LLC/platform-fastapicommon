@@ -160,7 +160,8 @@ dependency.
 |--------|-------------|
 | `TracingConfig` / `TracingConfig.from_env(...)` | Identity + export settings, resolved from the `OTEL_*` environment with gincommon's defaults |
 | `init_tracing(config, exporter=None)` / `init_tracing_from_env()` / `ensure_tracing(config)` | Install the provider (Go `InitTracingWithConfig` / `InitTracingFromEnv` / `EnsureInitTelemetry`) |
-| `shutdown_tracing()` | Flush and stop the active provider (Go `Shutdown`); run by `create_platform_app`'s lifespan |
+| `flush_tracing()` | Export buffered spans and keep the provider; run by `create_platform_app`'s lifespan on shutdown |
+| `shutdown_tracing()` | Flush and stop the active provider for the whole process (Go `Shutdown`); call once at process exit, if at all (the SDK also does at interpreter exit) |
 | `new_tracer` / `noop_tracer` / `span_trace_id` / `record_span_error` / `inject_trace_context` | Go's tracing helpers (`NewTracer`, `NoopTracer`, `SpanTraceID`, `RecordSpanError`, `InjectTraceContext`) |
 | `setup_tracing(app, service_name, exporter=None)` | Install tracing and add `TracingMiddleware` to an app built without `create_platform_app` |
 | `instrument_grpc_client()` / `instrument_grpc_server()` | OTel's generic gRPC instrumentation (client: `traceparent` on outbound calls). The server one is not needed with `ContextServerInterceptor`, which starts its own spans |
@@ -234,7 +235,7 @@ flowchart TD
     D --> E[init_metrics_from_settings settings]
     E --> E2["configure_logging(settings.log_level, environment)\ngincommon layout: JSON on stderr, console in dev/local"]
     E2 --> T{settings.enable_tracing?}
-    T -- yes --> T1["ensure_tracing(TracingConfig.from_env(...))\nlifespan: shutdown_tracing on exit"]
+    T -- yes --> T1["ensure_tracing(TracingConfig.from_env(...))\nrouter lifespan wrapped: flush_tracing on exit"]
     T -- no --> F
     T1 --> F[app = FastAPI title=settings.app_name]
 
@@ -436,7 +437,7 @@ flowchart TD
     I --> J["propagator: W3C traceparent (+ baggage when enabled)\nlog otel_tracing_initialized"]
     J --> L["TracingMiddleware: one SERVER span per request\nnamed METHOD route"]
     J --> M["ContextServerInterceptor: one SERVER span per RPC\nnamed after the bounded grpc_method"]
-    N(["app shutdown (lifespan)"]) --> O["shutdown_tracing(): force_flush + shutdown (5 s)"]
+    N(["app shutdown (lifespan)"]) --> O["flush_tracing(): force_flush (5 s); provider kept for other apps, shut down at exit"]
 ```
 
 Tracing follows platform-gincommon's `otel` package: the same `OTEL_*` variables and defaults,

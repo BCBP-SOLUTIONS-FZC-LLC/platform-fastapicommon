@@ -21,7 +21,9 @@ from opentelemetry import propagate, trace
 from opentelemetry.trace import SpanKind, Status, StatusCode
 from starlette.types import ASGIApp, Message, Receive, Scope, Send
 
+from fastapicommon.logging.sanitize import truncate_utf8
 from fastapicommon.metrics.platform import http_method_label, http_route_label
+from fastapicommon.middleware.context import client_ip
 
 TRACER_SCOPE = "platform-fastapicommon/http"
 MAX_SPAN_ATTR_BYTES = 512
@@ -29,12 +31,8 @@ MAX_SPAN_HOST_BYTES = 256
 MAX_SPAN_METHOD_BYTES = 32
 
 
-def truncate_span_attr(value: str, max_bytes: int) -> str:
-    """``value`` truncated to ``max_bytes`` UTF-8 bytes at a character boundary."""
-    encoded = value.encode("utf-8")
-    if len(encoded) <= max_bytes:
-        return value
-    return encoded[:max_bytes].decode("utf-8", errors="ignore")
+#: ``value`` truncated to ``max_bytes`` UTF-8 bytes at a character boundary.
+truncate_span_attr = truncate_utf8
 
 
 def _headers(scope: Scope) -> dict[str, str]:
@@ -42,16 +40,9 @@ def _headers(scope: Scope) -> dict[str, str]:
 
 
 def client_address(scope: Scope, headers: dict[str, str]) -> str:
-    """Gin's default ``ClientIP()``: first ``X-Forwarded-For`` entry, ``X-Real-IP``, then the
-    socket peer."""
-    forwarded = headers.get("x-forwarded-for", "").split(",", 1)[0].strip()
-    if forwarded:
-        return forwarded
-    real_ip = headers.get("x-real-ip", "").strip()
-    if real_ip:
-        return real_ip
+    """Gin's default ``ClientIP()`` (see :func:`fastapicommon.middleware.context.client_ip`)."""
     client = scope.get("client")
-    return str(client[0]) if client else ""
+    return client_ip(headers, str(client[0]) if client else None) or ""
 
 
 class TracingMiddleware:
@@ -132,12 +123,19 @@ def _annotate(
     code = 500 if error is not None and status_code == 0 else status_code or 500
     span.set_attribute("http.response.status_code", code)
     if error is not None and status_code == 0:
-        span.add_event("exception", {"exception.type": type(error).__qualname__})
-        span.set_status(Status(StatusCode.ERROR, "panic"))
+        mark_span_panic(span, error)
     elif code >= 500 and not _already_error(span):
         # UnhandledErrorMiddleware answers an unclassified exception itself and marks the
         # span (exception event, "panic"); keep that status rather than the status text.
         span.set_status(Status(StatusCode.ERROR, _status_text(code)))
+
+
+def mark_span_panic(span: Any, error: BaseException) -> None:
+    """Go's recovered-panic span: an ``exception`` event with the type only (never the message)
+    and Error status ``panic``. Used for an exception that escaped the app, and by
+    ``UnhandledErrorMiddleware`` for one it answered itself."""
+    span.add_event("exception", {"exception.type": type(error).__qualname__})
+    span.set_status(Status(StatusCode.ERROR, "panic"))
 
 
 def _already_error(span: Any) -> bool:

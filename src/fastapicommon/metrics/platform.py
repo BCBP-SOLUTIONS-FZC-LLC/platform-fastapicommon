@@ -202,13 +202,25 @@ def http_route_label(scope: MutableMapping[str, Any]) -> str:
     """The route template a request will be dispatched to, or ``"unknown"`` — never the raw URL
     path (mirrors Go ``label.HTTPRoute``). Resolved before the handler runs, like Gin's
     ``FullPath()``, so the in-flight gauge and the request counters share one label. Method
-    mismatches (405) and redirects count as ``unknown``, as in Gin."""
+    mismatches (405) and redirects count as ``unknown``, as in Gin.
+
+    Matched once per request: the result is kept in the scope (shared by the ASGI layers), so
+    the tracing, logging and metrics middleware do not each re-run the route table."""
+    cached = scope.get(_ROUTE_SCOPE_KEY)
+    if isinstance(cached, str):
+        return cached
     router = getattr(scope.get("app"), "router", None)
     routes = getattr(router, "routes", None)
     if not routes:
-        return UNKNOWN
+        return UNKNOWN  # not cached: no app yet (a bare scope), so a later call may resolve
     path = _match_routes(routes, scope, "")
-    return route_template_label(path) if path else UNKNOWN
+    label = route_template_label(path) if path else UNKNOWN
+    scope[_ROUTE_SCOPE_KEY] = label
+    return label
+
+
+#: Scope key of the request's resolved route label (see :func:`http_route_label`).
+_ROUTE_SCOPE_KEY = "fastapicommon.route"
 
 
 def request_body_size(content_length: str | None) -> float:
@@ -250,15 +262,12 @@ class MetricsOptions:
 
     @classmethod
     def from_settings(cls, settings: PlatformSettings) -> MetricsOptions:
-        # PlatformSettings.environment defaults to "development" for the OTLP-insecure decision;
-        # only an explicitly provided value (kwarg, APP_ENV, ENVIRONMENT, .env) is an environment
-        # label, so an unset environment still fails at startup.
-        environment = settings.environment if "environment" in settings.model_fields_set else ""
+        # An unset environment is "" (PlatformSettings' default), so it still fails at startup.
         return cls(
             service_name=settings.app_name,
             build_version=settings.build_version,
             domain=settings.observability_domain,
-            environment=environment,
+            environment=settings.environment,
         )
 
 

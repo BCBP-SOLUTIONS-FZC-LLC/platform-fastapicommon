@@ -32,6 +32,7 @@ import traceback
 from collections.abc import MutableMapping
 from datetime import UTC, datetime
 from pathlib import Path
+from types import FrameType
 from typing import Any
 
 import structlog
@@ -131,9 +132,17 @@ def _add_request_context(
     return event_dict
 
 
-class _Sampler:
+class _SamplingFilter(logging.Filter):
     """Zap's ``NewSamplerWithOptions(core, 1s, 100, 100)``: per tick, per message and level, keep
-    the first ``initial`` entries, then every ``thereafter``-th."""
+    the first ``initial`` entries, then every ``thereafter``-th.
+
+    A handler filter rather than a structlog processor, so a dropped entry is simply not
+    written (raising ``structlog.DropEvent`` from a ``ProcessorFormatter`` would propagate
+    into the caller of a stdlib logger). One instance is shared by every handler and decides
+    once per record, so an entry written to stderr and ``LOG_FILE`` is counted once and kept
+    or dropped in both."""
+
+    _DECISION = "_fastapicommon_sampled"
 
     def __init__(
         self,
@@ -141,12 +150,20 @@ class _Sampler:
         initial: int = SAMPLING_INITIAL,
         thereafter: int = SAMPLING_THEREAFTER,
     ) -> None:
+        super().__init__()
         self._tick, self._initial, self._thereafter = tick, initial, thereafter
-        self._counts: dict[tuple[str, str], tuple[float, int]] = {}
+        self._counts: dict[tuple[str, int], tuple[float, int]] = {}
         self._lock = threading.Lock()
 
-    def __call__(self, logger: WrappedLogger, method_name: str, event_dict: EventDict) -> EventDict:
-        key = (str(event_dict.get("event", "")), method_name)
+    def filter(self, record: logging.LogRecord) -> bool:
+        decision = getattr(record, self._DECISION, None)
+        if decision is None:
+            decision = self._keep(_record_message(record), record.levelno)
+            setattr(record, self._DECISION, decision)
+        return bool(decision)
+
+    def _keep(self, message: str, level: int) -> bool:
+        key = (message, level)
         now = time.monotonic()
         with self._lock:
             window, count = self._counts.get(key, (now, 0))
@@ -154,9 +171,31 @@ class _Sampler:
                 window, count = now, 0
             count += 1
             self._counts[key] = (window, count)
-        if count > self._initial and (count - self._initial) % self._thereafter != 0:
-            raise structlog.DropEvent
-        return event_dict
+        return count <= self._initial or (count - self._initial) % self._thereafter == 0
+
+
+def _record_message(record: logging.LogRecord) -> str:
+    """The entry's ``msg``: the structlog event, else the stdlib message template."""
+    if isinstance(record.msg, dict):
+        return str(record.msg.get("event", ""))
+    return str(record.msg)
+
+
+#: Modules whose frames are logging machinery, not the caller (exact name or a submodule).
+_IGNORED_MODULES = ("structlog", "logging", __name__)
+
+
+def _is_ignored_module(name: str) -> bool:
+    return any(name == m or name.startswith(m + ".") for m in _IGNORED_MODULES)
+
+
+def _first_app_frame() -> FrameType:
+    """The innermost frame outside structlog, the stdlib ``logging`` package and this module:
+    the code that made the logging call."""
+    frame = sys._getframe(1)
+    while frame.f_back is not None and _is_ignored_module(frame.f_globals.get("__name__") or ""):
+        frame = frame.f_back
+    return frame
 
 
 def _stack_from(dev: bool) -> int:
@@ -169,9 +208,7 @@ def _make_caller_and_stack(dev: bool) -> structlog.typing.Processor:
     threshold = _stack_from(dev)
 
     def processor(logger: WrappedLogger, method_name: str, event_dict: EventDict) -> EventDict:
-        frame, _ = structlog._frames._find_first_app_frame_and_name(  # noqa: SLF001
-            additional_ignores=["logging", "fastapicommon.logging.config"]
-        )
+        frame = _first_app_frame()
         path = Path(frame.f_code.co_filename)
         event_dict["_caller"] = f"{path.parent.name}/{path.name}:{frame.f_lineno}"
         level = _LEVELS.get(_ZAP_LEVEL.get(method_name, method_name), logging.INFO)
@@ -272,8 +309,6 @@ def configure_logging(level: int | str | None = None, environment: str | None = 
         structlog.stdlib.add_log_level,
         _add_request_context,
     ]
-    if sampling_enabled():
-        shared.append(_Sampler())
     shared += [
         _make_caller_and_stack(dev),
         structlog.processors.format_exc_info,
@@ -302,8 +337,11 @@ def configure_logging(level: int | str | None = None, environment: str | None = 
             )
         )
         handlers.append(file_handler)
+    sampler = _SamplingFilter() if sampling_enabled() else None
     for handler in handlers:
         setattr(handler, _HANDLER_MARKER, True)
+        if sampler is not None:
+            handler.addFilter(sampler)
         handler.setLevel(resolved)
         root.addHandler(handler)
     root.setLevel(resolved)

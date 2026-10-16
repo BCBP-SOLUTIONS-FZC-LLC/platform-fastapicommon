@@ -1,9 +1,10 @@
 from __future__ import annotations
 
 import contextlib
+import inspect
 import time
 import uuid
-from collections.abc import Callable, Iterator
+from collections.abc import AsyncIterator, Awaitable, Callable, Iterator
 from dataclasses import replace
 from typing import TYPE_CHECKING, Any
 
@@ -101,26 +102,38 @@ def _log_unclassified_grpc(method: str, exc: BaseException, service: str) -> Non
         _unclassified_log.error("unclassified error", **fields)
 
 
-def _sanitize(method: str, exc: Exception, context: Any, service: str) -> bool:
-    """Turn a handler exception into a status so grpcio never sends (and logs)
-    ``"Exception calling application: <message>"``. Raises the abort; returns only when
-    ``context`` cannot abort (then the caller re-raises). Returns True for an unclassified
-    exception (no status set by the handler)."""
-    abort = getattr(context, "abort", None)
+def _sanitized_status(method: str, exc: Exception, context: Any, service: str) -> tuple[Any, str]:
+    """The status to abort a handler exception with, so grpcio never sends (and logs)
+    ``"Exception calling application: <message>"``. A status the handler chose (abort /
+    set_code) is kept: re-aborting with its own code and details stops grpcio replacing missing
+    details with the message. Anything else is unclassified: logged, and INTERNAL."""
     code = _explicit_code(context)
     if code is not None:
-        # The handler chose a status (abort / set_code): keep it. Re-aborting with the
-        # same code and details stops grpcio replacing missing details with the message.
-        if callable(abort):
-            details_fn = getattr(context, "details", None)
-            raw = details_fn() if callable(details_fn) else None
-            details = raw.decode("utf-8", "replace") if isinstance(raw, bytes) else (raw or "")
-            abort(code, details)
-        return False
+        details_fn = getattr(context, "details", None)
+        raw = details_fn() if callable(details_fn) else None
+        details = raw.decode("utf-8", "replace") if isinstance(raw, bytes) else (raw or "")
+        return code, details
     _log_unclassified_grpc(method, exc, service)
+    return grpc.StatusCode.INTERNAL, MSG_INTERNAL
+
+
+def _sanitize(method: str, exc: Exception, context: Any, service: str) -> None:
+    """Abort with :func:`_sanitized_status` (raises); returns only when ``context`` cannot
+    abort, and then the caller re-raises."""
+    code, details = _sanitized_status(method, exc, context, service)
+    abort = getattr(context, "abort", None)
     if callable(abort):
-        abort(grpc.StatusCode.INTERNAL, MSG_INTERNAL)
-    return True
+        abort(code, details)
+
+
+async def _sanitize_async(method: str, exc: Exception, context: Any, service: str) -> None:
+    """:func:`_sanitize` for ``grpc.aio``, whose ``context.abort`` is a coroutine."""
+    code, details = _sanitized_status(method, exc, context, service)
+    abort = getattr(context, "abort", None)
+    if callable(abort):
+        result = abort(code, details)
+        if inspect.isawaitable(result):
+            await result
 
 
 def _platform_grpc_code(context: Any, raised: bool) -> tuple[str, bool]:
@@ -222,6 +235,63 @@ def _context_from_metadata(metadata: tuple[tuple[str, str], ...]) -> RequestCont
     return RequestContext(request_id=request_id, correlation_id=correlation_id, user=user)
 
 
+class _UnaryRpc:
+    """One unary RPC's observability, shared by the threaded and ``grpc.aio`` interceptors: the
+    server span, the bound RequestContext, the in-flight gauge, then on :meth:`finish` the
+    metrics, the ``grpc_request`` log and the span status."""
+
+    def __init__(self, method: str, context: Any) -> None:
+        self.method = method
+        metadata = tuple(context.invocation_metadata() or ())
+        self.span = _start_server_span(method, metadata)
+        self.span_token = otel_context.attach(trace.set_span_in_context(self.span))
+        rpc_context = _context_from_metadata(metadata)
+        span_context = self.span.get_span_context()
+        if span_context.is_valid:
+            rpc_context = replace(
+                rpc_context, trace_id=trace.format_trace_id(span_context.trace_id)
+            )
+        self.rpc_context = rpc_context
+        self.token = bind_request_context(rpc_context)
+        self.platform = platform_metrics()
+        self.grpc_method = grpc_method_label(method)
+        if self.platform is not None:
+            self.platform.grpc_inflight_inc(self.grpc_method)
+        self.start = time.perf_counter()
+        self.error: BaseException | None = None
+        self.unclassified = False
+
+    def failed(self, exc: Exception, context: Any) -> None:
+        self.error = exc
+        self.unclassified = _explicit_code(context) is None
+
+    def finish(self, context: Any, request: Any, response: Any) -> None:
+        duration = time.perf_counter() - self.start
+        code, panicked = _platform_grpc_code(context, self.error is not None)
+        # An unclassified exception is grpc-python's handler panic (Go: a recovered panic),
+        # now sent as INTERNAL.
+        panicked = panicked or self.unclassified
+        platform = self.platform
+        if platform is not None:
+            platform.grpc_inflight_dec(self.grpc_method)
+            platform.record_grpc(
+                self.grpc_method,
+                code,
+                duration,
+                proto_message_size(request),
+                proto_message_size(response),
+            )
+            if panicked:
+                platform.record_grpc_panic(self.grpc_method)
+        _log_grpc_request(self.method, code, duration, self.rpc_context)
+        reset_request_context(self.token)
+        try:
+            _finish_server_span(self.span, code, self.error if panicked else None)
+        finally:
+            self.span.end()
+            otel_context.detach(self.span_token)
+
+
 class ContextServerInterceptor(grpc.ServerInterceptor):  # type: ignore[misc]
     """Traces, binds a RequestContext (from inbound metadata) around, measures and logs each
     unary-unary RPC — platform-gincommon's tracing, context, metrics and logging interceptors in
@@ -269,58 +339,19 @@ class ContextServerInterceptor(grpc.ServerInterceptor):  # type: ignore[misc]
         original_behavior = handler.unary_unary
 
         def wrapped_behavior(request: Any, context: grpc.ServicerContext) -> Any:
-            metadata = tuple(context.invocation_metadata() or ())
-            span = _start_server_span(method, metadata)
-            span_token = otel_context.attach(trace.set_span_in_context(span))
-            rpc_context = _context_from_metadata(metadata)
-            span_context = span.get_span_context()
-            if span_context.is_valid:
-                rpc_context = replace(
-                    rpc_context, trace_id=trace.format_trace_id(span_context.trace_id)
-                )
-            token = bind_request_context(rpc_context)
-            platform = platform_metrics()
-            grpc_method = grpc_method_label(method)
-            if platform is not None:
-                platform.grpc_inflight_inc(grpc_method)
-            start = time.perf_counter()
-            error: BaseException | None = None
+            rpc = _UnaryRpc(method, context)
             response: Any = None
-            unclassified = False
             try:
                 response = original_behavior(request, context)
                 return response
             except Exception as exc:
-                error = exc
+                rpc.failed(exc, context)
                 # Raises the abort (INTERNAL for an unclassified exception, else the
                 # handler's own status); falls through only for a context that cannot abort.
-                unclassified = _explicit_code(context) is None
                 _sanitize(method, exc, context, self._service)
                 raise
             finally:
-                duration = time.perf_counter() - start
-                code, panicked = _platform_grpc_code(context, error is not None)
-                # An unclassified exception is grpc-python's handler panic (Go: a recovered
-                # panic), now sent as INTERNAL.
-                panicked = panicked or unclassified
-                if platform is not None:
-                    platform.grpc_inflight_dec(grpc_method)
-                    platform.record_grpc(
-                        grpc_method,
-                        code,
-                        duration,
-                        proto_message_size(request),
-                        proto_message_size(response),
-                    )
-                    if panicked:
-                        platform.record_grpc_panic(grpc_method)
-                _log_grpc_request(method, code, duration, rpc_context)
-                reset_request_context(token)
-                try:
-                    _finish_server_span(span, code, error if panicked else None)
-                finally:
-                    span.end()
-                    otel_context.detach(span_token)
+                rpc.finish(context, request, response)
 
         return grpc.unary_unary_rpc_method_handler(
             wrapped_behavior,
@@ -369,3 +400,104 @@ class ContextServerInterceptor(grpc.ServerInterceptor):  # type: ignore[misc]
                 lambda reqs, ctx: guard_iter(ctx, guard(ctx, lambda: ss(reqs, ctx))), **kw
             )
         return handler  # pragma: no cover - grpc handlers always have one arity set
+
+
+class AsyncContextServerInterceptor(grpc.aio.ServerInterceptor):  # type: ignore[misc]
+    """:class:`ContextServerInterceptor` for ``grpc.aio`` servers: the same server span, request
+    context, ``platform_grpc_*`` metrics, ``grpc_request`` log and exception sanitizing, for
+    ``async def`` handlers (and sync ones run by the server's migration thread pool)::
+
+        server = grpc.aio.server(interceptors=[AsyncContextServerInterceptor(settings)])
+
+    Streaming RPCs get exception sanitizing only, as with the threaded interceptor.
+    """
+
+    def __init__(self, settings: PlatformSettings | None = None) -> None:
+        self._service = settings.app_name if settings is not None else ""
+        if settings is not None:
+            init_metrics_from_settings(settings)
+
+    async def intercept_service(
+        self,
+        continuation: Callable[[grpc.HandlerCallDetails], Awaitable[grpc.RpcMethodHandler]],
+        handler_call_details: grpc.HandlerCallDetails,
+    ) -> grpc.RpcMethodHandler:
+        handler = await continuation(handler_call_details)
+        if handler is None:
+            return handler
+        method = handler_call_details.method
+        service = self._service
+        kw = {
+            "request_deserializer": handler.request_deserializer,
+            "response_serializer": handler.response_serializer,
+        }
+
+        if handler.unary_unary:
+            original = handler.unary_unary
+
+            async def unary_unary(request: Any, context: Any) -> Any:
+                rpc = _UnaryRpc(method, context)
+                response: Any = None
+                try:
+                    response = await _maybe_await(original(request, context))
+                    return response
+                except Exception as exc:
+                    rpc.failed(exc, context)
+                    await _sanitize_async(method, exc, context, service)
+                    raise
+                finally:
+                    rpc.finish(context, request, response)
+
+            return grpc.unary_unary_rpc_method_handler(unary_unary, **kw)
+
+        async def guard(context: Any, run: Callable[[], Any]) -> Any:
+            try:
+                return await _maybe_await(run())
+            except Exception as exc:
+                await _sanitize_async(method, exc, context, service)
+                raise
+
+        def streaming(behavior: Callable[[Any, Any], Any]) -> Callable[[Any, Any], Any]:
+            async def run(request: Any, context: Any) -> Any:
+                result = behavior(request, context)
+                if hasattr(result, "__aiter__"):
+                    return _guard_aiter(method, context, service, result)
+                return await guard(context, lambda: result)
+
+            async def as_generator(request: Any, context: Any) -> AsyncIterator[Any]:
+                result = await run(request, context)
+                if hasattr(result, "__aiter__"):
+                    async for item in result:
+                        yield item
+
+            return as_generator
+
+        if handler.unary_stream:
+            return grpc.unary_stream_rpc_method_handler(streaming(handler.unary_stream), **kw)
+        if handler.stream_unary:
+            su = handler.stream_unary
+
+            # A coroutine function (not a lambda returning a coroutine): grpc.aio decides
+            # how to call a behaviour by inspecting it.
+            async def stream_unary(requests: Any, context: Any) -> Any:
+                return await guard(context, lambda: su(requests, context))
+
+            return grpc.stream_unary_rpc_method_handler(stream_unary, **kw)
+        if handler.stream_stream:
+            return grpc.stream_stream_rpc_method_handler(streaming(handler.stream_stream), **kw)
+        return handler  # pragma: no cover - grpc handlers always have one arity set
+
+
+async def _maybe_await(value: Any) -> Any:
+    return await value if inspect.isawaitable(value) else value
+
+
+async def _guard_aiter(
+    method: str, context: Any, service: str, iterator: AsyncIterator[Any]
+) -> AsyncIterator[Any]:
+    try:
+        async for item in iterator:
+            yield item
+    except Exception as exc:
+        await _sanitize_async(method, exc, context, service)
+        raise

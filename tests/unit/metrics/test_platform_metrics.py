@@ -565,3 +565,30 @@ def test_route_label_resolves_included_routers() -> None:
     assert label("/widgets/me") == "/widgets/me"
     assert label("/widgets/v1/42") == "/widgets/v1/:widget_id"
     assert label("/widgets/v2/42") == "unknown"
+
+
+def test_route_table_matched_once_per_request(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Tracing, logging and metrics all need the route label; it is resolved once and kept in
+    the scope instead of re-running the route table in each middleware."""
+    from fastapicommon.metrics import platform as platform_module
+
+    calls = 0
+    real = platform_module._match_routes
+
+    def counting(routes: Any, scope: Any, prefix: str) -> str | None:
+        nonlocal calls
+        if prefix == "":
+            calls += 1
+        return real(routes, scope, prefix)
+
+    monkeypatch.setattr(platform_module, "_match_routes", counting)
+    app = create_platform_app(
+        settings=PlatformSettings(_env_file=None, observability_domain="iam", environment="test")
+    )
+
+    @app.get("/items/{item_id}")
+    async def item(item_id: str) -> dict[str, str]:
+        return {"id": item_id}
+
+    assert TestClient(app).get("/items/1").status_code == 200
+    assert calls == 1

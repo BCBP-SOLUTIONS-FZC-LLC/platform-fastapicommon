@@ -66,7 +66,12 @@ def sanitize_log_value(value: str, max_bytes: int = MAX_LOG_VALUE_BYTES) -> str:
     """``value`` without control characters, truncated to ``max_bytes`` UTF-8 bytes at a
     character boundary (Go ``SanitizeString`` / ``sanitizeLogValue``)."""
     cleaned = "".join(ch for ch in value if unicodedata.category(ch) != "Cc")
-    encoded = cleaned.encode("utf-8")
+    return truncate_utf8(cleaned, max_bytes)
+
+
+def truncate_utf8(value: str, max_bytes: int) -> str:
+    """``value`` truncated to ``max_bytes`` UTF-8 bytes at a character boundary."""
+    encoded = value.encode("utf-8")
     if len(encoded) <= max_bytes:
-        return cleaned
+        return value
     return encoded[:max_bytes].decode("utf-8", errors="ignore")

@@ -1,7 +1,6 @@
 from __future__ import annotations
 
 from opentelemetry import trace
-from opentelemetry.trace import Status, StatusCode
 from starlette.requests import Request
 from starlette.types import ASGIApp, Message, Receive, Scope, Send
 
@@ -56,8 +55,8 @@ class UnhandledErrorMiddleware:
 
 
 def _record_on_span(exc: Exception) -> None:
+    from fastapicommon.middleware.tracing import mark_span_panic  # avoid an import cycle
+
     span = trace.get_current_span()
-    if not span.is_recording():
-        return
-    span.add_event("exception", {"exception.type": type(exc).__qualname__})
-    span.set_status(Status(StatusCode.ERROR, "panic"))
+    if span.is_recording():
+        mark_span_panic(span, exc)

@@ -35,7 +35,8 @@ from __future__ import annotations
 import os
 import sys
 import threading
-from collections.abc import Mapping, MutableMapping
+from collections.abc import Iterator, Mapping, MutableMapping
+from contextlib import contextmanager
 from dataclasses import dataclass
 from typing import TYPE_CHECKING, Any
 
@@ -57,6 +58,7 @@ from opentelemetry.trace import NonRecordingSpan, Span, Status, StatusCode, Trac
 from opentelemetry.trace.propagation.tracecontext import TraceContextTextMapPropagator
 
 from fastapicommon.logging import get_logger
+from fastapicommon.logging.config import is_dev_env
 
 if TYPE_CHECKING:
     from fastapi import FastAPI
@@ -66,10 +68,6 @@ DEFAULT_ENDPOINT = "localhost:4317"
 SHUTDOWN_TIMEOUT_MILLIS = 5000
 
 _logger = get_logger("fastapicommon.otel")
-
-
-def _is_dev(environment: str) -> bool:
-    return environment.strip().lower() in ("dev", "local")
 
 
 def _env_bool(key: str, fallback: bool) -> bool:
@@ -85,11 +83,17 @@ def _env_bool(key: str, fallback: bool) -> bool:
     return fallback
 
 
-def trace_export_disabled() -> bool:
-    endpoint = os.environ.get("OTEL_EXPORTER_OTLP_ENDPOINT", "").strip().lower()
-    if endpoint in ("none", "off", "disabled"):
+_DISABLED_ENDPOINTS = ("none", "off", "disabled")
+
+
+def trace_export_disabled(endpoint: str | None = None) -> bool:
+    """Whether span export is off: ``OTEL_TRACES_EXPORTER=none``, or the endpoint (``endpoint``
+    when given, else ``OTEL_EXPORTER_OTLP_ENDPOINT``) is ``none`` / ``off`` / ``disabled``."""
+    if os.environ.get("OTEL_TRACES_EXPORTER", "").strip().lower() == "none":
         return True
-    return os.environ.get("OTEL_TRACES_EXPORTER", "").strip().lower() == "none"
+    if endpoint is None:
+        endpoint = os.environ.get("OTEL_EXPORTER_OTLP_ENDPOINT", "")
+    return endpoint.strip().lower() in _DISABLED_ENDPOINTS
 
 
 def _sample_ratio(dev: bool) -> float:
@@ -134,15 +138,16 @@ class TracingConfig:
     ) -> TracingConfig:
         """Resolve every unset field from the environment (Go ``otel.EnvConfig``). An empty
         ``service_name`` gives a provisional ``unknown_service`` install that the first
-        configured one replaces."""
+        configured one replaces. ``environment`` wins over ``APP_ENV`` / ``ENVIRONMENT`` for the
+        label and the dev defaults alike. An ``endpoint`` (``OTLP_ENDPOINT``) overrides
+        ``OTEL_EXPORTER_OTLP_ENDPOINT``; either set to ``none`` / ``off`` / ``disabled``, or
+        ``OTEL_TRACES_EXPORTER=none``, disables export."""
         environment = environment or os.environ.get("APP_ENV") or os.environ.get("ENVIRONMENT", "")
-        dev = _is_dev(os.environ.get("APP_ENV", "") or environment)
-        if endpoint is None:
-            endpoint = (
-                ""
-                if trace_export_disabled()
-                else os.environ.get("OTEL_EXPORTER_OTLP_ENDPOINT") or DEFAULT_ENDPOINT
-            )
+        dev = is_dev_env(environment)
+        if trace_export_disabled(endpoint or None):
+            endpoint = ""
+        elif not endpoint:
+            endpoint = os.environ.get("OTEL_EXPORTER_OTLP_ENDPOINT", "").strip() or DEFAULT_ENDPOINT
         provisional = not service_name.strip()
         return cls(
             service_name=service_name.strip() or UNKNOWN_SERVICE_NAME,
@@ -214,13 +219,21 @@ class _DelegatingTracer(Tracer):
             return NonRecordingSpan(trace.get_current_span(context).get_span_context())
         return tracer.start_span(name, context, *args, **kwargs)
 
-    def start_as_current_span(
+    @contextmanager
+    def start_as_current_span(  # type: ignore[override]
         self, name: str, context: Any = None, *args: Any, **kwargs: Any
-    ) -> Any:
+    ) -> Iterator[Span]:
+        # Resolved on entry, not when called: as a decorator (applied once, often at import,
+        # before tracing is installed) each call follows the provider active at that time.
         tracer = self._current()
         if tracer is None:
-            return trace.use_span(self.start_span(name, context), end_on_exit=True)
-        return tracer.start_as_current_span(name, context, *args, **kwargs)
+            with trace.use_span(
+                self.start_span(name, context), end_on_exit=kwargs.get("end_on_exit", True)
+            ) as span:
+                yield span
+            return
+        with tracer.start_as_current_span(name, context, *args, **kwargs) as span:
+            yield span
 
 
 class _DelegatingProvider(trace.TracerProvider):
@@ -360,9 +373,26 @@ def ensure_tracing(
     return provider
 
 
+def flush_tracing() -> None:
+    """Export the active provider's buffered spans, leaving it running (an app's shutdown: other
+    apps and gRPC servers in the process share the provider). A provider the service installed
+    itself is not touched."""
+    with _lock:
+        generation = _active if _is_global(trace.get_tracer_provider()) else None
+    if generation is None:
+        return
+    try:
+        if not generation.provider.force_flush(SHUTDOWN_TIMEOUT_MILLIS):
+            _logger.warning("otel_shutdown_flush_failed", error="force_flush timed out")
+    except Exception as exc:  # pragma: no cover - SDK flush errors are rare
+        _logger.warning("otel_shutdown_flush_failed", error=f"{type(exc).__name__}: {exc}")
+
+
 def shutdown_tracing() -> None:
-    """Flush and stop the active provider (Go ``gincommon.Shutdown``'s tracing half). The global
-    provider stays installed and records nothing until the next install."""
+    """Flush and stop the active provider (Go ``gincommon.Shutdown``'s tracing half), for every
+    user in the process: call it once, at process shutdown (an app's own shutdown only
+    :func:`flush_tracing`). The global provider stays installed and records nothing until the
+    next install."""
     global _active
     with _lock:
         old, _active = _active, None

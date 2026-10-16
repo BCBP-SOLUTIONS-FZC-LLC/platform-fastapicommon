@@ -4,6 +4,7 @@ from fastapicommon.telemetry.tracing import (
     active_tracing_config,
     ensure_tracing,
     extract_trace_context,
+    flush_tracing,
     init_tracing,
     init_tracing_from_env,
     inject_trace_context,
@@ -32,6 +33,7 @@ __all__ = [
     "noop_tracer",
     "record_span_error",
     "setup_tracing",
+    "flush_tracing",
     "shutdown_tracing",
     "span_trace_id",
 ]

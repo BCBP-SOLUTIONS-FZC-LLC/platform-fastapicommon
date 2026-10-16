@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import uuid
+from collections.abc import Mapping
 
 from opentelemetry import trace
 from starlette.middleware.base import BaseHTTPMiddleware, RequestResponseEndpoint
@@ -28,19 +29,21 @@ TRACE_ID_RESPONSE_HEADER = "X-Trace-ID"
 REQUEST_ID_RESPONSE_HEADER = "X-Request-ID"
 
 
-def _client_ip(request: Request) -> str | None:
-    """Mirrors Gin's default (no custom trusted-proxy config) `c.ClientIP()`: prefer the first
-    `X-Forwarded-For` entry, then `X-Real-IP`, then the direct socket peer.
-    """
-    forwarded_for = request.headers.get("x-forwarded-for")
-    if forwarded_for:
-        first = forwarded_for.split(",", 1)[0].strip()
-        if first:
-            return first
-    real_ip = request.headers.get("x-real-ip")
+def client_ip(headers: Mapping[str, str], peer: str | None) -> str | None:
+    """Gin's default (no custom trusted-proxy config) ``c.ClientIP()``: the first
+    ``X-Forwarded-For`` entry, then ``X-Real-IP``, then the direct socket ``peer``. ``headers``
+    is keyed by lowercase name. Shared by the request context and the server span."""
+    first = headers.get("x-forwarded-for", "").split(",", 1)[0].strip()
+    if first:
+        return first
+    real_ip = headers.get("x-real-ip", "").strip()
     if real_ip:
-        return real_ip.strip()
-    return request.client.host if request.client is not None else None
+        return real_ip
+    return peer
+
+
+def _client_ip(request: Request) -> str | None:
+    return client_ip(request.headers, request.client.host if request.client is not None else None)
 
 
 def _current_trace_id() -> str:

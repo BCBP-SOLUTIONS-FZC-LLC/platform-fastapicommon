@@ -1,10 +1,10 @@
 from __future__ import annotations
 
 import contextlib
-import json
 import traceback
 from collections.abc import Iterable
 from dataclasses import dataclass
+from typing import Any
 
 from fastapi import FastAPI, Request
 from fastapi.exceptions import RequestValidationError
@@ -63,6 +63,20 @@ def problem_response(
     generated); ``instance`` is the path without the query string; ``tenantId`` is set only
     for an authenticated identity and never on a 401.
     """
+    return _problem(
+        request, t, detail=detail, error_code=error_code, validation_errors=validation_errors
+    )[0]
+
+
+def _problem(
+    request: Request,
+    t: ProblemType,
+    *,
+    detail: str | None = None,
+    error_code: str | None = None,
+    validation_errors: Iterable[FieldError] = (),
+) -> tuple[JSONResponse, dict[str, Any]]:
+    """:func:`problem_response` and the problem body it rendered."""
     s = _settings(request)
     context = get_request_context_or_none()
     trace_id = resolve_trace_id(
@@ -95,7 +109,8 @@ def problem_response(
         fields["tenantId"] = tenant_id
     with contextlib.suppress(Exception):  # a failing logger must not break the response
         _problem_log.warning("problem response", **fields)
-    return JSONResponse(status_code=body["status"], content=body, media_type=PROBLEM_MEDIA_TYPE)
+    response = JSONResponse(status_code=body["status"], content=body, media_type=PROBLEM_MEDIA_TYPE)
+    return response, body
 
 
 async def platform_exception_handler(request: Request, exc: Exception) -> JSONResponse:
@@ -232,8 +247,7 @@ async def unhandled_exception_handler(request: Request, exc: Exception) -> JSONR
     is a programming defect: classify the failure (raise a ``PlatformException``) where it
     happens. Install ``UnhandledErrorMiddleware`` (``create_platform_app`` does) so the
     exception is not re-raised to the server, which would log its message."""
-    response = problem_response(request, TYPE_INTERNAL_ERROR)
-    body = json.loads(bytes(response.body))
+    response, body = _problem(request, TYPE_INTERNAL_ERROR)
     log_unclassified(
         request,
         exc,

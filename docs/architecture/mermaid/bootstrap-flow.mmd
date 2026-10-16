@@ -6,7 +6,7 @@ flowchart TD
     D --> E[init_metrics_from_settings settings]
     E --> E2["configure_logging(settings.log_level, environment)\ngincommon layout: JSON on stderr, console in dev/local"]
     E2 --> T{settings.enable_tracing?}
-    T -- yes --> T1["ensure_tracing(TracingConfig.from_env(...))\nlifespan: shutdown_tracing on exit"]
+    T -- yes --> T1["ensure_tracing(TracingConfig.from_env(...))\nrouter lifespan wrapped: flush_tracing on exit"]
     T -- no --> F
     T1 --> F[app = FastAPI title=settings.app_name]
 
