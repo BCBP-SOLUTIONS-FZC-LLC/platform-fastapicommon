@@ -21,6 +21,7 @@ from opentelemetry import propagate, trace
 from opentelemetry.trace import SpanKind, Status, StatusCode
 from starlette.types import ASGIApp, Message, Receive, Scope, Send
 
+from fastapicommon._scope import ABORTED
 from fastapicommon.logging.sanitize import truncate_utf8
 from fastapicommon.metrics.platform import http_method_label, http_route_label
 from fastapicommon.middleware.context import client_ip
@@ -52,6 +53,9 @@ class TracingMiddleware:
     def __init__(self, app: ASGIApp, scope_name: str = TRACER_SCOPE) -> None:
         self.app = app
         self._scope_name = scope_name or TRACER_SCOPE
+        # Obtained once: the global (proxy / delegating) tracer follows a provider installed or
+        # swapped later, so there is no need to build one per request.
+        self._tracer = trace.get_tracer(self._scope_name)
 
     async def __call__(self, scope: Scope, receive: Receive, send: Send) -> None:
         if scope["type"] != "http":
@@ -64,9 +68,9 @@ class TracingMiddleware:
         if http_method_label(raw_method) != raw_method:
             method, span_method = "_OTHER", "HTTP"
 
+        http_route_label(scope)  # resolve before routing rewrites the scope (Mount)
         parent = propagate.extract(headers)
-        tracer = trace.get_tracer(self._scope_name)
-        span = tracer.start_span(span_method, context=parent, kind=SpanKind.SERVER)
+        span = self._tracer.start_span(span_method, context=parent, kind=SpanKind.SERVER)
         token = otel_context.attach(trace.set_span_in_context(span, parent))
         status_code = 0
 
@@ -122,7 +126,11 @@ def _annotate(
     # without the override the span would report 0 (or a status already started).
     code = 500 if error is not None and status_code == 0 else status_code or 500
     span.set_attribute("http.response.status_code", code)
-    if error is not None and status_code == 0:
+    if scope.get(ABORTED):
+        # Go spanAttrAborted: annotated, not an Error status.
+        span.set_attribute("http.aborted", True)
+        span.add_event("http.aborted")
+    elif error is not None and status_code == 0:
         mark_span_panic(span, error)
     elif code >= 500 and not _already_error(span):
         # UnhandledErrorMiddleware answers an unclassified exception itself and marks the

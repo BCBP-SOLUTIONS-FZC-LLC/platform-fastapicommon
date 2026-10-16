@@ -129,6 +129,18 @@ def test_sample_ratio(env: dict[str, str], ratio: float, monkeypatch: pytest.Mon
     assert TracingConfig.from_env(service_name="svc").sample_ratio == ratio
 
 
+@pytest.mark.parametrize("key", ["OTEL_TRACES_SAMPLER_RATIO", "OTEL_TRACES_SAMPLER_ARG"])
+def test_nan_sample_ratio_falls_back(
+    key: str, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """Regression: "nan" parsed, passed the clamp, and crashed TraceIdRatioBased at startup."""
+    monkeypatch.setenv(key, "nan")
+    config = TracingConfig.from_env(service_name="svc")
+    assert config.sample_ratio == 0.1
+    assert f"invalid {key}" in capsys.readouterr().err
+    tracing_module.build_sampler(config.sample_ratio, False)  # must not raise
+
+
 def test_invalid_bool_falls_back(
     monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
 ) -> None:

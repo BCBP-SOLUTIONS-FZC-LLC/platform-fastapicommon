@@ -324,6 +324,17 @@ def configured_domain(options: MetricsOptions) -> str:
 # --------------------------------------------------------------------------------------------
 
 
+#: Families for which prometheus_client adds a ``<family>_created`` timestamp sample.
+_CREATED_TYPES = frozenset({"counter", "histogram", "summary"})
+
+
+def is_created_sample(family: Metric, sample_name: str) -> bool:
+    """Whether ``sample_name`` is prometheus_client's ``<family>_created`` timestamp sample of
+    ``family`` (Go's client emits none). A metric that is merely *named* ``..._created`` (a
+    gauge ``iam_orders_api_items_created``) is not one."""
+    return family.type in _CREATED_TYPES and sample_name == f"{family.name}_created"
+
+
 class _WithoutCreatedSeries(Collector):
     """Exposes the wrapped collectors without prometheus_client's ``*_created`` samples.
 
@@ -341,7 +352,9 @@ class _WithoutCreatedSeries(Collector):
     def collect(self) -> Iterator[Metric]:
         for metric in self._metrics:
             for family in metric.collect():
-                family.samples = [s for s in family.samples if not s.name.endswith("_created")]
+                family.samples = [
+                    s for s in family.samples if not is_created_sample(family, s.name)
+                ]
                 yield family
 
 

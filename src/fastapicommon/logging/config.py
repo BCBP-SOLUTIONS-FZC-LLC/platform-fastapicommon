@@ -65,6 +65,8 @@ MAX_STACK_FRAMES = 16
 SAMPLING_TICK_SECONDS = 1.0
 SAMPLING_INITIAL = 100
 SAMPLING_THEREAFTER = 100
+#: Upper bound of the sampler's per-message counter table.
+MAX_SAMPLING_KEYS = 4096
 
 _warned: set[str] = set()
 _HANDLER_MARKER = "_fastapicommon_handler"
@@ -153,6 +155,7 @@ class _SamplingFilter(logging.Filter):
         super().__init__()
         self._tick, self._initial, self._thereafter = tick, initial, thereafter
         self._counts: dict[tuple[str, int], tuple[float, int]] = {}
+        self._swept = time.monotonic()
         self._lock = threading.Lock()
 
     def filter(self, record: logging.LogRecord) -> bool:
@@ -166,12 +169,23 @@ class _SamplingFilter(logging.Filter):
         key = (message, level)
         now = time.monotonic()
         with self._lock:
+            if now - self._swept >= self._tick or len(self._counts) >= MAX_SAMPLING_KEYS:
+                self._sweep(now)
             window, count = self._counts.get(key, (now, 0))
             if now - window >= self._tick:
                 window, count = now, 0
             count += 1
             self._counts[key] = (window, count)
         return count <= self._initial or (count - self._initial) % self._thereafter == 0
+
+    def _sweep(self, now: float) -> None:
+        """Drop counters whose window has ended (they would restart at 0 anyway), so distinct
+        messages (formatted before logging) cannot grow the table without bound; past
+        ``MAX_SAMPLING_KEYS`` live keys, start over (Zap's table is fixed-size too)."""
+        self._counts = {k: v for k, v in self._counts.items() if now - v[0] < self._tick}
+        if len(self._counts) >= MAX_SAMPLING_KEYS:
+            self._counts.clear()
+        self._swept = now
 
 
 def _record_message(record: logging.LogRecord) -> str:

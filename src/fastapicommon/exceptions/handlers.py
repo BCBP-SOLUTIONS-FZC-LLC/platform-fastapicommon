@@ -48,6 +48,17 @@ def _settings(request: Request) -> ProblemSettings:
     return s if isinstance(s, ProblemSettings) else ProblemSettings()
 
 
+def problem_trace_id(request: Request) -> str:
+    """The problem's ``traceId``, in gincommon's order: traceparent, sanitized x-request-id, the
+    span, else generated."""
+    context = get_request_context_or_none()
+    return resolve_trace_id(
+        request.headers.get("traceparent"),
+        request.headers.get("x-request-id"),
+        context.trace_id if context is not None else None,
+    )
+
+
 def problem_response(
     request: Request,
     t: ProblemType,
@@ -79,11 +90,7 @@ def _problem(
     """:func:`problem_response` and the problem body it rendered."""
     s = _settings(request)
     context = get_request_context_or_none()
-    trace_id = resolve_trace_id(
-        request.headers.get("traceparent"),
-        request.headers.get("x-request-id"),
-        context.trace_id if context is not None else None,
-    )
+    trace_id = problem_trace_id(request)
     tenant_id = None
     if context is not None and context.user.is_authenticated and t.status != 401:
         tenant_id = context.tenant_id

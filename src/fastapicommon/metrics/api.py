@@ -39,7 +39,7 @@ from prometheus_client.metrics_core import Metric
 from prometheus_client.registry import Collector
 from prometheus_client.samples import Sample
 
-from fastapicommon.metrics.platform import metrics_identity, metrics_registry
+from fastapicommon.metrics.platform import is_created_sample, metrics_identity, metrics_registry
 from fastapicommon.metrics.registry import (
     COUNTER,
     GAUGE,
@@ -83,7 +83,7 @@ class IdentityLabeled(Collector):
             family.samples = [
                 Sample(s.name, {**const, **s.labels}, s.value, s.timestamp, s.exemplar)
                 for s in family.samples
-                if not s.name.endswith("_created")
+                if not is_created_sample(family, s.name)
             ]
             yield family
 

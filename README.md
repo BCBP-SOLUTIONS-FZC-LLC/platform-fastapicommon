@@ -625,8 +625,8 @@ headers.
 | **No global auth enforcement** | Every route is anonymous-reachable by default. Add `Depends(require_authenticated_user)` or an RBAC dependency per route that needs it. |
 | **Authorization** | `RequireRole`/`RequireAnyRole`/`RequireAllRoles` check roles already present on the bound `RequestContext` — they don't verify the roles weren't forged by the client. The gateway must not forward client-supplied role headers. |
 | **`/metrics`** | Served without authentication whenever `enable_metrics` is true. Restrict via network policy, an auth proxy, or a dedicated admin port in production. |
-| **OTLP** | Insecure (no TLS) by default when `environment` is `dev`/`development`/`local`; TLS required otherwise. See [ARCHITECTURE.md § Tracing initialization](./ARCHITECTURE.md#tracing-initialization). |
-| **Logging** | No sanitization — header values are copied into log fields and response headers verbatim. See [SECURITY.md](./SECURITY.md) for the full trust model. |
+| **OTLP** | Insecure (no TLS) by default only when `environment` is `dev` / `local` (as in gincommon; `development` is not a dev environment); TLS otherwise. `OTEL_EXPORTER_OTLP_INSECURE` overrides. See [ARCHITECTURE.md § Tracing initialization](./ARCHITECTURE.md#tracing-initialization). |
+| **Logging** | The library's own entries (`http_request`, `grpc_request`, auth / authz, `unclassified error`) go through gincommon's sanitizer: sensitive keys redacted, control characters stripped, values capped. Fields a service logs itself are not sanitized. `x-request-id` is validated (`[A-Za-z0-9._-]`, ≤128 bytes) before it is echoed. See [SECURITY.md](./SECURITY.md). |
 
 Full policy: **[SECURITY.md](./SECURITY.md)**.
 
@@ -710,7 +710,7 @@ so the two docs can't drift out of sync.
 | Variable | Example | Default | `PlatformSettings` field |
 |----------|---------|---------|---------------------------|
 | `APP_NAME` | `my-service` | `platform-service` | `app_name` — FastAPI title + OTel `service.name` |
-| `APP_ENV` (or `ENVIRONMENT`) | `prod` | `development` | `environment` — `dev` / `local` select the developer defaults (console logs, debug level, plaintext OTLP, 100% sampling), as in gincommon |
+| `APP_ENV` (or `ENVIRONMENT`) | `prod` | unset (`""`; production defaults) | `environment` — `dev` / `local` select the developer defaults (console logs, debug level, plaintext OTLP, 100% sampling), as in gincommon |
 | `LOG_LEVEL` | `debug` | debug in dev/local, else info | `log_level` — `debug`, `info`, `warn`, `error` |
 | `LOG_SAMPLING` | `true` | `false` | Zap-style sampling: per second and message+level, the first 100 entries, then every 100th |
 | `LOG_FILE` | `logs/app.log` | unset | Also write JSON logs to this file |

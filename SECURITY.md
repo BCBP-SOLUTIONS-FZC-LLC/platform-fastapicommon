@@ -43,7 +43,7 @@ anonymous `CurrentUser`).
 | `x-tenant-roles` is set by the gateway after authentication | If the gateway forwards client-supplied role headers, `RequireRole`/`RequireAnyRole`/`RequireAllRoles` privilege escalation is possible |
 | **There is no global "reject unauthenticated requests" middleware** | `fastapicommon.middleware.ContextMiddleware` never rejects a request for missing identity headers. Route-level enforcement is opt-in via `Depends(require_authenticated_user)` or an RBAC dependency — a route that forgets to add one is reachable anonymously |
 | `/metrics` is served without authentication | `fastapicommon.metrics.metrics_router` has no auth dependency. Restrict access via network policy, an auth proxy, or a dedicated admin port in production |
-| Header/log values are not sanitized | `x-request-id` / `x-correlation-id` are echoed back on the response and copied into structured log fields verbatim — this library does not strip control characters or cap length the way `platform-gincommon`'s `LogSanitizer` does. Do not treat log output as safe to render without escaping if the source can inject arbitrary header bytes |
+| Only the library's own log entries are sanitized | `http_request`, `grpc_request`, the auth / authz entries and `unclassified error` go through `fastapicommon.logging.sanitize` (gincommon's sanitizer: sensitive keys redacted, control characters stripped, values capped). `x-request-id` is validated before it is echoed. Fields a service logs itself, and `x-correlation-id`, are written as given: do not treat log output as safe to render without escaping |
 
 ## Scope
 
@@ -56,7 +56,7 @@ The following are in scope for vulnerability reports:
 - Denial-of-service conditions in `fastapicommon.middleware.TimeoutMiddleware` or
   `fastapicommon.middleware.ContextMiddleware`
 - Header or log injection made possible by this library's own code (as opposed to the
-  known, documented lack of sanitization above)
+  documented limits of sanitization above)
 - Sensitive data leakage from `fastapicommon.exceptions`' generic exception handler (e.g.
   leaking exception internals in the 500 response body)
 

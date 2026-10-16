@@ -144,7 +144,8 @@ def test_response_already_started_is_logged_not_reraised(caplog: pytest.LogCaptu
         except Exception as exc:  # pragma: no cover - the failure being asserted
             pytest.fail(f"exception reached the server: {exc!r}")
     ((_, f),) = _entries(caplog)
-    assert f["error_type"] == "RuntimeError" and f["traceId"] == ""
+    # Regression: the traceId was hard-coded "" here, so the entry could not be joined.
+    assert f["error_type"] == "RuntimeError" and f["traceId"]
     assert all(SECRET not in r.getMessage() for r in caplog.records)
 
 

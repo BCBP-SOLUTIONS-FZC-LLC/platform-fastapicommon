@@ -140,6 +140,20 @@ def test_sampler_decides_once_per_record() -> None:
     assert not strict.filter(second) and not strict.filter(second)
 
 
+def test_sampler_table_is_bounded(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Regression: one counter per distinct message, never evicted (f-string messages from
+    libraries grow it for the life of the process)."""
+    monkeypatch.setattr(log_config, "MAX_SAMPLING_KEYS", 50)
+    sampler = log_config._SamplingFilter(tick=60)
+    for i in range(500):
+        assert sampler.filter(_record(f"retrying attempt {i}"))
+    assert len(sampler._counts) <= 50
+    expired = log_config._SamplingFilter(tick=0.0)
+    for i in range(20):
+        expired.filter(_record(f"m{i}"))
+    assert len(expired._counts) <= 1
+
+
 def test_sampling_never_raises_into_stdlib_callers(
     capsys: pytest.CaptureFixture[str], monkeypatch: pytest.MonkeyPatch
 ) -> None:

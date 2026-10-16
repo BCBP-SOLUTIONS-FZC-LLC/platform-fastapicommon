@@ -4,7 +4,12 @@ from opentelemetry import trace
 from starlette.requests import Request
 from starlette.types import ASGIApp, Message, Receive, Scope, Send
 
-from fastapicommon.exceptions.handlers import log_unclassified, unhandled_exception_handler
+from fastapicommon._scope import ABORTED
+from fastapicommon.exceptions.handlers import (
+    log_unclassified,
+    problem_trace_id,
+    unhandled_exception_handler,
+)
 
 
 class UnhandledErrorMiddleware:
@@ -45,11 +50,20 @@ class UnhandledErrorMiddleware:
         try:
             await self.app(scope, receive, send_wrapper)
         except Exception as exc:
-            _record_on_span(exc)
             request = Request(scope)
             if started:
-                log_unclassified(request, exc, status=500, error_code="INTERNAL_ERROR", trace_id="")
+                # Go: re-panic with http.ErrAbortHandler; the access log and span record an
+                # aborted request with the status already sent, not a 200 success.
+                scope[ABORTED] = True
+                log_unclassified(
+                    request,
+                    exc,
+                    status=500,
+                    error_code="INTERNAL_ERROR",
+                    trace_id=problem_trace_id(request),
+                )
                 return
+            _record_on_span(exc)
             response = await unhandled_exception_handler(request, exc)
             await response(scope, receive, send)
 

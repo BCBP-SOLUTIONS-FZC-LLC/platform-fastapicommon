@@ -62,6 +62,11 @@ New floors: `fastapi>=0.115.10`, `starlette>=0.46`, `opentelemetry-api` / `-sdk`
   - Exceptions are recorded by type only.
   - `FastAPIInstrumentor` is gone, along with the `opentelemetry-instrumentation-fastapi`
     dependency.
+- **Rollout:** a service with no collector configured now tries to export to `localhost:4317`
+  (TLS outside dev/local) and logs exporter retry warnings. Set `OTEL_EXPORTER_OTLP_ENDPOINT` to
+  the collector, or `OTEL_TRACES_EXPORTER=none`, before upgrading. `APP_ENV=development` is no
+  longer a dev environment (only `dev` / `local`): it gets JSON logs at info, TLS export and 10%
+  sampling.
 - **Configuration:**
   - gincommon's `OTEL_*` variables: `OTEL_EXPORTER_OTLP_ENDPOINT` (default
     **`localhost:4317`**, where previously nothing was exported unless `OTLP_ENDPOINT` was
@@ -174,6 +179,23 @@ and the span name.
   `problem_type`.
 - **The route label is matched once per request** and kept in the scope, instead of once each in
   the tracing, logging, metrics, timeout and error paths.
+- **`AsyncContextServerInterceptor`: a handler's own `context.abort` is passed through.** It was
+  aborted a second time, so grpc.aio logged `UsageError('Abort already called!')` at ERROR on
+  every deliberate 4xx. Sync handlers on a `grpc.aio` server keep running in its migration
+  thread pool, wrapped like `ContextServerInterceptor`'s (they were wrapped as coroutines, so a
+  sync stream sent no messages and a sync `abort` did nothing). `context.write` streams work.
+- **Route labels under a `Mount` are right without metrics.** With `enable_metrics=False` the
+  label was resolved after routing rewrote the scope (`/admin/users/1` logged as `/users/:uid`);
+  `TracingMiddleware` and `LoggingMiddleware` now resolve it before calling the app.
+- **A failure after the response started is logged as an aborted request** (gincommon's
+  `ErrAbortHandler` path): `http_request` at debug with `"aborted": true` and the status sent, the
+  span annotated `http.aborted` (no Error status), and the `unclassified error` entry carries the
+  real `traceId` instead of `""`.
+- **`OTEL_TRACES_SAMPLER_RATIO=nan` falls back to the default** instead of crashing startup.
+- **A metric named `..._created` is no longer dropped from scrapes**: only prometheus_client's
+  `<family>_created` timestamp samples of counters, histograms and summaries are removed.
+- **The `LOG_SAMPLING` counter table is bounded** (expired windows swept, at most 4096 keys).
+- The HTTP and gRPC server-span code obtains its tracer once instead of per request.
 - Internal: one Gin `ClientIP()` (`fastapicommon.middleware.context.client_ip`), one UTF-8
   truncation (`fastapicommon.logging.sanitize.truncate_utf8`), one panic-span helper, and no
   serialise-then-parse of the 500 problem body. The caller field no longer uses structlog's private

@@ -4,7 +4,8 @@ metrics, the grpc_request log, and exception sanitizing (no message reaches clie
 from __future__ import annotations
 
 import logging
-from collections.abc import AsyncIterator
+from collections.abc import AsyncIterator, Iterator
+from concurrent import futures
 from typing import Any
 
 import grpc
@@ -55,6 +56,25 @@ async def _client_stream(requests: AsyncIterator[bytes], context: Any) -> bytes:
     raise RuntimeError(SECRET)
 
 
+async def _write_stream(request: bytes, context: grpc.aio.ServicerContext) -> None:
+    await context.write(b"w1")
+    await context.write(b"w2")
+
+
+def _sync_whoami(request: bytes, context: grpc.ServicerContext) -> bytes:
+    return get_request_context().request_id.encode()
+
+
+def _sync_stream(request: bytes, context: grpc.ServicerContext) -> Iterator[bytes]:
+    yield b"a"
+    yield b"b"
+
+
+def _sync_aborted(request: bytes, context: grpc.ServicerContext) -> bytes:
+    context.abort(grpc.StatusCode.PERMISSION_DENIED, "No.")
+    return b""  # pragma: no cover
+
+
 @pytest.fixture
 async def channel() -> AsyncIterator[tuple[grpc.aio.Channel, CollectorRegistry]]:
     configure_logging("INFO")
@@ -66,8 +86,15 @@ async def channel() -> AsyncIterator[tuple[grpc.aio.Channel, CollectorRegistry]]
         "Aborted": grpc.unary_unary_rpc_method_handler(_aborted, _ident, _ident),
         "ServerStream": grpc.unary_stream_rpc_method_handler(_server_stream, _ident, _ident),
         "ClientStream": grpc.stream_unary_rpc_method_handler(_client_stream, _ident, _ident),
+        "WriteStream": grpc.unary_stream_rpc_method_handler(_write_stream, _ident, _ident),
+        "SyncWhoami": grpc.unary_unary_rpc_method_handler(_sync_whoami, _ident, _ident),
+        "SyncStream": grpc.unary_stream_rpc_method_handler(_sync_stream, _ident, _ident),
+        "SyncAborted": grpc.unary_unary_rpc_method_handler(_sync_aborted, _ident, _ident),
     }
-    server = grpc.aio.server(interceptors=[AsyncContextServerInterceptor()])
+    server = grpc.aio.server(
+        futures.ThreadPoolExecutor(max_workers=2),
+        interceptors=[AsyncContextServerInterceptor()],
+    )
     server.add_generic_rpc_handlers((grpc.method_handlers_generic_handler("test.Aio", handlers),))
     port = server.add_insecure_port("127.0.0.1:0")
     await server.start()
@@ -176,3 +203,65 @@ async def test_streaming_exceptions_sanitized(
             await ch.stream_unary("/test.Aio/ClientStream")(requests())
         assert err2.value.code() == grpc.StatusCode.INTERNAL
     _no_secret_logged(caplog)
+
+
+def _grpc_errors(caplog: pytest.LogCaptureFixture) -> list[logging.LogRecord]:
+    """Errors grpc.aio itself logged (e.g. "Unexpected [UsageError] raised by servicer")."""
+    return [r for r in caplog.records if r.name.startswith("grpc") and r.levelno >= logging.ERROR]
+
+
+async def test_handler_abort_is_not_aborted_again(
+    channel: tuple[grpc.aio.Channel, CollectorRegistry], caplog: pytest.LogCaptureFixture
+) -> None:
+    """Regression: re-aborting after the handler's own abort raised UsageError('Abort already
+    called!'), logged by grpc at ERROR with a traceback on every deliberate 4xx."""
+    ch, registry = channel
+    with caplog.at_level(logging.INFO), pytest.raises(grpc.aio.AioRpcError) as err:
+        await ch.unary_unary("/test.Aio/Aborted")(b"")
+    assert err.value.code() == grpc.StatusCode.NOT_FOUND
+    assert _grpc_errors(caplog) == []
+    assert (
+        _value(
+            registry,
+            "platform_grpc_server_handled_total",
+            grpc_method="/test.Aio/Aborted",
+            grpc_code="NotFound",
+            status_class="4xx",
+            error_class="client_error",
+        )
+        == 1.0
+    )
+
+
+async def test_context_write_streams_are_kept(
+    channel: tuple[grpc.aio.Channel, CollectorRegistry],
+) -> None:
+    ch, _ = channel
+    assert [m async for m in ch.unary_stream("/test.Aio/WriteStream")(b"")] == [b"w1", b"w2"]
+
+
+async def test_sync_handlers_still_run_in_the_thread_pool(
+    channel: tuple[grpc.aio.Channel, CollectorRegistry], caplog: pytest.LogCaptureFixture
+) -> None:
+    """Regression: sync handlers were wrapped in async functions, so a sync stream sent no
+    messages and a sync abort was an un-awaited coroutine."""
+    ch, registry = channel
+    with caplog.at_level(logging.INFO):
+        assert await ch.unary_unary("/test.Aio/SyncWhoami")(b"", metadata=IDENTITY) == b"req-aio"
+        assert [m async for m in ch.unary_stream("/test.Aio/SyncStream")(b"")] == [b"a", b"b"]
+        with pytest.raises(grpc.aio.AioRpcError) as err:
+            await ch.unary_unary("/test.Aio/SyncAborted")(b"")
+    assert err.value.code() == grpc.StatusCode.PERMISSION_DENIED
+    assert err.value.details() == "No."
+    assert _grpc_errors(caplog) == []
+    assert (
+        _value(
+            registry,
+            "platform_grpc_server_handled_total",
+            grpc_method="/test.Aio/SyncWhoami",
+            grpc_code="OK",
+            status_class="2xx",
+            error_class="success",
+        )
+        == 1.0
+    )

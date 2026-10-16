@@ -32,6 +32,7 @@ never replaced (Go TRC-1 … TRC-4).
 
 from __future__ import annotations
 
+import math
 import os
 import sys
 import threading
@@ -107,6 +108,8 @@ def _sample_ratio(dev: bool) -> float:
     try:
         ratio = float(raw)
     except ValueError:
+        ratio = math.nan
+    if math.isnan(ratio):  # "nan" parses, and passes min/max clamping
         print(f"fastapicommon: invalid {key}={raw!r}; using {default}", file=sys.stderr)
         return default
     return min(max(ratio, 0.0), 1.0)

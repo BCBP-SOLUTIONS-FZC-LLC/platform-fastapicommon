@@ -1,0 +1,6 @@
+"""ASGI scope keys the platform middleware share within one request."""
+
+#: Set by ``UnhandledErrorMiddleware`` when an exception arrives after the response started:
+#: the response is cut short (Go: re-panic with ``http.ErrAbortHandler``), and the access log
+#: and server span record the request as aborted with the status already sent.
+ABORTED = "fastapicommon.aborted"

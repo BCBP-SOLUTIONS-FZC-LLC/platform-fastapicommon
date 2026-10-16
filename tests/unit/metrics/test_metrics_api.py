@@ -133,3 +133,17 @@ def test_register_labeled_adds_the_identity(registry: CollectorRegistry) -> None
     ) in scrape
     assert wrapper.describe() == []  # ThirdParty has no describe()
     registry.unregister(wrapper)
+
+
+def test_metric_named_created_is_not_dropped(registry: CollectorRegistry) -> None:
+    """Regression: every sample ending in _created was dropped, not only prometheus_client's
+    <family>_created timestamps, so a gauge named ..._created never reached a scrape."""
+    items = new_gauge("iam_event_consumer_items_created", "Items created in the last batch")
+    items.set(7)
+    hits = new_counter("iam_event_consumer_created_hits_total", "Hits")
+    hits.inc()
+    scrape = generate_latest(registry).decode()
+    const = 'domain="iam",environment="prod",service="event-consumer"'
+    assert f"iam_event_consumer_items_created{{{const}}} 7.0" in scrape
+    assert f"iam_event_consumer_created_hits_total{{{const}}} 1.0" in scrape
+    assert "iam_event_consumer_created_hits_created" not in scrape

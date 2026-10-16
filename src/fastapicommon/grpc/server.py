@@ -48,6 +48,9 @@ _logger = get_logger("fastapicommon.grpc")
 _unclassified_log = get_logger("fastapicommon.exceptions")
 
 TRACER_SCOPE = "platform-fastapicommon/grpc"
+#: One tracer for every RPC: the global (proxy / delegating) tracer follows a provider installed
+#: or swapped later.
+_TRACER = trace.get_tracer(TRACER_SCOPE)
 
 #: Go ``isClientError``: these codes log ``grpc_request`` at warn, other non-OK codes at error.
 _CLIENT_CODES = frozenset(
@@ -166,7 +169,7 @@ def _start_server_span(method: str, metadata: tuple[tuple[str, str], ...]) -> tr
     carrier = {key.lower(): value for key, value in metadata if isinstance(value, str)}
     parent = propagate.extract(carrier)
     name = grpc_method_label(method)
-    span = trace.get_tracer(TRACER_SCOPE).start_span(name, context=parent, kind=SpanKind.SERVER)
+    span = _TRACER.start_span(name, context=parent, kind=SpanKind.SERVER)
     if name == UNKNOWN:
         span.set_attributes(
             {
@@ -332,7 +335,11 @@ class ContextServerInterceptor(grpc.ServerInterceptor):  # type: ignore[misc]
         handler = continuation(handler_call_details)
         if handler is None:
             return handler
-        method = handler_call_details.method
+        return self._wrap(handler, handler_call_details.method)
+
+    def _wrap(self, handler: grpc.RpcMethodHandler, method: str) -> grpc.RpcMethodHandler:
+        """The observed handler for a sync behaviour (also used by the ``grpc.aio``
+        interceptor for sync handlers, which that server runs in its migration thread pool)."""
         if not handler.unary_unary:
             return self._sanitize_streaming(handler, method)
 
@@ -404,16 +411,21 @@ class ContextServerInterceptor(grpc.ServerInterceptor):  # type: ignore[misc]
 
 class AsyncContextServerInterceptor(grpc.aio.ServerInterceptor):  # type: ignore[misc]
     """:class:`ContextServerInterceptor` for ``grpc.aio`` servers: the same server span, request
-    context, ``platform_grpc_*`` metrics, ``grpc_request`` log and exception sanitizing, for
-    ``async def`` handlers (and sync ones run by the server's migration thread pool)::
+    context, ``platform_grpc_*`` metrics, ``grpc_request`` log and exception sanitizing::
 
         server = grpc.aio.server(interceptors=[AsyncContextServerInterceptor(settings)])
 
-    Streaming RPCs get exception sanitizing only, as with the threaded interceptor.
+    ``async def`` handlers (coroutines and async generators) are wrapped asynchronously. Sync
+    handlers keep running in the server's ``migration_thread_pool`` and are wrapped exactly as
+    :class:`ContextServerInterceptor` wraps them. A handler's own ``context.abort`` is passed
+    through untouched (its status is already sent). Streaming RPCs get exception sanitizing only,
+    as with the threaded interceptor.
     """
 
     def __init__(self, settings: PlatformSettings | None = None) -> None:
         self._service = settings.app_name if settings is not None else ""
+        self._sync = ContextServerInterceptor()
+        self._sync._service = self._service
         if settings is not None:
             init_metrics_from_settings(settings)
 
@@ -426,78 +438,73 @@ class AsyncContextServerInterceptor(grpc.aio.ServerInterceptor):  # type: ignore
         if handler is None:
             return handler
         method = handler_call_details.method
-        service = self._service
-        kw = {
-            "request_deserializer": handler.request_deserializer,
-            "response_serializer": handler.response_serializer,
-        }
+        behavior = (
+            handler.unary_unary
+            or handler.unary_stream
+            or handler.stream_unary
+            or handler.stream_stream
+        )
+        if not (inspect.iscoroutinefunction(behavior) or inspect.isasyncgenfunction(behavior)):
+            return self._sync._wrap(handler, method)
+        return _wrap_async(handler, method, self._service)
 
-        if handler.unary_unary:
-            original = handler.unary_unary
 
-            async def unary_unary(request: Any, context: Any) -> Any:
-                rpc = _UnaryRpc(method, context)
-                response: Any = None
-                try:
-                    response = await _maybe_await(original(request, context))
-                    return response
-                except Exception as exc:
-                    rpc.failed(exc, context)
-                    await _sanitize_async(method, exc, context, service)
-                    raise
-                finally:
-                    rpc.finish(context, request, response)
+def _wrap_async(handler: grpc.RpcMethodHandler, method: str, service: str) -> grpc.RpcMethodHandler:
+    kw = {
+        "request_deserializer": handler.request_deserializer,
+        "response_serializer": handler.response_serializer,
+    }
 
-            return grpc.unary_unary_rpc_method_handler(unary_unary, **kw)
+    async def on_error(exc: Exception, context: Any) -> None:
+        # The handler aborted itself: its status is on the wire; aborting again raises
+        # UsageError("Abort already called!").
+        if not isinstance(exc, grpc.aio.AbortError):
+            await _sanitize_async(method, exc, context, service)
 
-        async def guard(context: Any, run: Callable[[], Any]) -> Any:
+    if handler.unary_unary:
+        original = handler.unary_unary
+
+        async def unary_unary(request: Any, context: Any) -> Any:
+            rpc = _UnaryRpc(method, context)
+            response: Any = None
             try:
-                return await _maybe_await(run())
+                response = await original(request, context)
+                return response
             except Exception as exc:
-                await _sanitize_async(method, exc, context, service)
+                rpc.failed(exc, context)
+                await on_error(exc, context)
+                raise
+            finally:
+                rpc.finish(context, request, response)
+
+        return grpc.unary_unary_rpc_method_handler(unary_unary, **kw)
+
+    def guarded(behavior: Callable[[Any, Any], Any]) -> Callable[[Any, Any], Any]:
+        # Keep the behaviour's kind: grpc.aio calls an async generator and a coroutine that
+        # writes with context.write differently.
+        if inspect.isasyncgenfunction(behavior):
+
+            async def generator(request: Any, context: Any) -> AsyncIterator[Any]:
+                try:
+                    async for item in behavior(request, context):
+                        yield item
+                except Exception as exc:
+                    await on_error(exc, context)
+                    raise
+
+            return generator
+
+        async def coroutine(request: Any, context: Any) -> Any:
+            try:
+                return await behavior(request, context)
+            except Exception as exc:
+                await on_error(exc, context)
                 raise
 
-        def streaming(behavior: Callable[[Any, Any], Any]) -> Callable[[Any, Any], Any]:
-            async def run(request: Any, context: Any) -> Any:
-                result = behavior(request, context)
-                if hasattr(result, "__aiter__"):
-                    return _guard_aiter(method, context, service, result)
-                return await guard(context, lambda: result)
+        return coroutine
 
-            async def as_generator(request: Any, context: Any) -> AsyncIterator[Any]:
-                result = await run(request, context)
-                if hasattr(result, "__aiter__"):
-                    async for item in result:
-                        yield item
-
-            return as_generator
-
-        if handler.unary_stream:
-            return grpc.unary_stream_rpc_method_handler(streaming(handler.unary_stream), **kw)
-        if handler.stream_unary:
-            su = handler.stream_unary
-
-            # A coroutine function (not a lambda returning a coroutine): grpc.aio decides
-            # how to call a behaviour by inspecting it.
-            async def stream_unary(requests: Any, context: Any) -> Any:
-                return await guard(context, lambda: su(requests, context))
-
-            return grpc.stream_unary_rpc_method_handler(stream_unary, **kw)
-        if handler.stream_stream:
-            return grpc.stream_stream_rpc_method_handler(streaming(handler.stream_stream), **kw)
-        return handler  # pragma: no cover - grpc handlers always have one arity set
-
-
-async def _maybe_await(value: Any) -> Any:
-    return await value if inspect.isawaitable(value) else value
-
-
-async def _guard_aiter(
-    method: str, context: Any, service: str, iterator: AsyncIterator[Any]
-) -> AsyncIterator[Any]:
-    try:
-        async for item in iterator:
-            yield item
-    except Exception as exc:
-        await _sanitize_async(method, exc, context, service)
-        raise
+    if handler.unary_stream:
+        return grpc.unary_stream_rpc_method_handler(guarded(handler.unary_stream), **kw)
+    if handler.stream_unary:
+        return grpc.stream_unary_rpc_method_handler(guarded(handler.stream_unary), **kw)
+    return grpc.stream_stream_rpc_method_handler(guarded(handler.stream_stream), **kw)

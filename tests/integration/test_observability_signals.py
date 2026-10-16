@@ -11,6 +11,7 @@ from typing import Any
 import grpc
 import pytest
 from fastapi import Depends, FastAPI, Response
+from fastapi.responses import StreamingResponse
 from fastapi.testclient import TestClient
 from opentelemetry.sdk.trace import ReadableSpan, TracerProvider
 from opentelemetry.sdk.trace.export.in_memory_span_exporter import InMemorySpanExporter
@@ -275,3 +276,23 @@ def test_metrics_handler_error_is_logged_once(
     monkeypatch.setattr(router, "_MAX_TRACKED_ERRORS", 1)
     router._log_metrics_error("another")  # evicts the oldest tracked error
     assert list(router._last_logged) == ["another"]
+
+
+def test_failure_after_response_started_marks_the_span_aborted(spans: _Spans) -> None:
+    """gincommon spanAttrAborted: a response cut short is annotated, not an Error span."""
+    app = _app()
+
+    @app.get("/stream")
+    async def stream() -> StreamingResponse:
+        async def body():  # type: ignore[no-untyped-def]
+            yield b"partial"
+            raise RuntimeError("secret-in-message")
+
+        return StreamingResponse(body())
+
+    TestClient(app).get("/stream")
+    (span,) = spans.finished()
+    assert span.name == "GET /stream"
+    assert dict(span.attributes or {})["http.aborted"] is True
+    assert [e.name for e in span.events] == ["http.aborted"]
+    assert span.status.status_code.name == "UNSET"

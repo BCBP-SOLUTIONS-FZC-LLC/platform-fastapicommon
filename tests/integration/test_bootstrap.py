@@ -156,3 +156,57 @@ def test_plain_generator_lifespans_are_accepted() -> None:
     with TestClient(app):
         assert events == ["up"]
     assert events == ["up", "down"]
+
+
+def _http_requests(caplog: pytest.LogCaptureFixture) -> list[dict[str, object]]:
+    return [
+        dict(r.msg)
+        for r in caplog.records
+        if isinstance(r.msg, dict) and r.msg.get("event") == "http_request"
+    ]
+
+
+def test_failure_after_response_started_is_logged_as_aborted(
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    """Regression: the access log said status 200 at info for a stream that died mid-body
+    (gincommon: re-panic with ErrAbortHandler, logged at debug with "aborted": true)."""
+    from fastapi.responses import StreamingResponse
+
+    app = create_platform_app(
+        settings=PlatformSettings(_env_file=None, log_level="debug", **IDENTITY)
+    )
+
+    @app.get("/stream")
+    async def stream() -> StreamingResponse:
+        async def body():  # type: ignore[no-untyped-def]
+            yield b"partial"
+            raise RuntimeError("mid-stream")
+
+        return StreamingResponse(body())
+
+    with caplog.at_level("DEBUG"):
+        TestClient(app).get("/stream")
+    (entry,) = _http_requests(caplog)
+    assert entry["aborted"] is True and entry["status"] == 200 and entry["level"] == "debug"
+
+
+def test_mounted_route_label_without_metrics(caplog: pytest.LogCaptureFixture) -> None:
+    """Regression: with metrics off the label was resolved after Mount rewrote the scope, so
+    /admin/users/1 was logged as /users/:uid."""
+    from fastapi import FastAPI
+
+    sub = FastAPI()
+
+    @sub.get("/users/{uid}")
+    async def user(uid: str) -> dict[str, str]:
+        return {"uid": uid}
+
+    app = create_platform_app(
+        settings=PlatformSettings(_env_file=None, enable_metrics=False, **IDENTITY)
+    )
+    app.mount("/admin", sub)
+    with caplog.at_level("INFO"):
+        assert TestClient(app).get("/admin/users/1").status_code == 200
+    (entry,) = _http_requests(caplog)
+    assert entry["path"] == "/admin/users/:uid"

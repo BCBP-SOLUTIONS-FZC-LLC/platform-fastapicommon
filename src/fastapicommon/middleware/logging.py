@@ -18,6 +18,7 @@ from typing import Any
 
 from starlette.types import ASGIApp, Message, Receive, Scope, Send
 
+from fastapicommon._scope import ABORTED
 from fastapicommon.auth.headers import TENANT_ID_HEADER, USER_ID_HEADER
 from fastapicommon.context import get_request_context_or_none
 from fastapicommon.logging import get_logger
@@ -81,6 +82,7 @@ class LoggingMiddleware:
                 status_code = int(message["status"])
             await send(message)
 
+        http_route_label(scope)  # resolve before routing rewrites the scope (Mount)
         token = _current_scope.set(scope)
         raised = False
         try:
@@ -107,7 +109,11 @@ class LoggingMiddleware:
         }
         fields.update(identity_log_fields(scope))
         safe = sanitize_fields(fields)
-        if fields["status"] >= 500:
+        if scope.get(ABORTED):
+            # Go: an aborted request is not an error (its failure is logged on its own).
+            safe["aborted"] = True
+            _logger.debug("http_request", **safe)
+        elif fields["status"] >= 500:
             _logger.error("http_request", **safe)
         elif fields["status"] >= 400:
             _logger.warning("http_request", **safe)
