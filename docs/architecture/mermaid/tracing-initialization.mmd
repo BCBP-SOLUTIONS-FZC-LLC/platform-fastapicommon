@@ -1,16 +1,34 @@
 flowchart TD
-    A([create_platform_app: settings.enable_tracing == true]) --> B["TracingConfig.from_env(app_name, build_version,\n  observability_domain, environment, endpoint=settings.otlp_endpoint)"]
-    B --> C["OTEL_* environment, gincommon defaults:\nendpoint localhost:4317 (none/off/disabled or OTEL_TRACES_EXPORTER=none: in-process only)\ninsecure only for dev/local · sample ratio 1.0 dev/local, else 0.1\nbaggage off · ignore_remote_parent_sampled off"]
-    C --> D{ensure_tracing: provider already installed?}
-    D -- "service's own SDK TracerProvider" --> K([kept, never replaced])
-    D -- "this library's, configured" --> K2([kept: first configured install wins])
-    D -- "none, or provisional unknown_service" --> E["TracerProvider(\n  resource: service.name, service.version,\n  service.namespace = domain, deployment.environment.name,\n  sampler: ParentBased(root ratio))"]
-    E --> F{endpoint set?}
-    F -- yes --> G["BatchSpanProcessor(OTLPSpanExporter(endpoint, insecure))"]
-    F -- no --> H["no exporter (spans in-process)"]
-    G --> I["delegating global provider: inner = new provider\n(trace.set_tracer_provider at most once; old provider flushed)"]
-    H --> I
-    I --> J["propagator: W3C traceparent (+ baggage when enabled)\nlog otel_tracing_initialized"]
-    J --> L["TracingMiddleware: one SERVER span per request\nnamed METHOD route"]
-    J --> M["ContextServerInterceptor: one SERVER span per RPC\nnamed after the bounded grpc_method"]
-    N(["app shutdown (lifespan)"]) --> O["flush_tracing(): force_flush (5 s); provider kept for other apps, shut down at exit"]
+    A(["Tracing entry point"]) --> B{"Which one?"}
+    B -- "create_platform_app / ensure_tracing(config)" --> E{"current global provider?"}
+    E -- "ours, active, configured<br/>(or this call is provisional too)" --> KEEP(["keep it"])
+    E -- "a service-installed SDK TracerProvider" --> KEEP2(["keep it — never replaced, flushed or shut down"])
+    E -- "none, ours provisional, or ours after shutdown" --> INST
+    B -- "init_tracing(config)" --> I2{"service-installed SDK TracerProvider?"}
+    I2 -- yes --> KEPT(["returned unchanged, propagator untouched<br/>warn otel_provider_kept"])
+    I2 -- no --> INST
+    B -- "init_tracing_from_env()<br/>(OTEL_SERVICE_NAME → APP_NAME)" --> P{"name empty?"}
+    P -- yes --> PROV["stderr warning · provisional unknown_service"] --> INST
+    P -- no --> INST
+
+    INST["install under _lock"] --> CFG["TracingConfig.from_env: explicit environment wins over APP_ENV<br/>endpoint: OTLP_ENDPOINT → OTEL_EXPORTER_OTLP_ENDPOINT → localhost:4317<br/>none / off / disabled, or OTEL_TRACES_EXPORTER=none → no exporter<br/>insecure: dev/local · ratio 1.0 dev/local, else 0.1 (NaN / invalid → default + warning)"]
+    CFG --> TP["TracerProvider: resource service.name · service.version ·<br/>service.namespace (domain) · deployment.environment.name<br/>sampler ParentBased(root) (+ remote-parent re-sampling)"]
+    TP --> X{"exporter?"}
+    X -- "given (tests)" --> BSP["BatchSpanProcessor(exporter)"]
+    X -- "endpoint" --> OTLP{"OTLPSpanExporter ok?"}
+    OTLP -- yes --> BSP
+    OTLP -- no --> FAIL["warn otel_exporter_init_failed — in-process only"]
+    X -- "none" --> NOEXP["spans in-process, valid trace ids"]
+    BSP --> SWAP
+    FAIL --> SWAP
+    NOEXP --> SWAP
+    SWAP["_global.inner = provider · propagator W3C (+ baggage)<br/>set_tracer_provider(_global) only once · info otel_tracing_initialized"]
+    SWAP --> OLD(["after unlock: old generation force_flush + shutdown"])
+
+    subgraph deleg["Delegating global provider"]
+        D1["get_tracer(scope) → _DelegatingTracer"] --> D2["start_span / start_as_current_span (also as a decorator):<br/>resolve the CURRENT inner provider per call, cached per provider"]
+        D2 --> D3["no provider → NonRecordingSpan keeping the parent context"]
+    end
+
+    FL(["app shutdown: flush_tracing() — export buffered spans, keep the provider"])
+    SD(["shutdown_tracing() — process exit: inner = None, flush + shut down"])

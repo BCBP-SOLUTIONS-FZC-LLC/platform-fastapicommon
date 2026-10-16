@@ -22,7 +22,7 @@ sequenceDiagram
     Note over PM: start = time.perf_counter()
 
     PM ->>+ TM: app(scope)
-    Note over TM: run the app; 503 if no response has started within timeout_seconds
+    Note over TM: run the app, 503 if no response has started within timeout_seconds
 
     TM ->>+ H: app(scope)
     H -->>- TM: response
@@ -43,5 +43,5 @@ sequenceDiagram
     Note over CM: response.headers[x-request-id] = request_id<br/>response.headers[x-correlation-id] = correlation_id<br/>response.headers[X-Request-ID] = request_id<br/>response.headers[X-Trace-ID] = trace_id (if set)<br/>reset_request_context(token) in finally
 
     CM -->>- TR: HTTP response
-    Note over TR: rename span METHOD route, set http.route, url.path,<br/>http.response.status_code; Error status for 5xx / exception
+    Note over TR: rename span METHOD route, set http.route, url.path,<br/>http.response.status_code, Error status for 5xx / exception
     TR -->>- Client: HTTP response

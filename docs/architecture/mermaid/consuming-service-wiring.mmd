@@ -1,20 +1,30 @@
 graph LR
-    subgraph service["Consuming service (your code)"]
-        main["main.py\nsettings = PlatformSettings()"]
-        routes["router.py\n@router.get(...)\ndependencies=[Depends(RequireRole('tenant_admin'))]"]
+    subgraph svc["Consuming service (your code)"]
+        main["main.py<br/>settings = PlatformSettings()"]
+        routes["routers<br/>Depends(require_authenticated_user)<br/>dependencies=[Depends(RequireRole('tenant_admin'))]"]
+        errs["domain errors<br/>problem_type(...) · raise PlatformException(..., problem_type=T)"]
+        out["outbound clients"]
+        grpcsrv["grpc.server / grpc.aio.server"]
+        tests["service tests"]
     end
 
     subgraph lib["fastapicommon"]
-        settings_cls["fastapicommon.config.PlatformSettings\napp_name · log_level · request_timeout_seconds\nenable_tracing · enable_metrics · otlp_endpoint"]
-        bootstrap["fastapicommon.bootstrap.create_platform_app(settings=...)"]
-        get_user["fastapicommon.auth.get_current_user\n/ require_authenticated_user"]
-        rbac["fastapicommon.rbac.RequireRole / RequireAnyRole / RequireAllRoles"]
-        client["fastapicommon.propagation.create_platform_http_client()"]
+        settings_cls["PlatformSettings<br/>app_name · environment (APP_ENV) · observability_domain<br/>build_version · log_level · request_timeout_seconds<br/>enable_tracing · enable_metrics · otlp_endpoint<br/>problem_type_base · trusted_proxies"]
+        bootstrap["create_platform_app(settings=...)<br/>(metrics + logging + tracing + middleware + health + handlers)"]
+        auth["auth.require_authenticated_user · get_current_user<br/>rbac.RequireRole / Any / All"]
+        prob["problem · exceptions"]
+        client["propagation.create_platform_http_client()<br/>grpc.ContextClientInterceptor"]
+        inter["grpc.ContextServerInterceptor(settings)<br/>grpc.AsyncContextServerInterceptor(settings)"]
+        mx["metrics.new_* / new_shared_* · compliance.validate"]
     end
 
-    main -->|"env vars / .env"| settings_cls
+    main -->|"env / .env"| settings_cls
     settings_cls --> bootstrap
-    bootstrap -->|"FastAPI app\n(logging, middleware, metrics,\ntracing, health, exception handlers wired)"| routes
-    routes -->|"Depends(get_current_user)"| get_user
-    routes -->|"Depends(RequireRole(...))"| rbac
-    routes -->|"outbound HTTP calls"| client
+    bootstrap -->|"FastAPI app"| routes
+    routes --> auth
+    routes --> errs
+    errs --> prob
+    out --> client
+    grpcsrv --> inter
+    routes --> mx
+    tests --> mx

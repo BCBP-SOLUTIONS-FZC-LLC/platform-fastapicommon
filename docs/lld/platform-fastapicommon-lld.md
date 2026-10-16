@@ -6,8 +6,8 @@
 |---|---|
 | Document type | Low-Level Design (LLD) |
 | Component | `platform-fastapicommon` (shared FastAPI HTTP + gRPC transport and observability library; the Python port of `platform-gincommon`) |
-| Python package | `platform-fastapicommon` (import name `fastapicommon`), `requires-python >= 3.11`; CI tests 3.11, 3.13 and 3.14 |
-| Status | `0.2.0` released 2026-07-27. `[Unreleased]` (target **`0.3.0`**, breaking) on `feat/observability-standard`, PR #25: logs, metrics and traces aligned with platform-gincommon `v2.0.0`; CI/CD port; four production-readiness review rounds |
+| Python package | `platform-fastapicommon` (import name `fastapicommon`), `requires-python >= 3.11`; CI tests 3.11, 3.12, 3.13 and 3.14, plus every runtime dependency at its floor |
+| Status | `0.2.0` released 2026-07-27. `[Unreleased]` (target **`0.3.0`**, breaking) on `feat/observability-standard`, PR #25: logs, metrics and traces aligned with platform-gincommon `v2.0.0`; CI/CD port; four production-readiness review rounds; OQ-2 … OQ-4 resolved; 100% line and branch coverage; repository docs aligned with platform-gincommon's |
 | Previous release | `0.1.1` (2026-07-26) |
 | Governing standard | Enterprise Platform Observability Standard ([`docs/observability/README.md`](../observability/README.md)); the registry is gincommon's, vendored byte for byte |
 | Reference design | [`platform-gincommon` LLD](../../../../platform-gincommon/docs/lld/platform-gincommon-lld.md) — this library implements the same contracts in Python; where they differ, §16 records why |
@@ -19,6 +19,7 @@
 
 | Rev | Date | Change |
 |---|---|---|
+| 1.2 | 2026-10-16 | **Tests and documentation.** 423 tests (388 unit, 29 integration, 6 e2e), **100%** line and branch coverage: `TracingMiddleware` unit tests (client address without `ContextMiddleware`, span status per response class, an escaped exception as a `panic` span), non-IP and IPv6 proxy peers, a handler failing while cancelled after a timeout, `grpc.aio` bidirectional streams / unknown methods / `settings`, a context that cannot abort. The dead `PlatformMetrics.observe_http_response_size` path is removed; the `X-Forwarded-For` walk has no unreachable branch (same behaviour). README, ARCHITECTURE, CHANGELOG, CONTRIBUTING, SECURITY and VERSIONING follow platform-gincommon's structure; `.claude/` added. §1, §3, §5.4.2, §14, Appendix updated. |
 | 1.1 | 2026-10-16 | **OQ-2 / OQ-3 / OQ-4 resolved.** A repeated `x-user-id` / `x-tenant-id` is ambiguous and roles are capped at 4096 bytes / 64 roles, on HTTP and gRPC, with gincommon's 401 details (`resolve_identity`, `RequestContext.identity_rejection`). `client_ip` believes forwarding headers only from `trusted_proxies` (Gin `SetTrustedProxies`; default: the socket peer). §4.1, §4.2, §5.4.2, §8.3, §10, §12 updated. |
 | 1.0 | 2026-10-16 | First LLD, written against `feat/observability-standard` at `db99e50` (PR #25, CI green), with the structure of platform-gincommon's LLD rev 1.10. Records the state after the gincommon alignment and four review rounds (Appendix), and the remaining gaps against gincommon's contract as open questions (§16). |
 
@@ -71,7 +72,7 @@ This document is the low-level design for **`platform-fastapicommon`**, the shar
 
 It refines the gincommon contracts into Python specifics: exact public signatures, validation rules, initialisation algorithms, error codes and messages, flows, invariants and test obligations. Integration is in [README.md](../../README.md); diagrams and the invariant catalogue are in [ARCHITECTURE.md](../../ARCHITECTURE.md).
 
-**The code is at this state.** Every behaviour below is implemented on `feat/observability-standard` and covered by tests under `tests/` (384 tests, 99.07% coverage). §14.5 lists the canonical tests that pin the load-bearing invariants.
+**The code is at this state.** Every behaviour below is implemented on `feat/observability-standard` and covered by tests under `tests/` (423 tests: 388 unit, 29 integration, 6 e2e; **100%** line and branch coverage of `src/fastapicommon` over unit + integration). §14.5 lists the canonical tests that pin the load-bearing invariants.
 
 ### 1.1 Relationship to gincommon and the observability standard
 
@@ -190,7 +191,9 @@ platform-fastapicommon/
 ├── docs/{adr,architecture,lld,observability}/ + problem-details.md, MigrationGuide.md
 ├── docker/                                # local collector / Tempo / Loki / Promtail / Prometheus (+ vendored rules) / Grafana config
 ├── .github/{workflows,scripts}/           # ported gincommon CI/CD (validate-*, ci, release, docs, changelog-check)
-└── tests/{unit,integration,e2e}/
+├── .claude/                               # Claude Code context: CLAUDE.md + architecture / api-reference / request-flows / wire-contracts / operations, settings.json
+├── README.md · ARCHITECTURE.md · CHANGELOG.md · CONTRIBUTING.md · SECURITY.md · VERSIONING.md   # structure of platform-gincommon's
+└── tests/{unit,integration,e2e}/          # unit/ mirrors src/ (one directory per subpackage)
 ```
 
 ### 3.1 Library dependencies (direct)
@@ -377,7 +380,7 @@ Key vocabularies (same as gincommon): `domain` ∈ `iam`, `workflow`, `billing`,
 |---|---|---|
 | A-1 | `get_current_user() -> CurrentUser` | dependency; authenticated or not |
 | A-2 | `require_authenticated_user() -> CurrentUser` | dependency; a rejected identity → 401 with gincommon's detail (`Ambiguous x-user-id header.`, `Ambiguous x-tenant-id header.`, `Invalid tenant roles.`); no `user_id` → 401 `Missing or invalid authentication headers.`; each after warn `auth: request rejected` |
-| A-3 | `normalize_header_value(raw)` · `normalize_request_id(raw)` · `parse_roles(header)` · `parse_roles_strict(header)` (`InvalidRolesError`) · `resolve_identity(user_ids, tenant_ids, role_values) -> IdentityResolution` | validation rules RC-2 … RC-4 (ported from gincommon `domain/validation.go`); `resolve_identity` is the one rule both transports apply |
+| A-3 | `normalize_header_value(raw)` · `normalize_request_id(raw)` · `parse_roles(header)`; in `fastapicommon.auth.validation` only (not in `fastapicommon.auth.__all__`): `parse_roles_strict(header)` (`InvalidRolesError`) · `resolve_identity(user_ids, tenant_ids, role_values) -> IdentityResolution` | validation rules RC-2 … RC-4 (ported from gincommon `domain/validation.go`); `resolve_identity` is the one rule both transports apply. Re-exporting the strict helpers is a MINOR addition if a consumer needs them |
 | A-4 | header constants (§4.2), `MAX_*` limits | |
 | A-5 | `RequireRole(role)` · `RequireAnyRole(*roles)` · `RequireAllRoles(*roles)` | dependencies over the validated roles; denial → warn `authz: access denied` + `ForbiddenException` (403) |
 
@@ -464,7 +467,7 @@ Pure ASGI (`scope["type"] == "http"` only):
 
 1. `request_id, correlation_id = resolve_ids(x-request-id, x-correlation-id)`: an invalid request id becomes a new UUID, an invalid or missing correlation id the request id.
 2. `resolve_identity(getlist(x-user-id), getlist(x-tenant-id), getlist(x-tenant-roles))`: a repeated user or tenant id, or roles over the caps, makes the whole identity absent and records `identity_rejection`; otherwise invalid values are absent. No 401 at this layer — `require_authenticated_user` answers it (§8.3).
-3. `trace_id` from the active span (set by `TracingMiddleware`); `client_ip = client_ip(headers, peer, trusted_proxies)` — Gin's `ClientIP()` with `SetTrustedProxies`: `X-Forwarded-For` (walked from the right, first hop that is not a trusted proxy), then `X-Real-IP`, **only** when the peer is a trusted proxy; otherwise the peer. Stored in the scope for the span's `client.address`.
+3. `trace_id` from the active span (set by `TracingMiddleware`); `client_ip = client_ip(headers, peer, trusted_proxies)` — Gin's `ClientIP()` with `SetTrustedProxies`: `X-Forwarded-For` (walked from the right, first hop that is not a trusted proxy), then `X-Real-IP`, **only** when the peer is a trusted proxy; otherwise the peer. Every hop trusted → the leftmost; an invalid hop ends the walk (then `X-Real-IP`, then the peer); a peer that is not an IP (Unix socket) is never trusted. Stored in the scope for the span's `client.address`.
 4. Bind for the whole call (body streaming included); on `http.response.start` set `x-request-id`, `x-correlation-id`, `X-Request-ID` and, when set, `X-Trace-ID`.
 
 #### 5.4.3 `UnhandledErrorMiddleware`
@@ -829,7 +832,7 @@ sequenceDiagram
     participant A as create_platform_app
     M->>T: new_tracer("orders").start_as_current_span("op") as decorator (no provider yet)
     A->>T: ensure_tracing(config for orders)
-    T->>T: install delegating provider (or replace a provisional one; old one flushed after unlock)
+    T->>T: install delegating provider (or replace a provisional one, the old one flushed after unlock)
     M->>T: decorated call: resolves the CURRENT provider on entry
     Note over M,T: spans export with service.name=orders (TRC-2)
     A->>T: app shutdown → flush_tracing() in a worker thread (provider kept, TRC-5)
@@ -1080,24 +1083,24 @@ Two-stage `Dockerfile`, both bases digest-pinned (`ghcr.io/astral-sh/uv:0.13.1`,
 
 ## 14. Testing Strategy
 
-384 tests; `make ci` / CI `Validate / Test` run unit + integration with coverage (gate 90%, `coverage-gate.sh`; current **99.07%**). e2e runs in the smoke job against the built image.
+423 tests (388 unit, 29 integration, 6 e2e); `make ci` / CI `Validate / Test` run unit + integration with coverage (gate 90%, `coverage-gate.sh`; current **100%** line and branch, with no `pragma: no cover` in `src/`). e2e runs in the smoke job against the built image. New code is expected to keep 100%: an unreachable branch is restructured away rather than excluded.
 
 ### 14.1 Unit tests (`tests/unit/`, no Docker)
 
 | Package | Tests | Covers |
 |---|---|---|
-| `metrics` | 78 (8 files) | init and identity, recording rules, registry strictness and rules, compliance validator, `metricslint` CLI, inventory, Tier 3 / shared constructors, `_created` filtering, route labels (Mounts, once per request), gincommon parity |
-| `grpc` | 23 (3 files) | threaded and `grpc.aio` interceptors against real servers: context, metrics, spans, sanitizing (unary + streaming), abort pass-through, sync handlers on aio, deadline / cancel, baggage, identity validation, `finish()` robustness |
-| `logging` | 23 (2 files) | Zap layouts, levels, sampling (bounded, never raising), `LOG_FILE`, caller / stacktrace, cached loggers following reconfiguration, sanitisation |
-| `telemetry` | 23 (2 files) | `TracingConfig.from_env`, endpoint disabling, NaN ratio, provider install / swap / flush / shutdown, consumer provider kept, decorator follows the provider, helpers, baggage |
-| `auth` | 20 (2 files) | header validation rules, dependencies, audit entry |
-| `exceptions` | 19 (2 files) | every handler, problem bodies, unclassified logging (types and frames only), legacy class attributes rejected |
-| `middleware` | 19 (3 files) | context middleware (ids, identity, correlation-id validation, client IP), timeout (503, streaming, cancellation propagation) |
-| `context`, `problem`, `rbac`, `propagation`, `config`, `health` | 9 · 9 · 6 · 5 · 5 · 3 | accessors and isolation; problem model and trace-id vectors; role dependencies; outbound headers; settings defaults; health router |
+| `metrics` | 113 (8 files) | init and identity, recording rules, registry strictness and rules, compliance validator (findings once per metric, OpenMetrics normalisation), `metricslint` CLI and references, inventory, Tier 3 / shared constructors, `_created` filtering, route labels (Mounts, once per request, the pre-`iter_route_contexts` path), response size (body bytes only), gincommon parity |
+| `logging` | 40 (2 files) | Zap layouts (incl. no caller, non-JSON values), levels, sampling (bounded, never raising), `LOG_FILE`, caller / stacktrace, cached loggers following reconfiguration, sanitisation, audit entries in and outside a request |
+| `middleware` | 39 (4 files) | context middleware (ids, identity, correlation-id validation, client IP: trusted / untrusted / non-IP / IPv6 peers), tracing middleware on its own (client address, span status per class, escaped exception as `panic`), timeout (503, streaming, cancellation propagation, failure while cancelled) |
+| `telemetry` | 39 (2 files) | `TracingConfig.from_env` (true and false booleans), endpoint disabling, NaN ratio, provider install / swap / flush (timeout warning, consumer provider untouched) / shutdown, consumer provider kept, decorator follows the provider, helpers, baggage |
+| `exceptions` | 37 (2 files) | every handler, problem bodies, unclassified logging (types and frames only), legacy class attributes rejected |
+| `grpc` | 32 (3 files) | threaded and `grpc.aio` interceptors against real servers: context, metrics, spans, sanitizing (unary, server / client / bidirectional streaming), abort pass-through, a context that cannot abort, sync handlers on aio, unknown methods, deadline / cancel, baggage, identity validation, `-bin` metadata, `settings`, `finish()` robustness |
+| `auth`, `problem` | 29 · 29 (2 + 1 files) | header validation rules, dependencies, audit entry; problem model, field paths and trace-id vectors |
+| `context`, `rbac`, `config`, `propagation`, `health`, package | 9 · 6 · 5 · 5 · 3 · 2 | accessors and isolation; role dependencies; settings defaults; outbound headers; health router; `__version__` and `__all__` |
 
 ### 14.2 Integration tests (`tests/integration/`, in-process)
 
-`create_platform_app()` end to end through `TestClient` and direct ASGI calls (25 tests): bootstrap wiring and lifespans (`on_event`, generator lifespans), observability signals (spans, logs, metrics for success, 404, 500, aborted streams, cancelled requests), metrics compliance of the library's own scrape, mounted routes without metrics.
+`create_platform_app()` end to end through `TestClient` and direct ASGI calls (29 tests): bootstrap wiring and lifespans (`on_event`, generator lifespans), observability signals (spans, logs, metrics for success, 404, 500, aborted streams, cancelled requests), metrics compliance of the library's own scrape, mounted routes without metrics.
 
 ### 14.3 Contract tests
 
@@ -1130,6 +1133,8 @@ Two-stage `Dockerfile`, both bases digest-pinned (`ghcr.io/astral-sh/uv:0.13.1`,
 | T-12 | `test_sampling_never_raises_into_stdlib_callers`, `test_sampler_table_is_bounded` | FAIL-1 for logging |
 | T-13 | `test_handler_abort_is_not_aborted_again`, `test_sync_handlers_still_run_in_the_thread_pool` | §8.8, CONC-6 |
 | T-14 | `test_vendored_registry_is_identical_to_gincommon` | CONS-3 |
+| T-15 | `test_client_address_without_context_middleware_is_the_peer`, `test_forwarding_headers_ignored_when_the_peer_is_not_an_ip` | SEC client IP: forwarding headers never believed without a trusted proxy |
+| T-16 | `test_escaped_exception_marks_the_span_panic_without_its_message`, `test_wrapper_reraises_when_the_context_cannot_abort` | OBS-8 without `UnhandledErrorMiddleware` / without an aborting context |
 
 ---
 
@@ -1364,4 +1369,5 @@ Four automated review rounds against the branch, each followed by fixes, a regre
 | — | `x-correlation-id` echoed / logged / propagated unvalidated; gRPC `x-request-id` unvalidated | `test_invalid_correlation_id_falls_back_to_request_id`, `test_context_from_metadata_validates_ids` |
 | LLD | Security parity gaps found writing this LLD (OQ-2 … OQ-4): first-value-wins identity, uncapped roles, spoofable client IP | `test_repeated_identity_header_is_ambiguous`, `test_roles_over_the_caps_reject_the_identity`, `test_rejected_identity_is_a_401_with_gincommons_detail`, `test_client_ip_walks_x_forwarded_for_from_a_trusted_proxy`, `test_client_ip_ignores_forwarding_headers_from_an_untrusted_peer` |
 | 4 | gRPC accepted identities HTTP rejects (security); cancellations recorded as 500 panics; inbound baggage dropped on gRPC; timeout swallowed the server's cancellation; `LOG_LEVEL=critical` rejected; eager route-table wrapping | `test_context_from_metadata_validates_identity_like_http`, `test_cancelled_request_is_aborted_not_a_panic`, `test_inbound_baggage_reaches_the_handler`, `test_outer_cancellation_during_unwind_propagates` |
+| Tests | Coverage review: every unreached line and branch either tested (the paths above) or, when unreachable, removed — the dead `observe_http_response_size` path and an impossible loop exit in the `X-Forwarded-For` walk. Pinned the documented gap that `grpc.aio` streaming RPCs get no request context (OQ-11) | `test_bidi_streams_keep_the_context_and_are_sanitized`, `test_unknown_method_passes_through`, `test_settings_initialise_metrics_for_a_grpc_only_service`, `test_handler_failing_while_cancelled_still_times_out` |
 | CI | Example image 181 MB against gincommon's 150 MB budget (calibrated on a compressed local size): plain uvicorn, trimmed stdlib, 170 MB Python budget (OQ-13) | CI `Smoke tests` (159 MB) |

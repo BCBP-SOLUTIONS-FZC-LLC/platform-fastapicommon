@@ -1,59 +1,80 @@
-graph TD
-    subgraph pub["Entry point"]
-        bootstrap["fastapicommon.bootstrap\ncreate_platform_app()"]
-    end
+graph LR
+    init(["fastapicommon<br/>(__init__)"])
+    bootstrap(["bootstrap"])
+    middleware(["middleware"])
+    exceptions(["exceptions"])
+    grpc(["grpc<br/>(grpc extra)"])
+    telemetry(["telemetry"])
+    metrics(["metrics"])
+    logging(["logging"])
+    auth(["auth"])
+    rbac(["rbac"])
+    propagation(["propagation"])
+    health(["health"])
+    problem(["problem"])
+    context(["context"])
+    config(["config"])
+    errors(["_errors"])
+    scope(["_scope"])
 
-    subgraph http["HTTP integration"]
-        middleware["fastapicommon.middleware\nContextMiddleware · TimeoutMiddleware"]
-        metrics["fastapicommon.metrics\nPrometheusMiddleware · metrics_router\ninit_metrics · PlatformMetrics\nObservabilityRegistry (registry.json)"]
-        health["fastapicommon.health\nhealth_router · create_health_router · ReadinessCheck"]
-        telemetry["fastapicommon.telemetry\nsetup_tracing · instrument_grpc_server\ninstrument_grpc_client"]
-    end
-
-    subgraph identity["Identity & access"]
-        auth["fastapicommon.auth\nUSER_ID_HEADER · TENANT_ID_HEADER · TENANT_ROLES_HEADER\nREQUEST_ID_HEADER · CORRELATION_ID_HEADER\nget_current_user · require_authenticated_user"]
-        rbac["fastapicommon.rbac\nRequireRole · RequireAnyRole · RequireAllRoles"]
-    end
-
-    subgraph core["Core (no framework dependency)"]
-        context["fastapicommon.context\nCurrentUser · RequestContext\nbind/reset_request_context · request_context_scope\nget_request_context · get_tenant_id · get_user_id · get_roles"]
-        exceptions["fastapicommon.exceptions\nPlatformException hierarchy\nregister_exception_handlers"]
-        config["fastapicommon.config\nPlatformSettings"]
-    end
-
-    subgraph outbound["Outbound"]
-        propagation["fastapicommon.propagation\ncreate_platform_http_client"]
-    end
-
-    subgraph grpcmod["gRPC (optional extra)"]
-        grpc["fastapicommon.grpc\nContextServerInterceptor\nContextClientInterceptor"]
-    end
-
-    subgraph logmod["Logging"]
-        logging["fastapicommon.logging\nconfigure_logging · get_logger"]
-    end
-
+    init --> bootstrap
     bootstrap --> config
-    bootstrap --> middleware
-    bootstrap --> metrics
-    bootstrap --> health
-    bootstrap --> telemetry
     bootstrap --> exceptions
+    bootstrap --> health
     bootstrap --> logging
+    bootstrap --> metrics
+    bootstrap --> middleware
+    bootstrap --> telemetry
 
-    middleware --> context
+    middleware --> errors
+    middleware --> scope
     middleware --> auth
-    auth --> context
-    auth --> exceptions
-    rbac --> context
-    rbac --> exceptions
-    logging --> context
-    propagation --> context
-    propagation --> auth
-    grpc --> context
+    middleware --> context
+    middleware --> exceptions
+    middleware --> logging
+    middleware --> metrics
+    middleware --> problem
+
+    exceptions --> errors
+    exceptions --> scope
+    exceptions --> context
+    exceptions --> logging
+    exceptions --> problem
+    exceptions -.->|lazy| metrics
+    exceptions -.->|lazy| middleware
+
+    grpc --> errors
     grpc --> auth
+    grpc --> config
+    grpc --> context
     grpc --> logging
     grpc --> metrics
 
-    classDef core fill:#2b6cb0,color:#fff,stroke:#1a4971
-    class context,exceptions,config core
+    telemetry --> errors
+    telemetry --> logging
+    telemetry -.->|lazy| middleware
+
+    metrics --> scope
+    metrics --> config
+    metrics --> logging
+
+    logging --> auth
+    logging --> context
+    logging -.->|lazy| metrics
+    logging -.->|lazy| middleware
+
+    auth --> context
+    auth --> exceptions
+    auth -.->|lazy| logging
+    rbac --> context
+    rbac --> exceptions
+    rbac --> logging
+    propagation --> auth
+    propagation --> context
+
+    errors --> context
+    errors --> logging
+    errors -.->|lazy| metrics
+
+    classDef leaf fill:#2b6cb0,color:#fff,stroke:#1a4971
+    class context,config,problem,health,scope leaf

@@ -1,0 +1,71 @@
+graph TD
+    subgraph examples["Composition roots  —  examples/  (reference + CI smoke only, not consumed)"]
+        ex_http["fastapi_service/main.py<br/>create_platform_app(...) · demo routes<br/>the image CI smoke-tests (uvicorn, USER 10001)"]
+        ex_grpc["grpc_service/server.py<br/>ContextServerInterceptor(settings) · init_tracing_from_env()"]
+        lint_cli["fastapicommon-metricslint (console script)<br/>check · refs · registry · inventory<br/>exit 0 clean · 1 findings · 2 usage/I-O"]
+    end
+
+    subgraph api["Composition  —  fastapicommon.bootstrap  (the one-call entry point)"]
+        boot["create_platform_app(app_name, settings, **fastapi_kwargs)<br/>init_metrics_from_settings · configure_logging · ensure_tracing<br/>middleware order · health_router · register_exception_handlers<br/>router lifespan wrapped: flush_tracing on shutdown"]
+    end
+
+    subgraph inbound["Inbound adapters  —  middleware/ · grpc/ · health/ · exceptions/middleware"]
+        mw["middleware (pure ASGI)<br/>TracingMiddleware · ContextMiddleware · LoggingMiddleware<br/>TimeoutMiddleware"]
+        uem["UnhandledErrorMiddleware<br/>unclassified → 500 problem, never re-raised<br/>post-start failure → connection dropped (aborted)"]
+        grpcmw["grpc<br/>ContextServerInterceptor (threaded) · AsyncContextServerInterceptor (aio)<br/>span · context · metrics · grpc_request · exception sanitizing<br/>ContextClientInterceptor"]
+        health["health<br/>/health · /live · /ready (readiness checks)"]
+        deps["auth.dependencies · rbac<br/>require_authenticated_user (401) · RequireRole / Any / All (403)"]
+    end
+
+    subgraph outbound["Outbound adapters  —  telemetry/ · metrics/ · logging/ · propagation/"]
+        tel["telemetry<br/>delegating global TracerProvider (inner SDK provider swapped)<br/>TracingConfig.from_env · init / ensure / flush / shutdown<br/>ParentBased sampler · OTLP/gRPC · resource identity"]
+        met["metrics<br/>PlatformMetrics: platform_* collectors from the registry<br/>PrometheusMiddleware (pure ASGI) · metrics_router<br/>new_* (Tier 3) · new_shared_* · register_labeled"]
+        log["logging<br/>structlog → stdlib root, Zap layout on stderr<br/>LOG_LEVEL · LOG_SAMPLING · LOG_FILE · sanitize · audit"]
+        prop["propagation<br/>create_platform_http_client (httpx.Auth hook)"]
+    end
+
+    subgraph contract["Error contract  —  problem/ · exceptions/"]
+        prob["problem (no framework imports)<br/>Problem · ProblemType registry (15 platform/*) · build_problem<br/>resolve_trace_id (pgcommon-py order) · client parsing"]
+        exc["exceptions<br/>PlatformException + subclasses · handlers · problem_response<br/>unclassified error (types + frames, never the message)"]
+    end
+
+    subgraph governance["Governance  —  metrics/registry.json + tooling"]
+        reg["registry.json (VENDORED from platform-gincommon, byte-identical)<br/>ObservabilityRegistry · check_custom · compliance.validate<br/>references · inventory · lint"]
+    end
+
+    subgraph core["Core  —  context/ · auth/validation · config/ · _errors · _scope"]
+        ctx["context<br/>CurrentUser · RequestContext (contextvars)<br/>accessors · request_context_scope"]
+        val["auth.validation + headers<br/>normalize_header_value · resolve_ids · resolve_identity<br/>parse_roles(_strict): 4096 bytes / 64 roles"]
+        cfg["config<br/>PlatformSettings (.env + environment)"]
+        internal["_errors · _scope<br/>exception type names · error chain · stack frames<br/>type-only span event · emit_unclassified · request_outcome"]
+    end
+
+    ex_http --> boot
+    ex_grpc --> grpcmw
+    lint_cli --> reg
+    boot --> mw
+    boot --> uem
+    boot --> health
+    boot --> met
+    boot --> tel
+    boot --> log
+    boot --> exc
+    boot --> cfg
+    mw --> val
+    mw --> ctx
+    mw --> met
+    mw --> internal
+    uem --> exc
+    grpcmw --> val
+    grpcmw --> ctx
+    grpcmw --> met
+    grpcmw --> internal
+    deps --> ctx
+    deps --> exc
+    exc --> prob
+    exc --> internal
+    met --> reg
+    met --> cfg
+    tel --> internal
+    prop --> ctx
+    log --> ctx

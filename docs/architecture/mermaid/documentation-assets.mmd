@@ -1,34 +1,38 @@
 graph LR
     subgraph sources["Documentation sources"]
-        subgraph code_src["In-code"]
-            docstrings["module/function docstrings\n(mypy --strict enforces public signatures)"]
-        end
-
-        subgraph arch_src["Architecture docs"]
-            mmd_files["docs/architecture/mermaid/\n11 x .mmd source diagrams"]
-            arch_md["ARCHITECTURE.md\nembeds mermaid blocks + prose + API tables"]
-        end
-
-        subgraph adr_src["Decision records"]
-            adrs["docs/adr/ADR-001..004\nlogging · tracing · metrics · context propagation"]
-        end
-
-        subgraph other_src["Other docs"]
-            readme["README.md — quick start, module table"]
-            migration["docs/MigrationGuide.md — Go -> Python mapping"]
-        end
+        mmd["docs/architecture/mermaid/<br/>16 × .mmd source diagrams"]
+        arch["ARCHITECTURE.md<br/>embeds every .mmd verbatim + prose"]
+        lld["docs/lld/platform-fastapicommon-lld.md<br/>low-level design (gincommon LLD structure)"]
+        readme["README.md<br/>mental model · API overview · integration guide · operations"]
+        obsdocs["docs/observability/<br/>standard · metric-registry.md (generated) · migration · runbooks"]
+        probdoc["docs/problem-details.md<br/>RFC 9457 contract"]
+        adrs["docs/adr/ADR-001..004<br/>logging · tracing · metrics · context propagation"]
+        docstrings["module / function docstrings<br/>(mypy --strict on public signatures)"]
+        policy["VERSIONING.md · CHANGELOG.md · SECURITY.md · CONTRIBUTING.md · MigrationGuide"]
+        claude[".claude/<br/>CLAUDE.md + reference set for Claude Code"]
     end
 
     subgraph rendered["Rendered / consumed by"]
-        ide["IDE hover / mypy\n(docstrings + type hints)"]
-        github_md["GitHub\nMarkdown + Mermaid preview"]
-        pypi["PyPI project page\n(README.md as long_description)"]
+        github["GitHub — Markdown + Mermaid"]
+        ide["IDE hover / Mermaid preview"]
+        pydoc["make docs-serve → pydoc :8081"]
+        pypi["PyPI project page (README)"]
+        gates["make docs-check (diagram sync) · make metrics-lint (inventory drift)"]
+        agent["Claude Code sessions"]
     end
 
-    docstrings --> ide
-    mmd_files -->|"copied into fenced code blocks"| arch_md
-    arch_md --> github_md
-    adrs --> github_md
-    readme --> github_md
+    mmd -->|"embedded as fenced blocks"| arch
+    mmd --> ide
+    arch --> github
+    lld --> github
+    readme --> github
     readme --> pypi
-    migration --> github_md
+    obsdocs --> github
+    obsdocs --> gates
+    mmd --> gates
+    probdoc --> github
+    adrs --> github
+    docstrings --> ide
+    docstrings --> pydoc
+    policy --> github
+    claude --> agent

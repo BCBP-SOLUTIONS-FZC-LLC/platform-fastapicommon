@@ -1,0 +1,24 @@
+{
+  "permissions": {
+    "allow": [
+      "Bash(uv run pytest:*)",
+      "Bash(uv run ruff:*)",
+      "Bash(uv run black:*)",
+      "Bash(uv run mypy:*)",
+      "Bash(uv run fastapicommon-metricslint:*)",
+      "Bash(uv sync:*)",
+      "Bash(uv lock:*)",
+      "Bash(uv build:*)",
+      "Bash(env -u VIRTUAL_ENV uv run pytest:*)",
+      "Bash(env -u VIRTUAL_ENV uv run ruff:*)",
+      "Bash(env -u VIRTUAL_ENV uv run mypy:*)",
+      "Bash(env -u VIRTUAL_ENV uv sync:*)",
+      "Bash(env -u VIRTUAL_ENV make:*)",
+      "Bash(make:*)",
+      "Bash(find .:*)",
+      "Bash(grep:*)",
+      "Bash(ls:*)"
+    ],
+    "deny": []
+  }
+}
