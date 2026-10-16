@@ -75,6 +75,10 @@ An exception nothing classified (not a `PlatformException`, `HTTPException`, val
 - Classified errors, including a deliberate `PlatformException()` (500), are not flagged.
 - **Alert on it**: each entry is a defect; fix it by raising a `PlatformException` where the failure happens.
 
+## gRPC
+
+RFC 9457 is HTTP-only, but gRPC errors follow the same rule that no exception message reaches a client or a log. `ContextServerInterceptor` sanitizes every RPC: a status the handler chose (`context.abort`, `set_code`) is kept; any other exception is aborted as `INTERNAL "internal server error"` and logged as `unclassified error` with `grpc_method` (instead of `route` / `operation`), the exception types and the stack frames. Without it, grpcio sends `UNKNOWN "Exception calling application: <message>"` and logs the message. It is the same contract as gincommon's gRPC error sanitizer.
+
 ## Configuration
 
 `PlatformSettings.problem_type_base` (env `PROBLEM_TYPE_BASE`) sets the type URI base; the default is `https://errors.company.com`. The settings are per app (`app.state.fastapicommon_problem`).
