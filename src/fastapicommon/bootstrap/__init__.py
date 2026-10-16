@@ -1,3 +1,3 @@
-from fastapicommon.bootstrap.app import create_platform_app
+from fastapicommon.bootstrap.app import FASTAPI_NATIVE_TELEMETRY_OFF, create_platform_app
 
-__all__ = ["create_platform_app"]
+__all__ = ["FASTAPI_NATIVE_TELEMETRY_OFF", "create_platform_app"]

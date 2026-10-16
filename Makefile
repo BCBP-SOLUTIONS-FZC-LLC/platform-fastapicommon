@@ -282,9 +282,9 @@ hadolint: lint-docker
 # -----------------------------
 
 METRICSLINT := $(UV) run --no-sync fastapicommon-metricslint
-# promtool from PATH, else this digest-pinned Prometheus image (gincommon's version).
+# promtool from PATH, else this digest-pinned Prometheus image (latest; gincommon pins v3.5.0).
 PROMTOOL ?= $(shell command -v promtool 2>/dev/null)
-PROMETHEUS_IMAGE ?= prom/prometheus:v3.5.0@sha256:63805ebb8d2b3920190daf1cb14a60871b16fd38bed42b857a3182bc621f4996
+PROMETHEUS_IMAGE ?= prom/prometheus:v3.15.0@sha256:efd719c99d83b060d9daefdcf00360461adf279f45ef5391f8d111892118753e
 # The platform-gincommon checkout to compare with (gincommon-parity); CI checks out GINCOMMON_REF.
 GINCOMMON_DIR ?= ../../platform-gincommon
 

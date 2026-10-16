@@ -17,7 +17,7 @@ from opentelemetry.sdk.trace import ReadableSpan, TracerProvider
 from opentelemetry.sdk.trace.export.in_memory_span_exporter import InMemorySpanExporter
 
 from fastapicommon.auth import require_authenticated_user
-from fastapicommon.bootstrap import create_platform_app
+from fastapicommon.bootstrap import FASTAPI_NATIVE_TELEMETRY_OFF, create_platform_app
 from fastapicommon.config import PlatformSettings
 from fastapicommon.grpc import ContextServerInterceptor
 from fastapicommon.logging import configure_logging
@@ -87,6 +87,41 @@ def _app() -> FastAPI:
         return {}
 
     return app
+
+
+needs_native_telemetry = pytest.mark.skipif(
+    not FASTAPI_NATIVE_TELEMETRY_OFF, reason="FastAPI before 0.143 has no native telemetry"
+)
+
+
+@needs_native_telemetry
+def test_fastapi_native_telemetry_is_off(spans: _Spans) -> None:
+    """Regression: FastAPI 0.143 instruments itself by default, so every request had a second
+    root server span (``GET /items/{item_id}``, scope ``fastapi``) beside the platform span."""
+    TestClient(_app()).get("/items/7")
+    (span,) = spans.finished()
+    assert span.name == "GET /items/:item_id"
+    assert span.instrumentation_scope is not None
+    assert span.instrumentation_scope.name == "platform-fastapicommon/http"
+
+
+@needs_native_telemetry
+def test_a_services_own_telemetry_setting_is_kept(spans: _Spans) -> None:
+    """``telemetry=`` passed to create_platform_app replaces the library's default."""
+    settings = PlatformSettings(
+        _env_file=None, app_name="orders-api", observability_domain="iam", environment="prod"
+    )
+    app = create_platform_app(settings=settings, telemetry={"tracing": True, "metrics": False})
+
+    @app.get("/items/{item_id}")
+    async def item(item_id: str) -> dict[str, str]:
+        return {"id": item_id}
+
+    TestClient(app).get("/items/7")
+    scopes = sorted(
+        s.instrumentation_scope.name for s in spans.finished() if s.instrumentation_scope
+    )
+    assert "fastapi" in scopes and "platform-fastapicommon/http" in scopes
 
 
 def _entries(capsys: pytest.CaptureFixture[str]) -> list[dict[str, Any]]:

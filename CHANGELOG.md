@@ -53,6 +53,10 @@ pre-1.0 caveat on what SemVer guarantees currently apply.
 #### Dependencies
 
 - Locked dependency upgrades for the `pip-audit` gate: `cryptography` 50.0.2 (PYSEC-2026-3552), `urllib3` 2.8.0 (PYSEC-2026-4175/4176/4177), `virtualenv` 21.14.5 (PYSEC-2026-4011–4014) and `pip` 26.2.1 (PYSEC-2026-3721).
+- **Every locked dependency upgraded to its latest release** (`uv lock --upgrade`, 64 packages), among
+  them FastAPI 0.143.3, Starlette 1.8.0, pydantic 2.14.1 / pydantic-settings 2.16.0, OpenTelemetry
+  1.45.1 / instrumentation 0.66b1, grpcio 1.84.0, uvicorn 0.54.0, ruff 0.17.1, black 26.10.1, mypy
+  2.4.0, twine 7.0.0. The declared floors are unchanged (the `lowest-deps` job still passes).
 - The example service image removes `pip` from its runtime stage. pip's vendored `urllib3`, `msgpack` and `setuptools` were what Trivy flagged, even with the base image's current pip, and nothing runs pip at runtime.
 
 ### Changed (breaking)
@@ -359,6 +363,18 @@ The asyncio counterpart of `ContextServerInterceptor`: server span, request cont
   serialise-then-parse of the 500 problem body. The caller field no longer uses structlog's private
   `_frames` API.
 
+#### FastAPI's native telemetry
+
+- **One server span per request again on FastAPI ≥ 0.143.** FastAPI 0.143 instruments itself
+  with OpenTelemetry by default, so every request had a second root server span (route in
+  FastAPI's `{param}` syntax, scope `fastapi`) beside the platform span, plus operation spans,
+  HTTP metrics outside the registry, and — once a service configures an OTel logger provider —
+  log records carrying exception messages. `create_platform_app` now passes
+  `telemetry={"tracing": False, "metrics": False, "logs": False, "operation_spans": False,
+  "auto_configure": False}`; a `telemetry=` from the service replaces it. New
+  `fastapicommon.bootstrap.FASTAPI_NATIVE_TELEMETRY_OFF` for apps built by hand (`{}` before
+  FastAPI 0.143).
+
 #### Registry
 
 - Re-vendored `src/fastapicommon/metrics/registry.json` from gincommon (it had drifted behind
@@ -394,6 +410,20 @@ The asyncio counterpart of `ContextServerInterceptor`: server span, request cont
   the locked dependency set with hashes and runs as numeric UID 10001. Its HEALTHCHECK now
   uses Python instead of `curl`, which is no longer installed.
 - Dependabot uses the `uv` ecosystem.
+
+#### CI and tooling versions
+
+- GitHub Actions: `astral-sh/setup-uv` v9.0.0 → v10.3.0 (its cache change affects only
+  `pull_request_target` / `workflow_run` / `release`, which these workflows don't use),
+  `actions/upload-artifact` v7.0.2, `actions/download-artifact` v8.0.2,
+  `github/codeql-action/upload-sarif` v4.38.3; every other action was already at its latest.
+- pre-commit hooks in line with the locked tools: ruff-pre-commit v0.17.1 (hook id `ruff-check`),
+  black 26.10.1, pre-commit-hooks v6.0.0 (they were ruff 0.4.10 / black 24.4.2, so the hook and
+  `make lint` checked different rules).
+- `promtool` image `prom/prometheus:v3.15.0` (digest-pinned; gincommon pins v3.5.0) — the vendored
+  rules and their unit tests pass on it. Local stack: Tempo 3.1.0 (checked against
+  `docker/tempo/tempo.yaml`: ready, OTLP ingest, trace query). uv 0.13.1, the build backend and
+  the Dockerfile base-image digests were already current.
 
 #### Metrics
 
