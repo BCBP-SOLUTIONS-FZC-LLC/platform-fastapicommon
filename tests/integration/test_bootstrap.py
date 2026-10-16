@@ -90,3 +90,20 @@ def test_create_platform_app_wires_otlp_exporter_without_raising() -> None:
     settings = PlatformSettings(_env_file=None, otlp_endpoint="localhost:4317", **IDENTITY)
     app = create_platform_app(settings=settings)
     assert app is not None
+
+
+def test_unclassified_exception_not_reraised_to_the_server() -> None:
+    # create_platform_app installs UnhandledErrorMiddleware: the default TestClient
+    # (raise_server_exceptions=True) would raise if the exception reached the server,
+    # which logs its message.
+    app = _build_app()
+
+    @app.get("/crash")
+    async def crash() -> dict[str, str]:
+        raise RuntimeError("pq: secret=hunter2")
+
+    resp = TestClient(app).get("/crash", headers={"x-request-id": "req-1"})
+    assert resp.status_code == 500
+    assert resp.headers["content-type"] == "application/problem+json"
+    assert resp.headers["x-request-id"] == "req-1"  # still inside ContextMiddleware
+    assert "hunter2" not in resp.text

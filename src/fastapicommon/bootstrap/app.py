@@ -6,7 +6,7 @@ from fastapi import FastAPI
 from opentelemetry.sdk.trace.export import SpanExporter
 
 from fastapicommon.config import PlatformSettings
-from fastapicommon.exceptions import register_exception_handlers
+from fastapicommon.exceptions import UnhandledErrorMiddleware, register_exception_handlers
 from fastapicommon.health import health_router
 from fastapicommon.logging import configure_logging
 from fastapicommon.metrics import PrometheusMiddleware, init_metrics_from_settings, metrics_router
@@ -52,6 +52,10 @@ def create_platform_app(
     if settings.enable_metrics:
         app.add_middleware(PrometheusMiddleware)
         app.include_router(metrics_router)
+    # Inside ContextMiddleware (request ids still bound), outside metrics (which record
+    # the 500 first): answers unclassified exceptions without re-raising them to the
+    # server, so their message is never logged.
+    app.add_middleware(UnhandledErrorMiddleware)
     app.add_middleware(ContextMiddleware)
 
     app.include_router(health_router)

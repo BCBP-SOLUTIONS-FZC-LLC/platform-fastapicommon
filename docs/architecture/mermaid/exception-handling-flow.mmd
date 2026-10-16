@@ -10,8 +10,8 @@ flowchart TD
     B -->|"StarletteHTTPException\n(e.g. 404 no matching route)"| G["http_exception_handler\nassert isinstance(exc, StarletteHTTPException)"]
     G --> H["problem_response(type_for_status(exc.status_code))\nunmatched route → ROUTE_NOT_FOUND; 5xx detail dropped"]
 
-    B -->|"any other Exception"| I["unhandled_exception_handler"]
-    I --> J["logging.getLogger('fastapicommon.exceptions')\n.exception(...)"]
+    B -->|"any other Exception\n(caught by UnhandledErrorMiddleware,\nnot re-raised to the server)"| I["unhandled_exception_handler"]
+    I --> J["ERROR 'unclassified error' (structlog)\nroute · operation · ids · error_type / error_chain · stack frames\nnever the exception message"]
     J --> K["problem_response(500 internal-error) — no detail"]
 
     subgraph reg["register_exception_handlers(app) — called once by create_platform_app"]
@@ -25,4 +25,4 @@ flowchart TD
     R1 -.->|"registers"| C
     R2 -.->|"registers"| E
     R3 -.->|"registers"| G
-    R4 -.->|"registers"| I
+    R5 -.->|"registers"| I

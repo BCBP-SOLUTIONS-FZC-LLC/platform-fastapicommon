@@ -17,6 +17,7 @@ from fastapicommon.exceptions.handlers import (
     problem_response,
     register_exception_handlers,
 )
+from fastapicommon.exceptions.middleware import UnhandledErrorMiddleware
 
 __all__ = [
     "BusinessException",
@@ -29,6 +30,7 @@ __all__ = [
     "RateLimitException",
     "ResourceNotFoundException",
     "ServiceUnavailableException",
+    "UnhandledErrorMiddleware",
     "UnauthorizedException",
     "UnsupportedOperationException",
     "ValidationException",

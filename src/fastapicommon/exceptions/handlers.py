@@ -1,7 +1,8 @@
 from __future__ import annotations
 
 import contextlib
-import logging
+import json
+import traceback
 from collections.abc import Iterable
 from dataclasses import dataclass
 
@@ -27,8 +28,8 @@ from fastapicommon.problem import (
 )
 from fastapicommon.problem.validation import validation_problem_parts
 
-_logger = logging.getLogger("fastapicommon.exceptions")
 _problem_log = get_logger("fastapicommon.problem")
+_unclassified_log = get_logger("fastapicommon.exceptions")
 
 DETAIL_ROUTE_NOT_FOUND = "No route matches the request path."
 DETAIL_METHOD_NOT_ALLOWED = "The route does not support the request method."
@@ -138,9 +139,102 @@ async def not_implemented_handler(request: Request, exc: Exception) -> JSONRespo
     return problem_response(request, TYPE_NOT_IMPLEMENTED)
 
 
+#: Bounds of the "unclassified error" entry (gincommon caps error_chain at 8 too).
+MAX_ERROR_CHAIN = 8
+MAX_STACK_FRAMES = 30
+
+
+def _type_name(exc: BaseException) -> str:
+    t = type(exc)
+    return t.__qualname__ if t.__module__ == "builtins" else f"{t.__module__}.{t.__qualname__}"
+
+
+def error_chain_types(exc: BaseException, limit: int = MAX_ERROR_CHAIN) -> list[str]:
+    """The exception types along ``__cause__`` / ``__context__`` and exception-group
+    members, outermost first, at most ``limit`` (gincommon's ``error_chain``). Type names
+    are code identifiers, never exception text."""
+    out: list[str] = []
+    seen: set[int] = set()
+    queue: list[BaseException] = [exc]
+    while queue and len(out) < limit:
+        e = queue.pop(0)
+        if id(e) in seen:
+            continue
+        seen.add(id(e))
+        out.append(_type_name(e))
+        if isinstance(e, BaseExceptionGroup):
+            queue.extend(e.exceptions)
+        nxt = e.__cause__ or (None if e.__suppress_context__ else e.__context__)
+        if nxt is not None:
+            queue.append(nxt)
+    return out
+
+
+def stack_frames(exc: BaseException, limit: int = MAX_STACK_FRAMES) -> list[str]:
+    """The traceback as ``file:line in function`` entries, innermost last, at most
+    ``limit`` (the innermost kept). No source lines and no exception message: frames are
+    code locations only."""
+    frames = traceback.extract_tb(exc.__traceback__)[-limit:]
+    return [f"{f.filename}:{f.lineno} in {f.name}" for f in frames]
+
+
+def _operation(request: Request) -> str:
+    endpoint = request.scope.get("endpoint")
+    if endpoint is None:
+        return ""
+    return f"{getattr(endpoint, '__module__', '')}.{getattr(endpoint, '__qualname__', '')}".lstrip(
+        "."
+    )
+
+
+def log_unclassified(
+    request: Request, exc: BaseException, *, status: int, error_code: str, trace_id: str
+) -> None:
+    """Emit the error-level ``unclassified error`` entry (gincommon's contract): where it
+    happened, the exception types and the stack frames — never the exception message."""
+    from fastapicommon.metrics.platform import http_route_label  # avoid an import cycle
+
+    context = get_request_context_or_none()
+    s = _settings(request)
+    chain = error_chain_types(exc)
+    fields: dict[str, object] = {
+        "classified": False,
+        "traceId": trace_id,
+        "trace_id": context.trace_id if context is not None else "",
+        "request_id": context.request_id if context is not None else "",
+        "method": request.method,
+        "route": http_route_label(request.scope),
+        "operation": _operation(request),
+        "status": status,
+        "errorCode": error_code,
+        "error_type": chain[0] if chain else "",
+        "error_chain": chain,
+        "stack": stack_frames(exc),
+    }
+    if s.service:
+        fields["service"] = s.service
+    with contextlib.suppress(Exception):  # a failing logger must not break the response
+        _unclassified_log.error("unclassified error", **fields)
+
+
 async def unhandled_exception_handler(request: Request, exc: Exception) -> JSONResponse:
-    _logger.exception("Unhandled exception while processing request", exc_info=exc)
-    return problem_response(request, TYPE_INTERNAL_ERROR)
+    """Any exception nothing classified: a generic 500 internal-error, and one error-level
+    ``unclassified error`` entry — the same contract as gincommon's (LLD OQ-24). It records
+    where the failure happened and the exception types and stack frames, **never the
+    exception message**, which may carry SQL, PII, tokens or secrets. An unclassified 500
+    is a programming defect: classify the failure (raise a ``PlatformException``) where it
+    happens. Install ``UnhandledErrorMiddleware`` (``create_platform_app`` does) so the
+    exception is not re-raised to the server, which would log its message."""
+    response = problem_response(request, TYPE_INTERNAL_ERROR)
+    body = json.loads(bytes(response.body))
+    log_unclassified(
+        request,
+        exc,
+        status=body["status"],
+        error_code=body["errorCode"],
+        trace_id=body.get("traceId", ""),
+    )
+    return response
 
 
 def register_exception_handlers(app: FastAPI, *, type_base: str = "", service: str = "") -> None:

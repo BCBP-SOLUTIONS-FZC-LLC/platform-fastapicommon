@@ -259,6 +259,7 @@ flowchart TD
 sequenceDiagram
     participant Client
     participant CM as ContextMiddleware
+    participant UE as UnhandledErrorMiddleware
     participant PM as PrometheusMiddleware
     participant TM as TimeoutMiddleware
     participant H as Route handler
@@ -317,8 +318,8 @@ flowchart TD
     B -->|"StarletteHTTPException\n(e.g. 404 no matching route)"| G["http_exception_handler\nassert isinstance(exc, StarletteHTTPException)"]
     G --> H["problem_response(type_for_status(exc.status_code))\nunmatched route → ROUTE_NOT_FOUND; 5xx detail dropped"]
 
-    B -->|"any other Exception"| I["unhandled_exception_handler"]
-    I --> J["logging.getLogger('fastapicommon.exceptions')\n.exception(...)"]
+    B -->|"any other Exception\n(caught by UnhandledErrorMiddleware,\nnot re-raised to the server)"| I["unhandled_exception_handler"]
+    I --> J["ERROR 'unclassified error' (structlog)\nroute · operation · ids · error_type / error_chain · stack frames\nnever the exception message"]
     J --> K["problem_response(500 internal-error) — no detail"]
 
     subgraph reg["register_exception_handlers(app) — called once by create_platform_app"]
@@ -332,14 +333,24 @@ flowchart TD
     R1 -.->|"registers"| C
     R2 -.->|"registers"| E
     R3 -.->|"registers"| G
-    R4 -.->|"registers"| I
+    R5 -.->|"registers"| I
 ```
 
-Note that `unhandled_exception_handler` logs via the stdlib `logging` module directly
-(`logging.getLogger("fastapicommon.exceptions")`), not `fastapicommon.logging.get_logger` —
-a deliberate choice to avoid the exceptions module depending on the logging module's
-structlog configuration state. The log line for unhandled exceptions is therefore plain
-stdlib logging, not structlog JSON, even though the rest of the application's logs are.
+An exception nothing classified is a programming defect. `unhandled_exception_handler` answers
+a generic 500 and logs one structlog ERROR entry, `unclassified error` (logger
+`fastapicommon.exceptions`), with `classified=false`, `traceId` / `trace_id` / `request_id`,
+`service`, `method`, `route`, `operation` (the endpoint's `module.qualname`), `status`,
+`errorCode`, `error_type` / `error_chain` (exception types along `__cause__` / `__context__` and
+exception-group members, at most 8) and `stack` (`file:line in function` frames, no source lines).
+It **never logs the exception message**, which may carry SQL, PII, tokens or secrets: the same
+contract as platform-gincommon's (its LLD OQ-24). Alert on it.
+
+Starlette's `ServerErrorMiddleware` always re-raises after calling the `Exception` handler, so
+the server would log the traceback *with* the message ("Exception in ASGI application").
+`UnhandledErrorMiddleware` (installed by `create_platform_app` just inside `ContextMiddleware`,
+outside `PrometheusMiddleware`, which records the 500 first) catches the exception and answers
+the problem itself without re-raising. If the response had already started it logs the same
+entry and leaves the response incomplete.
 
 ---
 
@@ -682,14 +693,15 @@ graph LR
 
 ## Execution model
 
-**HTTP** — `create_platform_app`'s add order is Timeout, Prometheus, Context; since the
-*last*-added `BaseHTTPMiddleware` is *outermost*, the real request-time nesting is:
+**HTTP** — `create_platform_app`'s add order is Timeout, Prometheus, UnhandledError, Context;
+since the *last*-added middleware is *outermost*, the real request-time nesting is:
 
 ```
-ContextMiddleware ──────────────────────────────────────── (4) echo headers, reset context
-  PrometheusMiddleware ──────────────────────────────────── (3) observe duration + status
-    TimeoutMiddleware ───────────────────────────────────── (2) asyncio.wait_for(...)
-      Route handler / FastAPI dependency resolution         (1) executes here
+ContextMiddleware ──────────────────────────────────────── (5) echo headers, reset context
+  UnhandledErrorMiddleware ─────────────────────────────── (4) unclassified exception → 500 problem, not re-raised
+    PrometheusMiddleware ────────────────────────────────── (3) observe duration + status (records the 500 first)
+      TimeoutMiddleware ─────────────────────────────────── (2) asyncio.wait_for(...)
+        Route handler / FastAPI dependency resolution       (1) executes here
 ```
 
 Steps run top-to-bottom before the handler, then bottom-to-top after it returns (or times
@@ -722,7 +734,7 @@ not provided by this library today — see [Platform contract](#platform-contrac
 | **RBAC** | `RequireRole`/`RequireAnyRole`/`RequireAllRoles` check fails | `ForbiddenException` → `403` `platform/forbidden` problem via the registered exception handler | Does not affect other routes or middleware |
 | **Missing/unbound context** | Code calls `get_request_context()` outside `ContextMiddleware` or `request_context_scope` (e.g. a detached background task) | Raises `LookupError` | Use `get_request_context_or_none()` or the individual `get_*` accessors, which return `None`/`()`/`""` instead |
 | **Request timeout** | Handler exceeds `request_timeout_seconds` | `503` `platform/service-unavailable` problem, `errorCode` `REQUEST_TIMEOUT` | Server continues serving other requests; see cooperative-cancellation caveat above |
-| **Unhandled exception** | Any exception not a `PlatformException`/`RequestValidationError`/`StarletteHTTPException` | Logged via stdlib `logging`, then a `500` `platform/internal-error` problem without `detail` | Does not crash the process |
+| **Unhandled exception** | Any exception not a `PlatformException`/`RequestValidationError`/`StarletteHTTPException` | `UnhandledErrorMiddleware` stops it (never re-raised to the server); one ERROR `unclassified error` entry with types and frames, never the message; a `500` `platform/internal-error` problem without `detail` | Does not crash the process |
 
 No external dependency — OTLP collector, Prometheus scrape, or log sink — can cause request
 handling to fail; all are either in-process (metric counters), async (OTLP batched
