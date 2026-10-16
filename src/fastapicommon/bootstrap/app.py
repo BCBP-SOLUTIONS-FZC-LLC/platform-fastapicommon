@@ -55,7 +55,9 @@ def create_platform_app(
     app.add_middleware(ContextMiddleware)
 
     app.include_router(health_router)
-    register_exception_handlers(app)
+    register_exception_handlers(
+        app, type_base=settings.problem_type_base, service=settings.app_name
+    )
 
     if settings.enable_tracing:
         setup_tracing(app, service_name=settings.app_name, exporter=_build_span_exporter(settings))

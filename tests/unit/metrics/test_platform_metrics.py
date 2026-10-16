@@ -343,7 +343,7 @@ def test_platform_http_metrics(monkeypatch: pytest.MonkeyPatch) -> None:
     assert client.get("/items/1").status_code == 200
     assert client.get("/stream").text == "abcde"
     assert client.get("/crash").status_code == 500
-    assert client.get("/slow").status_code == 504
+    assert client.get("/slow").status_code == 503
 
     ok = {"method": "GET", "status_class": "2xx", "error_class": "success"}
     assert _value(registry, "platform_http_requests_total", route="/items/:item_id", **ok) == 1

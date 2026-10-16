@@ -28,10 +28,15 @@ def test_fast_request_completes_normally() -> None:
     assert response.json() == {"status": "ok"}
 
 
-def test_slow_request_returns_504() -> None:
+def test_slow_request_returns_503_problem() -> None:
+    # Same response as gincommon's TimeoutMiddleware (RFC 9457 parity; it was a 504).
     client = TestClient(_build_app(timeout_seconds=0.05))
     response = client.get("/slow")
-    assert response.status_code == 504
+    assert response.status_code == 503
+    assert response.headers["content-type"] == "application/problem+json"
     body = response.json()
-    assert body["status"] == 504
-    assert set(body) == {"error", "status", "trace_id", "request_id"}
+    assert body["type"] == "https://errors.company.com/platform/service-unavailable"
+    assert body["status"] == 503
+    assert body["errorCode"] == "REQUEST_TIMEOUT"
+    assert body["detail"] == "The request timed out."
+    assert body["instance"] == "/slow" and body["traceId"]

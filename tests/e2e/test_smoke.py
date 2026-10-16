@@ -131,7 +131,9 @@ def test_delete_requires_role(base_url: str) -> None:
     assert response.status_code == 403
     body = response.json()
     assert body["status"] == 403
-    assert set(body) == {"error", "status", "trace_id", "request_id"}
+    assert response.headers["content-type"] == "application/problem+json"
+    assert body["type"] == "https://errors.company.com/platform/forbidden"
+    assert body["errorCode"] == "FORBIDDEN"
 
 
 def test_delete_with_role_succeeds(base_url: str) -> None:
