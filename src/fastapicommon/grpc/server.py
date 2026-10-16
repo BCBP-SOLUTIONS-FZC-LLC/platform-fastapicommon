@@ -26,6 +26,7 @@ from fastapicommon.context import (
 from fastapicommon.exceptions.handlers import error_chain_types, stack_frames
 from fastapicommon.logging import get_logger
 from fastapicommon.metrics.platform import (
+    TRANSPORT_GRPC,
     grpc_code_label,
     grpc_method_label,
     init_metrics_from_settings,
@@ -51,6 +52,9 @@ def _explicit_code(context: Any) -> Any:
 
 
 def _log_unclassified_grpc(method: str, exc: BaseException, service: str) -> None:
+    platform = platform_metrics()
+    if platform is not None:
+        platform.record_unclassified_error(TRANSPORT_GRPC)
     context = get_request_context_or_none()
     fields: dict[str, object] = {
         "classified": False,

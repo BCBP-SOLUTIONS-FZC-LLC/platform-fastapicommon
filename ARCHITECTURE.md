@@ -343,7 +343,9 @@ a generic 500 and logs one structlog ERROR entry, `unclassified error` (logger
 `errorCode`, `error_type` / `error_chain` (exception types along `__cause__` / `__context__` and
 exception-group members, at most 8) and `stack` (`file:line in function` frames, no source lines).
 It **never logs the exception message**, which may carry SQL, PII, tokens or secrets: the same
-contract as platform-gincommon's (its LLD OQ-24). Alert on it.
+contract as platform-gincommon's (its LLD OQ-24). Each one also increments
+`platform_unclassified_errors_total{transport="http"}` (gRPC: `transport="grpc"`), the metric to alert
+on (gincommon LLD OQ-25); the log event is kept for diagnostics.
 
 Starlette's `ServerErrorMiddleware` always re-raises after calling the `Exception` handler, so
 the server would log the traceback *with* the message ("Exception in ASGI application").
@@ -486,7 +488,8 @@ in short: `platform_build_info{version}`; `platform_http_requests_total`,
 `platform_http_request_timeouts_total`; and `platform_grpc_server_handled_total`,
 `platform_grpc_server_handling_seconds`, `platform_grpc_server_request_size_bytes`,
 `platform_grpc_server_response_size_bytes`, `platform_grpc_server_inflight_requests`,
-`platform_grpc_rate_limited_requests_total`, `platform_grpc_panics_total`.
+`platform_grpc_rate_limited_requests_total`, `platform_grpc_panics_total`, and the cross-transport
+`platform_unclassified_errors_total{transport}` (both series initialised to 0).
 
 The platform `route` label is resolved *before* the handler runs by matching the request
 against the app's routes (recursing into `Mount`s), like Gin's `FullPath()`, so the in-flight

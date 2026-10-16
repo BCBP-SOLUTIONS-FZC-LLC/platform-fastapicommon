@@ -70,6 +70,7 @@ EXPECTED_PLATFORM_METRICS = {
     "platform_grpc_server_inflight_requests",
     "platform_grpc_rate_limited_requests_total",
     "platform_grpc_panics_total",
+    "platform_unclassified_errors_total",
 }
 
 

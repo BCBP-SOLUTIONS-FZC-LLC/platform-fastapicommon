@@ -427,7 +427,8 @@ Const labels on every `platform_*` series: `domain`, `service`, `environment`.
 | `platform_grpc_server_request_size_bytes` / `_response_size_bytes` | histogram (`payload_size` buckets) | same | same (protobuf `ByteSize()`, 0 for non-protobuf messages) |
 | `platform_grpc_server_inflight_requests` | gauge | `grpc_method` | same |
 | `platform_grpc_rate_limited_requests_total` | counter | `grpc_method` | same — RPCs ending `ResourceExhausted` |
-| `platform_grpc_panics_total` | counter | `grpc_method` | same — handler exceptions without an explicit status (client sees `UNKNOWN`) |
+| `platform_grpc_panics_total` | counter | `grpc_method` | same — handler exceptions without an explicit status (client sees `INTERNAL "internal server error"`) |
+| `platform_unclassified_errors_total` | counter | `transport` (`http` \| `grpc`) | every exception nothing classified (`UnhandledErrorMiddleware` / the exception handler, and the gRPC interceptor); both series start at 0. Alert on it (gincommon's `PlatformUnclassifiedErrors`); diagnose with the `unclassified error` log event |
 
 Label values, all bounded:
 
