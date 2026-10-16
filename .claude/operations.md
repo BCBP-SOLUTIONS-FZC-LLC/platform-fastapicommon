@@ -20,12 +20,12 @@ make run          # example service on :8080: APP_ENV=dev, OBSERVABILITY_DOMAIN=
 | Suite | Where | Covers |
 |---|---|---|
 | Unit | `tests/unit/<subpackage>/` (388 tests, no Docker) | every module; real threaded and `grpc.aio` servers on loopback; Zap output parsed from stderr; isolated `CollectorRegistry` / `InMemorySpanExporter` |
-| Integration | `tests/integration/` (29, in-process) | `create_platform_app()` end to end: wiring and lifespans, signals for success / 404 / 500 / aborted / cancelled, 401 problems with audit entries, mounted routes, the library's own scrape against the registry |
+| Integration | `tests/integration/` (31, in-process) | `create_platform_app()` end to end: wiring and lifespans, signals for success / 404 / 500 / aborted / cancelled, 401 problems with audit entries, mounted routes, the library's own scrape against the registry |
 | E2E | `tests/e2e/` (6, Docker) | the built image over HTTP |
 | Smoke | `smoke-tests.sh` (CI `Smoke tests`, `make smoke-test`) | image ≤ 170 MB uncompressed, startup failure on invalid identity, `/health`, `platform_*` metrics, RFC 9457 not-found, non-root, no pip |
 | Compatibility | CI | Python 3.11 / 3.13 / 3.14 matrix; `lowest-deps.sh` (every runtime dependency at its floor: FastAPI 0.115.10, Starlette 0.46); platform-interop-tests (`error_shape`: a Go and a Python 401 are the same problem) |
 
-**Status (2026-10-16):** 423 tests; coverage **100%** line and branch over unit + integration (gate ≥ 90%); no `pragma: no cover` in `src/`. Running `lowest-deps.sh` locally replaces `.venv` — run it in a copy of the repository.
+**Status (2026-10-17):** 425 tests (all dependencies at their latest versions); coverage **100%** line and branch over unit + integration (gate ≥ 90%); no `pragma: no cover` in `src/`. Running `lowest-deps.sh` locally replaces `.venv` — run it in a copy of the repository.
 
 **Canonical tests (do not break):** LLD §14.5 (T-1 … T-16) and README § Canonical tests — unclassified errors on HTTP / threaded / aio, aborted and cancelled requests, timeout cancellation, the tracing provider contract, context isolation, identity validation on both transports, trusted-proxy client IP, and `test_vendored_registry_is_identical_to_gincommon`.
 

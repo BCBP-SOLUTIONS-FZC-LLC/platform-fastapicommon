@@ -52,7 +52,8 @@ Fourteen subpackages and one CLI. Source of truth: the docstrings (`make docs-se
 
 | Group | Symbols | Purpose |
 |---|---|---|
-| App factory | `create_platform_app(app_name=None, settings=None, **fastapi_kwargs)` | Initialises metrics, logging and tracing; installs the stack, health router and exception handlers; your `lifespan`, `on_startup` / `on_shutdown` and `@app.on_event` handlers still run |
+| App factory | `create_platform_app(app_name=None, settings=None, **fastapi_kwargs)` | Initialises metrics, logging and tracing; installs the stack, health router and exception handlers; your `lifespan`, `on_startup` / `on_shutdown` and `@app.on_event` handlers still run; FastAPI ≥ 0.143's own OpenTelemetry is turned off (a `telemetry=` you pass wins) |
+| Hand-built apps | `FASTAPI_NATIVE_TELEMETRY_OFF` | `FastAPI(**FASTAPI_NATIVE_TELEMETRY_OFF)` before adding `TracingMiddleware` yourself, or each request gets a second server span from FastAPI |
 | Configuration | `PlatformSettings` (`app_name`, `environment`, `observability_domain`, `build_version`, `log_level`, `request_timeout_seconds`, `trusted_proxies`, `enable_tracing`, `enable_metrics`, `otlp_endpoint`, `problem_type_base`) | Read from the environment / `.env`; a missing or invalid identity raises `ValueError` at startup |
 
 ### `fastapicommon.context` / `fastapicommon.auth` / `fastapicommon.rbac` — identity
@@ -196,10 +197,10 @@ Computed from the imports; the full graph is in [ARCHITECTURE.md](ARCHITECTURE.m
 
 | Concern | Technology | Notes |
 |---|---|---|
-| **HTTP framework** | FastAPI `≥ 0.115.10` / Starlette `≥ 0.46` (tested 0.140 / 1.3) | Pure-ASGI middleware; `TRUSTED_PROXIES` for services behind a proxy |
-| **gRPC** | `grpcio ≥ 1.62` (`grpc` extra; tested 1.83) | Threaded and `grpc.aio` interceptors of the library's own (no OpenTelemetry gRPC instrumentation on the server) |
+| **HTTP framework** | FastAPI `≥ 0.115.10` / Starlette `≥ 0.46` (tested 0.143 / 1.8) | Pure-ASGI middleware; `TRUSTED_PROXIES` for services behind a proxy; FastAPI's own OpenTelemetry (≥ 0.143) turned off |
+| **gRPC** | `grpcio ≥ 1.62` (`grpc` extra; tested 1.84) | Threaded and `grpc.aio` interceptors of the library's own (no OpenTelemetry gRPC instrumentation on the server) |
 | **Metrics** | `prometheus-client ≥ 0.20` | `REGISTRY` unless an isolated registry is passed; `_created` timestamp samples dropped (Go emits none) |
-| **Tracing** | OpenTelemetry `≥ 1.28` (tested 1.44), OTLP/gRPC exporter | One delegating global provider (inner SDK provider swapped); in-process fallback when the exporter cannot be created |
+| **Tracing** | OpenTelemetry `≥ 1.28` (tested 1.45), OTLP/gRPC exporter | One delegating global provider (inner SDK provider swapped); in-process fallback when the exporter cannot be created |
 | **Logging** | `structlog ≥ 24.1` through the stdlib root logger | Zap's JSON layout on stderr, console layout in dev / local; sampling off unless `LOG_SAMPLING=true` |
 | **Registry** | Vendored `registry.json` | 115 entries: 6 `approved`, 52 `proposed`, 57 `removed` (legacy names kept so the lint can name their replacement) |
 
@@ -566,7 +567,7 @@ make docker-up
 | Container | Image | Host port(s) | Purpose |
 |---|---|---|---|
 | `otel-collector` | `otel/opentelemetry-collector-contrib` | `4317`, `4318` | OTLP gRPC/HTTP receiver → Tempo |
-| `tempo` | `grafana/tempo:2.7.2` | `3200` | Trace store |
+| `tempo` | `grafana/tempo:3.1.0` | `3200` | Trace store |
 | `prometheus` | `prom/prometheus` | `9090` | Scrapes `host.docker.internal:8080/metrics`; loads the reference rules |
 | `loki` | `grafana/loki` | `3100` | Log store |
 | `promtail` | `grafana/promtail` | — | Ships `logs/app.log` (`LOG_FILE`) into Loki |
@@ -628,7 +629,7 @@ Full list with the invariants each pins: [LLD §14.5](docs/lld/platform-fastapic
 
 ### Coverage
 
-`make cover-check` (CI: `coverage-gate.sh`, `COVERAGE_THRESHOLD`) fails below **90%** (`pyproject.toml` `fail_under`) over unit + integration; the current total is **100%** (lines and branches) across 423 tests (388 unit, 29 integration, 6 e2e), with no `pragma: no cover` in `src/`. Keep new code at 100%: test a reachable path, restructure an unreachable one away. `tests/e2e` runs against the built image (`--no-cov`: it measures a container, not this process). The same suites also run on Python 3.11 / 3.13 / 3.14 and with every runtime dependency at its floor (`lowest-deps.sh`).
+`make cover-check` (CI: `coverage-gate.sh`, `COVERAGE_THRESHOLD`) fails below **90%** (`pyproject.toml` `fail_under`) over unit + integration; the current total is **100%** (lines and branches) across 425 tests (388 unit, 31 integration, 6 e2e), with no `pragma: no cover` in `src/`. Keep new code at 100%: test a reachable path, restructure an unreachable one away. `tests/e2e` runs against the built image (`--no-cov`: it measures a container, not this process). The same suites also run on Python 3.11 / 3.13 / 3.14 and with every runtime dependency at its floor (`lowest-deps.sh`).
 
 ---
 

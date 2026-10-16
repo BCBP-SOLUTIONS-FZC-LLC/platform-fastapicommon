@@ -6,7 +6,7 @@ This file provides guidance to Claude Code when working with **platform-fastapic
 
 `platform-fastapicommon` is the **Python package `fastapicommon`** (`pyproject.toml`: version `0.2.0`, `requires-python >=3.11`, CI on 3.11 / 3.12 / 3.13 / 3.14 plus every runtime dependency at its floor; runtime dependencies `fastapi>=0.115.10`, `starlette>=0.46`, `pydantic-settings`, `structlog>=24.1`, `prometheus-client>=0.20`, `httpx`, OpenTelemetry `>=1.28`; extras `grpc` (`grpcio>=1.62`) and `examples` (plain `uvicorn`); managed with **uv**, `uv.lock` committed). It is published to PyPI as `platform-fastapicommon` (Apache-2.0; the repository is private) and is **never deployed**. The example service image (`examples/fastapi_service`) exists only as a CI smoke target. It tracks Go **platform-gincommon v2.0.0**: same `platform_*` metrics (registry vendored byte for byte), span shape, Zap log layout and RFC 9457 error bodies. Consumers: `platform-interop-tests`' `python-probe` (CI `interop` job); production services adopt it from `0.3.0`.
 
-**Status:** `0.2.0` released 2026-07-27. All current work is `[Unreleased]` → **`0.3.0`** (breaking, allowed as a MINOR pre-1.0 — `VERSIONING.md` § Recorded exceptions) on branch `feat/observability-standard`, PR #25. The version bump to `0.3.0` has not been made yet. Open design questions: LLD §16 (OQ-1, OQ-5 … OQ-19).
+**Status:** `0.2.0` released 2026-07-27. All current work is `[Unreleased]` → **`0.3.0`** (breaking, allowed as a MINOR pre-1.0 — `VERSIONING.md` § Recorded exceptions) on `main` (PR #25 merged 2026-10-16, `ba1f90f`); dependency upgrades follow in their own PRs. The version bump to `0.3.0` has not been made yet. Open design questions: LLD §16 (OQ-1, OQ-5 … OQ-19).
 
 **Key responsibilities (the library is the sole implementation of):**
 - **The request pipeline** — `create_platform_app()` installs, outermost first: `TracingMiddleware → ContextMiddleware → LoggingMiddleware → UnhandledErrorMiddleware → PrometheusMiddleware → TimeoutMiddleware → routing`, plus `/health`, `/live`, `/ready`, `/metrics` and the RFC 9457 exception handlers. All middleware is **pure ASGI**. Auth and roles are **per-route dependencies** (`require_authenticated_user`, `RequireRole` …), not middleware.
@@ -48,7 +48,7 @@ uv run pytest tests/integration/test_observability_signals.py::test_cancelled_re
 
 If the shell has another project's venv active, uv warns `VIRTUAL_ENV=… does not match the project environment`; prefix with `env -u VIRTUAL_ENV`.
 
-**Coverage note:** line + branch coverage of `src/fastapicommon` over unit + integration. Gate **≥ 90%** (`[tool.coverage.report] fail_under`, `.github/scripts/coverage-gate.sh`). Current: **100%** line and branch, **423 tests** (388 unit, 29 integration, 6 e2e), no `pragma: no cover` in `src/`. Keep it there: test a reachable path; restructure an unreachable branch away rather than excluding it.
+**Coverage note:** line + branch coverage of `src/fastapicommon` over unit + integration. Gate **≥ 90%** (`[tool.coverage.report] fail_under`, `.github/scripts/coverage-gate.sh`). Current: **100%** line and branch, **425 tests** (388 unit, 31 integration, 6 e2e), no `pragma: no cover` in `src/`. Keep it there: test a reachable path; restructure an unreachable branch away rather than excluding it.
 
 ## Architecture
 
@@ -62,6 +62,7 @@ A framework-free core (`context`, `config`, `problem`, `health`, `_scope`) under
 - **Unverified identity is never logged as verified.** `tenant_id` / `user_id` in log entries come only from the validated `RequestContext`; client values on anonymous or rejected requests are `claimed_*`.
 - **Pure ASGI only.** Never use Starlette `BaseHTTPMiddleware` — it ends a failed stream as a clean 200 and unbinds the context before the body is sent.
 - **Aborted and cancelled requests are never panics.** A failure after the response started, or a cancellation, is `aborted` (499 or the status sent, `client_error`), decided once in `_scope.request_outcome` and shared by tracing, logging and metrics.
+- **One server span per request.** FastAPI ≥ 0.143 instruments itself; `create_platform_app` turns it off (`FASTAPI_NATIVE_TELEMETRY_OFF`). Any new framework-level telemetry must be switched off the same way — the signals are this library's.
 - **Never replace a tracer provider the service installed itself**, and never shut the global provider down on an app's shutdown (`flush_tracing`, not `shutdown_tracing`).
 - **Required check names:** `Validate / Test / test` and `Validate / Quality / quality` (reusable workflows skip their *inner* job on docs-only changes so the checks still report). Don't rename jobs.
 - **CHANGELOG entry required** for any change to `src/`, `pyproject.toml`, `uv.lock`, `build-constraints.txt` or the `Dockerfile` (`changelog-check.yml`), under `[Unreleased]` in its Keep-a-Changelog category (Security, Changed (breaking), Added, Fixed, Changed, Removed (breaking)).
