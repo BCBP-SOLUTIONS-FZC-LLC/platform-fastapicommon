@@ -970,7 +970,7 @@ Two-stage `Dockerfile`, both bases digest-pinned (`ghcr.io/astral-sh/uv:0.13.1`,
 
 ### Versioning
 
-SemVer over each subpackage's `__all__` ([VERSIONING.md](VERSIONING.md)); while `0.y.z`, a MINOR may break. A release needs `pyproject.toml`'s version equal to the tag (`release_guard.py`), a dated `## [X.Y.Z]` CHANGELOG section, and a tag reachable from `origin/main`; `api-compat` fails a release that may not break when the public API breaks. The `[Unreleased]` breaking changes ship as **`0.3.0`**.
+SemVer over each subpackage's `__all__` ([VERSIONING.md](VERSIONING.md)); while `0.y.z`, a MINOR may break. A release needs `pyproject.toml`'s version equal to the tag (`release_guard.py`), a dated `## [X.Y.Z]` CHANGELOG section, and a tag reachable from `origin/main`; `api-compat` fails a release that may not break when the public API breaks. The platform-gincommon `v2.0.0` alignment shipped as **`0.3.0`** (breaking, as a pre-1.0 MINOR).
 
 ---
 
@@ -1072,7 +1072,7 @@ STRIDE analysis of `platform-fastapicommon` as embedded in a consuming service. 
 
 ## Session-specific decisions
 
-Judgment calls made while aligning with platform-gincommon `v2.0.0` and in the four production-readiness reviews (details: CHANGELOG `[Unreleased]`, LLD appendix):
+Judgment calls made while aligning with platform-gincommon `v2.0.0` and in the four production-readiness reviews (details: CHANGELOG `[0.3.0]`, LLD appendix):
 
 1. **Go is the source of truth.** The registry, reference rules, problem-type registry and the log and trace contracts are gincommon's; the registry and rules are vendored byte for byte and parity-checked in CI rather than re-specified here.
 2. **Zap's log contract, not structlog's defaults.** Logs use gincommon's keys (`msg`, `level`, `ts`, `caller`, `stacktrace`) on stderr so Go and Python services share Loki queries; `dev` / `local` use Zap's console layout (ADR-001 amended). Breaking: `event` became `msg`.

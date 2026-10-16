@@ -7,8 +7,8 @@
 | Document type | Low-Level Design (LLD) |
 | Component | `platform-fastapicommon` (shared FastAPI HTTP + gRPC transport and observability library; the Python port of `platform-gincommon`) |
 | Python package | `platform-fastapicommon` (import name `fastapicommon`), `requires-python >= 3.11`; CI tests 3.11, 3.12, 3.13 and 3.14, plus every runtime dependency at its floor |
-| Status | `0.2.0` released 2026-07-27. `[Unreleased]` (target **`0.3.0`**, breaking) on `main` (PR #25 merged 2026-10-16, `ba1f90f`): logs, metrics and traces aligned with platform-gincommon `v2.0.0`; CI/CD port; four production-readiness review rounds; OQ-2 … OQ-4 resolved; 100% line and branch coverage; repository docs aligned with platform-gincommon's |
-| Previous release | `0.1.1` (2026-07-26) |
+| Status | **`0.3.0` released 2026-10-17** (breaking; PR #25, #35): logs, metrics and traces aligned with platform-gincommon `v2.0.0`; CI/CD port; four production-readiness review rounds; OQ-2 … OQ-4 resolved; 100% line and branch coverage; repository docs aligned with platform-gincommon's |
+| Previous release | `0.2.0` (2026-07-27) |
 | Governing standard | Enterprise Platform Observability Standard ([`docs/observability/README.md`](../observability/README.md)); the registry is gincommon's, vendored byte for byte |
 | Reference design | [`platform-gincommon` LLD](../../../../platform-gincommon/docs/lld/platform-gincommon-lld.md) — this library implements the same contracts in Python; where they differ, §16 records why |
 | Sibling designs | `platform-gincommon` (Go original, registry owner), `platform-pgcommon-py` (Python DB library: same RFC 9457 trace-id rules), `platform-eventcommon` (Python messaging), `platform-interop-tests` (cross-language checks) |
@@ -19,6 +19,7 @@
 
 | Rev | Date | Change |
 |---|---|---|
+| 1.4 | 2026-10-17 | **`0.3.0` released.** Version bumped, CHANGELOG `[0.3.0]` dated, OQ-14 resolved; status and supported-release tables updated. |
 | 1.3 | 2026-10-17 | **Dependencies to latest.** Every locked package upgraded (FastAPI 0.143.3, Starlette 1.8.0, OpenTelemetry 1.45.1, grpcio 1.84.0, ruff 0.17.1, black 26.10.1, …), GitHub Actions (`setup-uv` v10.3.0, `upload-artifact` v7.0.2, `download-artifact` v8.0.2, `codeql-action` v4.38.3), pre-commit hooks, promtool image v3.15.0, local Tempo 3.1.0. FastAPI 0.143's native OpenTelemetry duplicated the server span: `create_platform_app` turns it off (`FASTAPI_NATIVE_TELEMETRY_OFF`, B-2). §3.1, §5.3, §5.4.1, §14.5 (T-17) updated. |
 | 1.2 | 2026-10-16 | **Tests and documentation.** 423 tests (388 unit, 29 integration, 6 e2e), **100%** line and branch coverage: `TracingMiddleware` unit tests (client address without `ContextMiddleware`, span status per response class, an escaped exception as a `panic` span), non-IP and IPv6 proxy peers, a handler failing while cancelled after a timeout, `grpc.aio` bidirectional streams / unknown methods / `settings`, a context that cannot abort. The dead `PlatformMetrics.observe_http_response_size` path is removed; the `X-Forwarded-For` walk has no unreachable branch (same behaviour). README, ARCHITECTURE, CHANGELOG, CONTRIBUTING, SECURITY and VERSIONING follow platform-gincommon's structure; `.claude/` added. §1, §3, §5.4.2, §14, Appendix updated. |
 | 1.1 | 2026-10-16 | **OQ-2 / OQ-3 / OQ-4 resolved.** A repeated `x-user-id` / `x-tenant-id` is ambiguous and roles are capped at 4096 bytes / 64 roles, on HTTP and gRPC, with gincommon's 401 details (`resolve_identity`, `RequestContext.identity_rejection`). `client_ip` believes forwarding headers only from `trusted_proxies` (Gin `SetTrustedProxies`; default: the socket peer). §4.1, §4.2, §5.4.2, §8.3, §10, §12 updated. |
@@ -28,7 +29,7 @@ Library history this LLD covers (CHANGELOG):
 
 | Version | Date | Summary |
 |---|---|---|
-| `[Unreleased]` → `0.3.0` | — | gincommon `v2.0.0` alignment: Zap log contract, library-owned spans, `OTEL_*` configuration, vendored registry + `metricslint` port, `platform_unclassified_errors_total`, `grpc.aio` interceptor, pure-ASGI middleware, CI/CD port, validated identity and correlation ids on gRPC and HTTP |
+| `0.3.0` | 2026-10-17 | gincommon `v2.0.0` alignment: Zap log contract, library-owned spans, `OTEL_*` configuration, vendored registry + `metricslint` port, `platform_unclassified_errors_total`, `grpc.aio` interceptor, pure-ASGI middleware, CI/CD port, validated identity and correlation ids on gRPC and HTTP |
 | (#20–#24, on `main`) | 2026-10-16 | Enterprise Platform Observability Standard (`platform_*` only), RFC 9457 Problem Details, unclassified exceptions logged as types only, gRPC exception sanitizing |
 | `0.2.0` | 2026-07-27 | — (see CHANGELOG) |
 | `0.1.1` | 2026-07-26 | HTTP wire surface in byte-for-byte parity with gincommon |
@@ -1184,7 +1185,7 @@ Two-stage `Dockerfile`, both bases digest-pinned (`ghcr.io/astral-sh/uv:0.13.1`,
 | OQ-11 | **gRPC streaming RPCs** get exception sanitizing only — no context, span or metrics (handlers bind context with `request_context_scope`) | Library maintainers | Deferred |
 | OQ-12 | **No gRPC auth / authz interceptors** (gincommon `RequireAuth`, `RequirePermission`, health exemption); handlers check identity themselves | Library maintainers | Open |
 | OQ-13 | **Example image budget 170 MB** (159 MB measured in CI) instead of gincommon's 150 MB, which budgets a Go binary; reaching 150 MB would mean deleting the bytecode (slower non-root startup) | Platform team | Decided 2026-10-16 (PR #25) — confirm |
-| OQ-14 | **Release `0.3.0`.** `[Unreleased]` holds breaking changes; `pyproject.toml` is still `0.2.0` | Library maintainers | Open — before tagging |
+| OQ-14 | **Release `0.3.0`.** `[Unreleased]` held breaking changes; `pyproject.toml` was still `0.2.0` | Library maintainers | **Resolved** 2026-10-17 — `v0.3.0` tagged and released |
 | OQ-15 | **Default export to `localhost:4317`** (TLS outside dev/local), as in gincommon; a service without a collector logs exporter retries until it sets the endpoint or `OTEL_TRACES_EXPORTER=none` | Service owners | Accepted (CHANGELOG rollout note) |
 | OQ-16 | **`record_span_error` records the exception type only**, unlike Go's `span.RecordError` (message + stack) | Platform team | **Resolved** 2026-10-16 — deliberate; consistent with OBS-8 |
 | OQ-17 | **HTTP timeout is cooperative.** It cancels the handler task; a sync handler running in a worker thread keeps running after the 503, and a response that has started is not cut off | Library maintainers | Accepted (ARCHITECTURE.md caveat) |

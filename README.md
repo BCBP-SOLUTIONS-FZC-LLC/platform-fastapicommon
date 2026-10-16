@@ -220,8 +220,8 @@ Computed from the imports; the full graph is in [ARCHITECTURE.md](ARCHITECTURE.m
 ### 1. Prerequisites
 
 ```bash
-pip install "platform-fastapicommon==0.2.0"          # or [grpc] for the gRPC interceptors
-# uv: uv add "platform-fastapicommon[grpc]==0.2.0"
+pip install "platform-fastapicommon==0.3.0"          # or [grpc] for the gRPC interceptors
+# uv: uv add "platform-fastapicommon[grpc]==0.3.0"
 ```
 
 Python 3.11+. Pin an exact version — never unpinned in production, especially while `0.y.z` ([VERSIONING.md](VERSIONING.md#consume-a-release)). The PyPI distribution name is `platform-fastapicommon`; the import name is `fastapicommon` (`fastapicommon` alone was rejected by PyPI as too similar to an unrelated package). Requests must arrive through the trusted API gateway, which authenticates the caller and injects `x-user-id` / `x-tenant-id` / `x-tenant-roles`; the service must not be reachable around the gateway.
@@ -440,7 +440,7 @@ The library implements no rate limiter — throttling belongs to the gateway / m
 
 ### 10. Upgrading to 0.3.0
 
-`0.3.0` (CHANGELOG `[Unreleased]`) aligns with platform-gincommon `v2.0.0` and is breaking. Before upgrading a service:
+`0.3.0` (CHANGELOG `[0.3.0]`) aligns with platform-gincommon `v2.0.0` and is breaking. Before upgrading a service:
 
 - [ ] **Set the observability identity.** `OBSERVABILITY_DOMAIN` (a registry domain such as `iam`) and `APP_ENV` (`local|dev|test|staging|prod`; `PlatformSettings.environment` no longer defaults to `development`).
 - [ ] **Point traces at a collector.** The default endpoint is now `localhost:4317` (TLS outside dev/local, 10% sampling): set `OTEL_EXPORTER_OTLP_ENDPOINT`, or `OTEL_TRACES_EXPORTER=none`.
@@ -451,7 +451,7 @@ The library implements no rate limiter — throttling belongs to the gateway / m
 - [ ] **Use `AsyncContextServerInterceptor`** on `grpc.aio` servers.
 - [ ] **Update dashboards and alerts** to the `platform_*` names (`fastapicommon-metricslint refs dashboards/ rules/`); HTTP latency now includes the body, cancelled requests count as 499 / `client_error`, and span `exception.type` is qualified (`module.Class`).
 
-Full list: CHANGELOG `[Unreleased]`; concept mapping from Go: [docs/MigrationGuide.md](docs/MigrationGuide.md).
+Full list: CHANGELOG `[0.3.0]`; concept mapping from Go: [docs/MigrationGuide.md](docs/MigrationGuide.md).
 
 ---
 
@@ -721,8 +721,8 @@ SemVer over each subpackage's `__all__` ([VERSIONING.md](VERSIONING.md)); while 
 
 | Version | Status | `pip install` | Notes |
 |---|---|---|---|
-| **0.3.0** | Next (`[Unreleased]`) | — | platform-gincommon `v2.0.0` alignment; breaking — follow [Upgrading to 0.3.0](#10-upgrading-to-030) |
-| **v0.2.0** | Current | `platform-fastapicommon==0.2.0` | Predates release signing and `SHA256SUMS` |
+| **v0.3.0** | Current (2026-10-17) | `platform-fastapicommon==0.3.0` | platform-gincommon `v2.0.0` alignment; breaking — follow [Upgrading to 0.3.0](#10-upgrading-to-030). First signed release (`SHA256SUMS`, Cosign) |
+| v0.2.0 | Superseded | `==0.2.0` | Predates release signing and `SHA256SUMS` |
 | v0.1.0 – v0.1.1 | Superseded | `==0.1.1` | No further releases |
 
 ### Cutting a release

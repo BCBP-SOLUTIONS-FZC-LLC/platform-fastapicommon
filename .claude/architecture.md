@@ -7,7 +7,7 @@ The Go module's layers (`internal/core`, adapters, `pkg/`) become one package un
 ```
 platform-fastapicommon/
 ├── src/fastapicommon/
-│   ├── __init__.py              # __version__ ("0.2.0", pinned by tests/unit/test_package.py), create_platform_app — imports only bootstrap
+│   ├── __init__.py              # __version__ ("0.3.0", pinned by tests/unit/test_package.py), create_platform_app — imports only bootstrap
 │   ├── bootstrap/app.py         # create_platform_app(app_name=None, settings=None, **fastapi_kwargs): logging → metrics → tracing,
 │   │                            #   middleware order, health + metrics routers, exception handlers, lifespan wrapping (flush_tracing on exit, when tracing is on)
 │   ├── config/settings.py       # PlatformSettings (pydantic-settings; .env + environment)

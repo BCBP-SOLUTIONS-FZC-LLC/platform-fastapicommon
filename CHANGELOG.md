@@ -7,7 +7,9 @@ pre-1.0 caveat on what SemVer guarantees currently apply.
 
 ## [Unreleased]
 
-> **Versioning:** this will be **0.3.0**, a MINOR that breaks, as SemVer allows while the
+## [0.3.0] - 2026-10-17
+
+> **Versioning:** this release is **0.3.0**, a MINOR that breaks, as SemVer allows while the
 > package is `0.y.z` (see *Recorded exceptions* in `VERSIONING.md`). It aligns the library with
 > platform-gincommon `v2.0.0`. Follow *Upgrading to 0.3.0* in `README.md` and
 > `docs/observability/migration.md`.
@@ -726,7 +728,8 @@ First release of `fastapicommon`.
   shared GitHub-hosted runner IP). All 5 places it's used across `ci.yml`/`release.yml`
   now retry once with the same action before failing the job.
 
-[Unreleased]: https://github.com/BCBP-SOLUTIONS-FZC-LLC/platform-fastapicommon/compare/v0.2.0...HEAD
+[Unreleased]: https://github.com/BCBP-SOLUTIONS-FZC-LLC/platform-fastapicommon/compare/v0.3.0...HEAD
+[0.3.0]: https://github.com/BCBP-SOLUTIONS-FZC-LLC/platform-fastapicommon/compare/v0.2.0...v0.3.0
 [0.2.0]: https://github.com/BCBP-SOLUTIONS-FZC-LLC/platform-fastapicommon/compare/v0.1.1...v0.2.0
 [0.1.1]: https://github.com/BCBP-SOLUTIONS-FZC-LLC/platform-fastapicommon/compare/v0.1.0...v0.1.1
 [0.1.0]: https://github.com/BCBP-SOLUTIONS-FZC-LLC/platform-fastapicommon/releases/tag/v0.1.0
