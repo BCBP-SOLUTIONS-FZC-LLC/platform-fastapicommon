@@ -16,6 +16,10 @@ ABORTED = "fastapicommon.aborted"
 #: that status instead of setting the 500's status text.
 PANICKED = "fastapicommon.panicked"
 
+#: The request's client IP as ContextMiddleware resolved it (trusted proxies applied), for the
+#: server span's ``client.address``; absent when ContextMiddleware did not run.
+CLIENT_IP = "fastapicommon.client_ip"
+
 #: Go ``StatusClientClosedRequest`` (nginx's 499): the status recorded for an aborted request
 #: before any response was written.
 STATUS_CLIENT_CLOSED_REQUEST = 499

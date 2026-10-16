@@ -210,3 +210,50 @@ def test_mounted_route_label_without_metrics(caplog: pytest.LogCaptureFixture) -
         assert TestClient(app).get("/admin/users/1").status_code == 200
     (entry,) = _http_requests(caplog)
     assert entry["path"] == "/admin/users/:uid"
+
+
+@pytest.mark.parametrize(
+    ("headers", "detail", "reason"),
+    [
+        (
+            [("x-user-id", "alice"), ("x-user-id", "mallory"), ("x-tenant-id", "t1")],
+            "Ambiguous x-user-id header.",
+            "ambiguous x-user-id header",
+        ),
+        (
+            [("x-user-id", "alice"), ("x-tenant-id", "t1"), ("x-tenant-id", "t2")],
+            "Ambiguous x-tenant-id header.",
+            "ambiguous x-tenant-id header",
+        ),
+        (
+            [("x-user-id", "alice"), ("x-tenant-roles", ",".join(f"r{i}" for i in range(65)))],
+            "Invalid tenant roles.",
+            "invalid tenant roles",
+        ),
+    ],
+)
+def test_rejected_identity_is_a_401_with_gincommons_detail(
+    headers: list[tuple[str, str]], detail: str, reason: str, caplog: pytest.LogCaptureFixture
+) -> None:
+    """Regression (OQ-2 / OQ-3): a repeated identity header was resolved first-value-wins and
+    roles had no caps; gincommon answers both with these 401 problems and audit reasons."""
+    from fastapicommon.auth import require_authenticated_user
+
+    app = create_platform_app(settings=PlatformSettings(_env_file=None, **IDENTITY))
+
+    @app.get("/me")
+    async def me(user: CurrentUser = Depends(require_authenticated_user)) -> dict[str, str]:
+        return {"user_id": str(user.user_id)}
+
+    with caplog.at_level("INFO"):
+        response = TestClient(app).get("/me", headers=headers)
+    assert response.status_code == 401
+    body = response.json()
+    assert body["errorCode"] == "UNAUTHORIZED" and body["detail"] == detail
+    assert "tenantId" not in body
+    (entry,) = (
+        r.msg
+        for r in caplog.records
+        if isinstance(r.msg, dict) and r.msg.get("event") == "auth: request rejected"
+    )
+    assert entry["reason"] == reason and entry["status"] == 401

@@ -42,6 +42,10 @@ class RequestContext:
     user: CurrentUser = field(default_factory=CurrentUser)
     trace_id: str = ""
     client_ip: str | None = None
+    #: Why the gateway identity was rejected (``"ambiguous x-user-id header"``,
+    #: ``"ambiguous x-tenant-id header"``, ``"invalid tenant roles"``), else ``None``. A rejected
+    #: identity is absent from ``user``; ``require_authenticated_user`` answers it with Go's 401.
+    identity_rejection: str | None = None
 
     @property
     def user_id(self) -> str | None:

@@ -146,7 +146,7 @@ def test_audit_entries(capsys: pytest.CaptureFixture[str], spans: _Spans) -> Non
         "method": "GET",
         "route": "/me",
         "status": 401,
-        "client_ip": "10.0.0.1",
+        "client_ip": "testclient",  # the peer: no trusted proxies, X-Forwarded-For ignored
     }
     assert rejected["claimed_tenant_id"] == "t1" and rejected["request_id"]
     denied = _by_msg(entries, "authz: access denied")

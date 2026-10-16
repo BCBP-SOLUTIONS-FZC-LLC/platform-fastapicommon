@@ -264,6 +264,22 @@ and the span name.
 - Span `exception.type` is the fully qualified type name (`module.Class`, builtins bare), the
   same as `error_type` in logs and OTel's convention; one helper writes it for every span, and
   HTTP and gRPC share one `unclassified error` builder.
+- **Security: repeated identity headers are ambiguous, and roles are capped** (platform-gincommon
+  SEC-3, `ParseRolesStrict`), on HTTP and gRPC. A repeated `x-user-id` or `x-tenant-id` was
+  resolved first-value-wins (gRPC: last-value-wins), so a client-appended value could be ignored
+  or used; `x-tenant-roles` had no total caps (500 roles were kept). Now a repeated id, or a
+  joined roles header over 4096 bytes or 64 distinct roles, makes the whole identity absent
+  (`RequestContext.identity_rejection`), and `require_authenticated_user` answers gincommon's 401
+  (`Ambiguous x-user-id header.`, `Ambiguous x-tenant-id header.`, `Invalid tenant roles.`) with
+  the matching `auth: request rejected` reason. Repeated `x-tenant-roles` values are joined. New:
+  `resolve_identity`, `parse_roles_strict`, `InvalidRolesError`, `MAX_ROLES_HEADER_LEN`,
+  `MAX_ROLES`.
+- **Security: the client IP can no longer be spoofed.** `X-Forwarded-For` / `X-Real-IP` were
+  believed from any client. They are now believed only when the socket peer is a trusted proxy
+  (new `PlatformSettings.trusted_proxies` / `TRUSTED_PROXIES`, IPs or CIDRs; Gin's
+  `SetTrustedProxies` algorithm, walking `X-Forwarded-For` from the right); by default the client
+  IP is the peer. **Behind a proxy or load balancer, set `TRUSTED_PROXIES`**, or the logged and
+  traced client IP is the proxy's.
 - Internal: one boolean environment parser (`env_bool`, invalid values warned once), one
   force-flush helper, and a scope flag instead of reading SDK span internals.
 - Internal: one Gin `ClientIP()` (`fastapicommon.middleware.context.client_ip`), one UTF-8

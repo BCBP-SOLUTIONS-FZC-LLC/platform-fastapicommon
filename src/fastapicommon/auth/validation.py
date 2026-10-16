@@ -7,14 +7,28 @@ from __future__ import annotations
 
 import re
 import uuid
+from collections.abc import Sequence
+from dataclasses import dataclass
 
-from fastapicommon.auth.headers import TENANT_ROLES_SEPARATOR
+from fastapicommon.auth.headers import TENANT_ID_HEADER, TENANT_ROLES_SEPARATOR, USER_ID_HEADER
 
-__all__ = ["normalize_header_value", "normalize_request_id", "parse_roles"]
+__all__ = [
+    "IdentityResolution",
+    "InvalidRolesError",
+    "normalize_header_value",
+    "normalize_request_id",
+    "parse_roles",
+    "parse_roles_strict",
+    "resolve_identity",
+]
 
 MAX_HEADER_VALUE_LEN = 256
 MAX_ROLE_LEN = 64
 MAX_REQUEST_ID_LEN = 128
+#: Go ``MaxRolesHeaderLen`` / ``MaxRoles``: the joined x-tenant-roles header and the number of
+#: distinct valid roles it may yield.
+MAX_ROLES_HEADER_LEN = 4096
+MAX_ROLES = 64
 
 _ROLE_TOKEN_RE = re.compile(r"^[a-zA-Z0-9_-]+$")
 _REQUEST_ID_RE = re.compile(r"^[a-zA-Z0-9._-]+$")
@@ -66,6 +80,63 @@ def resolve_ids(raw_request_id: str | None, raw_correlation_id: str | None) -> t
     raw value is ever echoed, logged or propagated."""
     request_id = normalize_request_id(raw_request_id) or str(uuid.uuid4())
     return request_id, normalize_request_id(raw_correlation_id) or request_id
+
+
+class InvalidRolesError(ValueError):
+    """Go ``ErrInvalidRoles``: the roles header exceeds ``MAX_ROLES_HEADER_LEN`` bytes or
+    yields more than ``MAX_ROLES`` distinct valid roles."""
+
+
+def parse_roles_strict(header: str | None) -> tuple[str, ...]:
+    """Go ``ParseRolesStrict``: :func:`parse_roles` (invalid tokens dropped, duplicates removed),
+    but raises :class:`InvalidRolesError` when the header is over ``MAX_ROLES_HEADER_LEN`` bytes
+    or yields more than ``MAX_ROLES`` distinct valid roles."""
+    if not header:
+        return ()
+    if len(header.encode("utf-8")) > MAX_ROLES_HEADER_LEN:
+        raise InvalidRolesError("invalid tenant roles")
+    roles = parse_roles(header)
+    if len(roles) > MAX_ROLES:
+        raise InvalidRolesError("invalid tenant roles")
+    return roles
+
+
+@dataclass(frozen=True, slots=True)
+class IdentityResolution:
+    """The validated identity of a request, or why it was rejected (``rejection``: an audit
+    reason such as ``"ambiguous x-user-id header"``). A rejected identity is entirely absent."""
+
+    user_id: str | None = None
+    tenant_id: str | None = None
+    roles: tuple[str, ...] = ()
+    rejection: str | None = None
+
+
+def resolve_identity(
+    user_ids: Sequence[str], tenant_ids: Sequence[str], role_values: Sequence[str]
+) -> IdentityResolution:
+    """The identity from every received value of ``x-user-id``, ``x-tenant-id`` and
+    ``x-tenant-roles`` (HTTP headers or gRPC metadata alike), with gincommon's rules:
+
+    - a repeated ``x-user-id`` or ``x-tenant-id`` is **ambiguous** (Go: 401 "ambiguous <h>
+      header"), never resolved by first or last value wins;
+    - repeated ``x-tenant-roles`` values are joined with ``,`` and parsed strictly (caps:
+      ``MAX_ROLES_HEADER_LEN`` bytes, ``MAX_ROLES`` roles; Go: 401 "invalid tenant roles");
+    - each id is validated by :func:`normalize_header_value` (an invalid one is absent).
+
+    On a rejection the whole identity is absent (fail closed) and ``rejection`` says why."""
+    for header, values in ((USER_ID_HEADER, user_ids), (TENANT_ID_HEADER, tenant_ids)):
+        if len(values) > 1:
+            return IdentityResolution(rejection=f"ambiguous {header} header")
+    try:
+        roles = parse_roles_strict(TENANT_ROLES_SEPARATOR.join(role_values))
+    except InvalidRolesError:
+        return IdentityResolution(rejection="invalid tenant roles")
+    return IdentityResolution(
+        user_id=normalize_header_value(user_ids[0]) if user_ids else None,
+        tenant_id=normalize_header_value(tenant_ids[0]) if tenant_ids else None,
+        roles=roles,
+    )
 
 
 def parse_roles(header: str | None) -> tuple[str, ...]:

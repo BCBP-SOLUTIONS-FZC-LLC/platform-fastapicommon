@@ -1,12 +1,14 @@
 from __future__ import annotations
 
-from collections.abc import Mapping
+from collections.abc import Iterable, Mapping
+from ipaddress import IPv4Network, IPv6Network, ip_address, ip_network
 
 from opentelemetry import trace
 from starlette.datastructures import MutableHeaders
 from starlette.requests import Request
 from starlette.types import ASGIApp, Message, Receive, Scope, Send
 
+from fastapicommon._scope import CLIENT_IP
 from fastapicommon.auth.headers import (
     CORRELATION_ID_HEADER,
     REQUEST_ID_HEADER,
@@ -14,7 +16,7 @@ from fastapicommon.auth.headers import (
     TENANT_ROLES_HEADER,
     USER_ID_HEADER,
 )
-from fastapicommon.auth.validation import normalize_header_value, parse_roles, resolve_ids
+from fastapicommon.auth.validation import resolve_identity, resolve_ids
 from fastapicommon.context import (
     CurrentUser,
     RequestContext,
@@ -28,21 +30,59 @@ TRACE_ID_RESPONSE_HEADER = "X-Trace-ID"
 REQUEST_ID_RESPONSE_HEADER = "X-Request-ID"
 
 
-def client_ip(headers: Mapping[str, str], peer: str | None) -> str | None:
-    """Gin's default (no custom trusted-proxy config) ``c.ClientIP()``: the first
-    ``X-Forwarded-For`` entry, then ``X-Real-IP``, then the direct socket ``peer``. ``headers``
-    is keyed by lowercase name. Shared by the request context and the server span."""
-    first = headers.get("x-forwarded-for", "").split(",", 1)[0].strip()
-    if first:
-        return first
-    real_ip = headers.get("x-real-ip", "").strip()
-    if real_ip:
-        return real_ip
+TrustedProxies = tuple[IPv4Network | IPv6Network, ...]
+
+
+def parse_trusted_proxies(values: str | Iterable[str] | None) -> TrustedProxies:
+    """IP addresses or CIDRs (a comma-separated string or an iterable) of the proxies whose
+    ``X-Forwarded-For`` / ``X-Real-IP`` are believed (Gin ``SetTrustedProxies``). Raises
+    ``ValueError`` on an invalid entry, so a typo fails at startup."""
+    if values is None:
+        return ()
+    items = values.split(",") if isinstance(values, str) else list(values)
+    return tuple(ip_network(item.strip(), strict=False) for item in items if item.strip())
+
+
+def _is_trusted(ip: str, trusted: TrustedProxies) -> bool:
+    try:
+        address = ip_address(ip)
+    except ValueError:
+        return False
+    return any(address in network for network in trusted)
+
+
+def _ip_from_header(value: str, trusted: TrustedProxies) -> str | None:
+    """Gin ``validateHeader``: walk the comma-separated hops from the right (the closest proxy)
+    and return the first that is not a trusted proxy (or the leftmost); stop at an invalid IP."""
+    if not value:
+        return None
+    hops = value.split(",")
+    for i in range(len(hops) - 1, -1, -1):
+        hop = hops[i].strip()
+        try:
+            ip_address(hop)
+        except ValueError:
+            break
+        if i == 0 or not _is_trusted(hop, trusted):
+            return hop
+    return None
+
+
+def client_ip(
+    headers: Mapping[str, str], peer: str | None, trusted: TrustedProxies = ()
+) -> str | None:
+    """Gin's ``c.ClientIP()`` with ``SetTrustedProxies(trusted)``: ``X-Forwarded-For``, then
+    ``X-Real-IP``, are believed **only** when the socket ``peer`` is a trusted proxy; otherwise
+    (and with no trusted proxies, the default) the client IP is the peer, so a client cannot
+    spoof it. ``headers`` is keyed by lowercase name. Shared by the request context and the
+    server span."""
+    if not trusted or peer is None or not _is_trusted(peer, trusted):
+        return peer
+    for name in ("x-forwarded-for", "x-real-ip"):
+        ip = _ip_from_header(headers.get(name, ""), trusted)
+        if ip:
+            return ip
     return peer
-
-
-def _client_ip(request: Request) -> str | None:
-    return client_ip(request.headers, request.client.host if request.client is not None else None)
 
 
 def _current_trace_id() -> str:
@@ -62,8 +102,9 @@ class ContextMiddleware:
     server drops the connection instead of this layer terminating the stream as a clean 200.
     """
 
-    def __init__(self, app: ASGIApp) -> None:
+    def __init__(self, app: ASGIApp, trusted_proxies: str | Iterable[str] | None = None) -> None:
         self.app = app
+        self._trusted = parse_trusted_proxies(trusted_proxies)
 
     async def __call__(self, scope: Scope, receive: Receive, send: Send) -> None:
         if scope["type"] != "http":
@@ -74,20 +115,26 @@ class ContextMiddleware:
         request_id, correlation_id = resolve_ids(
             headers.get(REQUEST_ID_HEADER), headers.get(CORRELATION_ID_HEADER)
         )
-        roles = parse_roles(headers.get(TENANT_ROLES_HEADER))
-
-        user = CurrentUser(
-            user_id=normalize_header_value(headers.get(USER_ID_HEADER)),
-            tenant_id=normalize_header_value(headers.get(TENANT_ID_HEADER)),
-            roles=roles,
+        # Every value of each identity header: a repeated one is ambiguous (Go: 401), never
+        # first-value-wins; repeated roles are joined and capped (resolve_identity).
+        identity = resolve_identity(
+            headers.getlist(USER_ID_HEADER),
+            headers.getlist(TENANT_ID_HEADER),
+            headers.getlist(TENANT_ROLES_HEADER),
         )
+        user = CurrentUser(
+            user_id=identity.user_id, tenant_id=identity.tenant_id, roles=identity.roles
+        )
+        peer = request.client.host if request.client is not None else None
         context = RequestContext(
             request_id=request_id,
             correlation_id=correlation_id,
             user=user,
             trace_id=_current_trace_id(),
-            client_ip=_client_ip(request),
+            client_ip=client_ip(headers, peer, self._trusted),
+            identity_rejection=identity.rejection,
         )
+        scope[CLIENT_IP] = context.client_ip  # the server span's client.address
 
         async def send_with_ids(message: Message) -> None:
             if message["type"] == "http.response.start":

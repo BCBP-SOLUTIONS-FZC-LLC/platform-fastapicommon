@@ -83,3 +83,21 @@ def test_parse_roles_drops_tokens_exceeding_max_length() -> None:
     long_role = "a" * 65
     assert parse_roles(f"admin,{long_role}") == ("admin",)
     assert parse_roles(f"admin,{'a' * 64}") == ("admin", "a" * 64)
+
+
+def test_parse_roles_strict_caps() -> None:
+    from fastapicommon.auth.validation import (
+        MAX_ROLES,
+        MAX_ROLES_HEADER_LEN,
+        InvalidRolesError,
+        parse_roles_strict,
+    )
+
+    assert parse_roles_strict(None) == () and parse_roles_strict("") == ()
+    assert len(parse_roles_strict(",".join(f"r{i}" for i in range(MAX_ROLES)))) == MAX_ROLES
+    # duplicates and invalid tokens do not count towards the cap
+    assert len(parse_roles_strict(",".join(["a"] * 200 + ["bad;role"] * 50))) == 1
+    with pytest.raises(InvalidRolesError):
+        parse_roles_strict(",".join(f"r{i}" for i in range(MAX_ROLES + 1)))
+    with pytest.raises(InvalidRolesError):
+        parse_roles_strict("a" * (MAX_ROLES_HEADER_LEN + 1))

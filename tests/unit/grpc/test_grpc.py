@@ -233,3 +233,20 @@ def test_inbound_baggage_reaches_the_handler() -> None:
     )
     wrapped.unary_unary("request", _FakeServicerContext((("baggage", "tenant=acme"),)))
     assert seen["tenant"] == "acme"
+
+
+def test_context_from_metadata_rejects_ambiguous_identity_and_role_caps() -> None:
+    """Regression (OQ-2 / OQ-3): gRPC metadata was read last-value-wins and roles uncapped."""
+    ambiguous = _context_from_metadata(
+        (("x-user-id", "alice"), ("x-user-id", "mallory"), ("x-tenant-id", "t1"))
+    )
+    assert ambiguous.user_id is None and ambiguous.tenant_id is None
+    assert ambiguous.identity_rejection == "ambiguous x-user-id header"
+    too_many = _context_from_metadata(
+        (("x-user-id", "u1"), ("x-tenant-roles", ",".join(f"r{i}" for i in range(65))))
+    )
+    assert too_many.user_id is None and too_many.identity_rejection == "invalid tenant roles"
+    joined = _context_from_metadata(
+        (("x-user-id", "u1"), ("x-tenant-roles", "a"), ("x-tenant-roles", "b,a"))
+    )
+    assert joined.roles == ("a", "b") and joined.identity_rejection is None

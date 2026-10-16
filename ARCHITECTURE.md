@@ -279,7 +279,7 @@ sequenceDiagram
     Note over TR: extract traceparent (W3C), start SERVER span named after the method
 
     TR ->>+ CM: app(scope)
-    Note over CM: read + validate x-user-id, x-tenant-id, x-tenant-roles,<br/>x-request-id, x-correlation-id (Go gincommon validation rules)<br/>generate request_id/correlation_id if absent<br/>compute trace_id from the active OTel span, client_ip from X-Forwarded-For/X-Real-IP/peer<br/>bind_request_context(...)
+    Note over CM: read + validate x-user-id, x-tenant-id, x-tenant-roles,<br/>x-request-id, x-correlation-id (Go gincommon validation rules)<br/>generate request_id/correlation_id if absent<br/>repeated x-user-id / x-tenant-id or roles over 4096 bytes / 64 → identity absent (identity_rejection)<br/>compute trace_id from the active OTel span, client_ip = peer (X-Forwarded-For/X-Real-IP only from TRUSTED_PROXIES)<br/>bind_request_context(...)
 
     CM ->>+ LM: app(scope)
     LM ->>+ UE: app(scope)

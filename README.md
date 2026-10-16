@@ -715,6 +715,7 @@ so the two docs can't drift out of sync.
 | `LOG_SAMPLING` | `true` | `false` | Zap-style sampling: per second and message+level, the first 100 entries, then every 100th |
 | `LOG_FILE` | `logs/app.log` | unset | Also write JSON logs to this file |
 | `REQUEST_TIMEOUT_SECONDS` | `10` | `30.0` | `request_timeout_seconds` — `TimeoutMiddleware` deadline |
+| `TRUSTED_PROXIES` | `10.0.0.0/8,127.0.0.1` | `""` | `trusted_proxies` — proxies whose `X-Forwarded-For` / `X-Real-IP` are believed for the client IP (empty: the socket peer) |
 | `ENABLE_TRACING` | `false` | `true` | `enable_tracing` — gates `setup_tracing()` entirely |
 | `ENABLE_METRICS` | `false` | `true` | `enable_metrics` — gates `PrometheusMiddleware` + `/metrics` |
 | `OTEL_EXPORTER_OTLP_ENDPOINT` | `otel-collector:4317` | `localhost:4317` | OTLP/gRPC collector; `none` / `off` / `disabled` (or `OTEL_TRACES_EXPORTER=none`) keeps spans in-process |

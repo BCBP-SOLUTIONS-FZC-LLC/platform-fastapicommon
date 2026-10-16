@@ -79,7 +79,7 @@ def create_platform_app(
     # server, so their message is never logged.
     app.add_middleware(UnhandledErrorMiddleware)
     app.add_middleware(LoggingMiddleware)
-    app.add_middleware(ContextMiddleware)
+    app.add_middleware(ContextMiddleware, trusted_proxies=settings.trusted_proxies)
     if settings.enable_tracing:
         app.add_middleware(TracingMiddleware)
 

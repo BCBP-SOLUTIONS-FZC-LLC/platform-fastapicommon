@@ -21,7 +21,7 @@ from fastapicommon.auth.headers import (
     TENANT_ROLES_HEADER,
     USER_ID_HEADER,
 )
-from fastapicommon.auth.validation import normalize_header_value, parse_roles, resolve_ids
+from fastapicommon.auth.validation import resolve_identity, resolve_ids
 from fastapicommon.context import (
     CurrentUser,
     RequestContext,
@@ -208,20 +208,36 @@ def _log_grpc_request(method: str, code: str, seconds: float, rpc_context: Reque
 
 
 def _context_from_metadata(metadata: tuple[tuple[str, str], ...]) -> RequestContext:
-    headers = {key.lower(): value for key, value in metadata}
+    headers: dict[str, list[str]] = {}
+    for key, value in metadata:
+        if isinstance(value, str):
+            headers.setdefault(key.lower(), []).append(value)
     # Validated like HTTP and Go's request_id interceptor (NormalizeRequestID).
     request_id, correlation_id = resolve_ids(
-        headers.get(REQUEST_ID_HEADER), headers.get(CORRELATION_ID_HEADER)
+        _first(headers, REQUEST_ID_HEADER), _first(headers, CORRELATION_ID_HEADER)
     )
     # The identity is validated exactly as on HTTP (ContextMiddleware; Go's ContextBuilder): an
     # invalid user / tenant id is absent, invalid role tokens are dropped. So an identity the
     # HTTP path rejects is never accepted on gRPC, nor logged as verified.
-    user = CurrentUser(
-        user_id=normalize_header_value(headers.get(USER_ID_HEADER)),
-        tenant_id=normalize_header_value(headers.get(TENANT_ID_HEADER)),
-        roles=parse_roles(headers.get(TENANT_ROLES_HEADER)),
+    # A repeated user / tenant id is ambiguous (Go: Unauthenticated "ambiguous <k> metadata")
+    # and roles over the caps invalid: the whole identity is then absent, as on HTTP.
+    identity = resolve_identity(
+        headers.get(USER_ID_HEADER, []),
+        headers.get(TENANT_ID_HEADER, []),
+        headers.get(TENANT_ROLES_HEADER, []),
     )
-    return RequestContext(request_id=request_id, correlation_id=correlation_id, user=user)
+    user = CurrentUser(user_id=identity.user_id, tenant_id=identity.tenant_id, roles=identity.roles)
+    return RequestContext(
+        request_id=request_id,
+        correlation_id=correlation_id,
+        user=user,
+        identity_rejection=identity.rejection,
+    )
+
+
+def _first(headers: dict[str, list[str]], key: str) -> str | None:
+    values = headers.get(key)
+    return values[0] if values else None
 
 
 class _UnaryRpc:

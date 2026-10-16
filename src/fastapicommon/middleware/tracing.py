@@ -24,7 +24,7 @@ from starlette.datastructures import Headers
 from starlette.types import ASGIApp, Message, Receive, Scope, Send
 
 from fastapicommon._errors import add_exception_event
-from fastapicommon._scope import PANICKED, request_outcome
+from fastapicommon._scope import CLIENT_IP, PANICKED, request_outcome
 from fastapicommon.logging.sanitize import truncate_utf8
 from fastapicommon.metrics.platform import http_method_label, http_route_label
 from fastapicommon.middleware.context import client_ip
@@ -40,7 +40,12 @@ truncate_span_attr = truncate_utf8
 
 
 def client_address(scope: Scope, headers: Mapping[str, str]) -> str:
-    """Gin's default ``ClientIP()`` (see :func:`fastapicommon.middleware.context.client_ip`)."""
+    """The client IP ``ContextMiddleware`` resolved (trusted proxies applied, see
+    :func:`fastapicommon.middleware.context.client_ip`), else the socket peer: forwarding
+    headers are never believed here without the trusted-proxy configuration."""
+    resolved = scope.get(CLIENT_IP)
+    if isinstance(resolved, str):
+        return resolved
     client = scope.get("client")
     return client_ip(headers, str(client[0]) if client else None) or ""
 

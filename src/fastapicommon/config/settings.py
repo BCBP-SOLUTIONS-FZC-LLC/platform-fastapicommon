@@ -21,6 +21,11 @@ class PlatformSettings(BaseSettings):
     # LOG_LEVEL (debug, info, warn, error); empty: debug in dev / local, info otherwise (Go).
     log_level: str = ""
     request_timeout_seconds: float = 30.0
+    # Proxies whose X-Forwarded-For / X-Real-IP are believed for the client IP (Gin
+    # SetTrustedProxies): comma-separated IPs or CIDRs, e.g. "10.0.0.0/8,127.0.0.1". Empty (the
+    # default): the client IP is the socket peer, so clients cannot spoof it. Env
+    # TRUSTED_PROXIES; an invalid entry fails create_platform_app.
+    trusted_proxies: str = ""
     enable_tracing: bool = True
     enable_metrics: bool = True
     # Overrides OTEL_EXPORTER_OTLP_ENDPOINT (default localhost:4317). "none" / "off" /

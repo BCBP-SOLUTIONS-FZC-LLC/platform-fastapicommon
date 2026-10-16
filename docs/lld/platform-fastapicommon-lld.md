@@ -19,6 +19,7 @@
 
 | Rev | Date | Change |
 |---|---|---|
+| 1.1 | 2026-10-16 | **OQ-2 / OQ-3 / OQ-4 resolved.** A repeated `x-user-id` / `x-tenant-id` is ambiguous and roles are capped at 4096 bytes / 64 roles, on HTTP and gRPC, with gincommon's 401 details (`resolve_identity`, `RequestContext.identity_rejection`). `client_ip` believes forwarding headers only from `trusted_proxies` (Gin `SetTrustedProxies`; default: the socket peer). §4.1, §4.2, §5.4.2, §8.3, §10, §12 updated. |
 | 1.0 | 2026-10-16 | First LLD, written against `feat/observability-standard` at `db99e50` (PR #25, CI green), with the structure of platform-gincommon's LLD rev 1.10. Records the state after the gincommon alignment and four review rounds (Appendix), and the remaining gaps against gincommon's contract as open questions (§16). |
 
 Library history this LLD covers (CHANGELOG):
@@ -79,7 +80,7 @@ It refines the gincommon contracts into Python specifics: exact public signature
 | gincommon LLD §4–§5 | `RequestContext`, transport constants, RFC 9457 error contract, symbol catalogue | §4, §5 (Python equivalents; gaps in §16) |
 | gincommon LLD §6 | Metrics identity and tracer-provider lifecycle (MET-*, TRC-*) | §6 |
 | gincommon LLD §7 | `platform_*` recording rules, span shape, log event catalogue, governance | §7 (same names, labels and fields) |
-| gincommon LLD §10 | Trust boundary SEC-1 … SEC-7 | §10 (SEC-3 and the role caps are not yet met, OQ-2/OQ-3) |
+| gincommon LLD §10 | Trust boundary SEC-1 … SEC-7 | §10 (SEC-3 and the role caps met since rev 1.1; SEC-4 open, OQ-6) |
 | Observability Standard — three-tier naming | `platform_*` / `<domain>_*` / `<domain>_<service>_*` | §7.4 |
 | Observability Standard — identity labels | `{domain, service, environment}` injected centrally; `version` only on build info | §6.2, §7.1 |
 | platform-pgcommon-py | `traceId` resolution order and test vectors for problems | §4.3, §5.3 P-* |
@@ -258,15 +259,16 @@ class RequestContext:
     correlation_id: str                 # validated x-correlation-id, else request_id
     user: CurrentUser
     trace_id: str = ""                  # 32-hex trace id of the server span, "" when invalid
-    client_ip: str | None = None        # first X-Forwarded-For, then X-Real-IP, then peer (HTTP only)
+    client_ip: str | None = None        # the socket peer; X-Forwarded-For / X-Real-IP only from a trusted proxy (HTTP only)
+    identity_rejection: str | None = None  # "ambiguous x-user-id header" | "ambiguous x-tenant-id header" | "invalid tenant roles"
     # passthroughs: user_id, tenant_id, roles
 ```
 
 | ID | Invariant |
 |---|---|
 | RC-1 | A `RequestContext` is bound (`contextvars`) for the whole HTTP request by `ContextMiddleware` — including while a streaming body is produced — and for each unary RPC by the gRPC interceptors. Unlike gincommon it exists for **anonymous** requests too; authentication is the `require_authenticated_user` dependency (OQ-5) |
-| RC-2 | `user_id` and `tenant_id` are each `None` or non-empty, at most 256 bytes UTF-8, free of ASCII control characters, DEL, U+2028 and U+2029 — on HTTP and gRPC alike |
-| RC-3 | Every `roles` entry matches `[a-zA-Z0-9_-]+` and is at most 64 bytes; invalid tokens are dropped and duplicates removed (first occurrence wins). No total-length or count cap (OQ-3) |
+| RC-2 | `user_id` and `tenant_id` are each `None` or non-empty, at most 256 bytes UTF-8, free of ASCII control characters, DEL, U+2028 and U+2029, and came from **exactly one** header / metadata value — on HTTP and gRPC alike. A repeated one makes the whole identity absent and sets `identity_rejection` |
+| RC-3 | Every `roles` entry matches `[a-zA-Z0-9_-]+` and is at most 64 bytes; invalid tokens are dropped, duplicates removed (first occurrence wins); repeated headers are joined. A joined header over 4096 bytes or more than 64 distinct roles makes the whole identity absent (`identity_rejection = "invalid tenant roles"`) |
 | RC-4 | `request_id` and `correlation_id` match `[a-zA-Z0-9._-]+`, at most 128 bytes; the raw values are never echoed, logged or propagated when invalid |
 | RC-5 | `get_request_context()` raises `LookupError` when unbound; every other accessor (`get_request_id`, `get_correlation_id`, `get_tenant_id`, `get_user_id`, `get_roles`, `get_trace_id`, `get_client_ip`) returns `None` / `()` / `""` |
 | RC-6 | Context never leaks between concurrent requests (contextvars per task; pinned by `test_context_not_leaked_between_requests` and a 2,000-request concurrency check, §21) |
@@ -285,7 +287,7 @@ Public in `fastapicommon.auth`:
 | `TRACEPARENT_HEADER` | `traceparent` (+ `tracestate`, `baggage` when enabled) | inbound + propagated |
 | `REQUEST_ID_RESPONSE_HEADER` / `TRACE_ID_RESPONSE_HEADER` (`fastapicommon.middleware.context`) | `X-Request-ID` / `X-Trace-ID` | response only (gincommon's exact casing) |
 
-Limits (`fastapicommon.auth.validation`): `MAX_HEADER_VALUE_LEN = 256`, `MAX_ROLE_LEN = 64`, `MAX_REQUEST_ID_LEN = 128`. `fastapicommon.problem.MAX_REQUEST_ID_LENGTH = 128` bounds a client `x-request-id` reflected as `traceId`.
+Limits (`fastapicommon.auth.validation`): `MAX_HEADER_VALUE_LEN = 256`, `MAX_ROLE_LEN = 64`, `MAX_REQUEST_ID_LEN = 128`, `MAX_ROLES_HEADER_LEN = 4096`, `MAX_ROLES = 64` (gincommon's). `fastapicommon.problem.MAX_REQUEST_ID_LENGTH = 128` bounds a client `x-request-id` reflected as `traceId`.
 
 ### 4.3 Error envelope
 
@@ -374,8 +376,8 @@ Key vocabularies (same as gincommon): `domain` ∈ `iam`, `workflow`, `billing`,
 | # | Signature | Behaviour |
 |---|---|---|
 | A-1 | `get_current_user() -> CurrentUser` | dependency; authenticated or not |
-| A-2 | `require_authenticated_user() -> CurrentUser` | dependency; no `user_id` → warn `auth: request rejected` + `UnauthorizedException` (401) |
-| A-3 | `normalize_header_value(raw)` · `normalize_request_id(raw)` · `parse_roles(header)` | validation rules RC-2 … RC-4 (ported from gincommon `domain/validation.go`) |
+| A-2 | `require_authenticated_user() -> CurrentUser` | dependency; a rejected identity → 401 with gincommon's detail (`Ambiguous x-user-id header.`, `Ambiguous x-tenant-id header.`, `Invalid tenant roles.`); no `user_id` → 401 `Missing or invalid authentication headers.`; each after warn `auth: request rejected` |
+| A-3 | `normalize_header_value(raw)` · `normalize_request_id(raw)` · `parse_roles(header)` · `parse_roles_strict(header)` (`InvalidRolesError`) · `resolve_identity(user_ids, tenant_ids, role_values) -> IdentityResolution` | validation rules RC-2 … RC-4 (ported from gincommon `domain/validation.go`); `resolve_identity` is the one rule both transports apply |
 | A-4 | header constants (§4.2), `MAX_*` limits | |
 | A-5 | `RequireRole(role)` · `RequireAnyRole(*roles)` · `RequireAllRoles(*roles)` | dependencies over the validated roles; denial → warn `authz: access denied` + `ForbiddenException` (403) |
 
@@ -383,7 +385,7 @@ Key vocabularies (same as gincommon): `domain` ∈ `iam`, `workflow`, `billing`,
 
 | # | Signature | Behaviour |
 |---|---|---|
-| M-1 | `ContextMiddleware(app)` | §5.4.2 |
+| M-1 | `ContextMiddleware(app, trusted_proxies=None)` | §5.4.2; `trusted_proxies`: IPs / CIDRs (comma-separated or iterable), invalid → `ValueError` |
 | M-2 | `TracingMiddleware(app, scope_name="platform-fastapicommon/http")` | §7.2 |
 | M-3 | `LoggingMiddleware(app)` | §7.3 `http_request` |
 | M-4 | `TimeoutMiddleware(app, timeout_seconds=30.0)` | §5.4.4 |
@@ -461,8 +463,8 @@ Key vocabularies (same as gincommon): `domain` ∈ `iam`, `workflow`, `billing`,
 Pure ASGI (`scope["type"] == "http"` only):
 
 1. `request_id, correlation_id = resolve_ids(x-request-id, x-correlation-id)`: an invalid request id becomes a new UUID, an invalid or missing correlation id the request id.
-2. `CurrentUser(user_id=normalize_header_value(x-user-id), tenant_id=normalize_header_value(x-tenant-id), roles=parse_roles(x-tenant-roles))` — invalid values are **absent**, never rejected here (no 401 at this layer).
-3. `trace_id` from the active span (set by `TracingMiddleware`), `client_ip = client_ip(headers, peer)` (Gin's default `ClientIP()`: first `X-Forwarded-For`, then `X-Real-IP`, then the socket peer — OQ-4).
+2. `resolve_identity(getlist(x-user-id), getlist(x-tenant-id), getlist(x-tenant-roles))`: a repeated user or tenant id, or roles over the caps, makes the whole identity absent and records `identity_rejection`; otherwise invalid values are absent. No 401 at this layer — `require_authenticated_user` answers it (§8.3).
+3. `trace_id` from the active span (set by `TracingMiddleware`); `client_ip = client_ip(headers, peer, trusted_proxies)` — Gin's `ClientIP()` with `SetTrustedProxies`: `X-Forwarded-For` (walked from the right, first hop that is not a trusted proxy), then `X-Real-IP`, **only** when the peer is a trusted proxy; otherwise the peer. Stored in the scope for the span's `client.address`.
 4. Bind for the whole call (body streaming included); on `http.response.start` set `x-request-id`, `x-correlation-id`, `X-Request-ID` and, when set, `X-Trace-ID`.
 
 #### 5.4.3 `UnhandledErrorMiddleware`
@@ -493,7 +495,7 @@ Cancellation is cooperative: a sync handler running in a worker thread keeps run
 Unary-unary (`_UnaryRpc`, shared by R-1 and R-2):
 
 1. Server span from `traceparent`, named after the bounded `grpc_method`, attached on the **extracted** context (baggage reaches the handler).
-2. `RequestContext` from metadata with the same validation as HTTP (§4.1); `trace_id` from the span; bound for the call.
+2. `RequestContext` from metadata with the same validation as HTTP (§4.1: `resolve_identity` over every value of each key — repeated ids ambiguous, roles joined and capped); `trace_id` from the span; bound for the call.
 3. `platform_grpc_server_inflight_requests` +1; run the handler.
 4. On a handler exception: a status the handler chose (`abort` / `set_code`) is kept (re-aborted with its own details); `grpc.aio.AbortError` is passed through untouched; anything else is **unclassified**: `unclassified error` log, `platform_unclassified_errors_total{transport="grpc"}` +1, abort `INTERNAL "internal server error"`.
 5. `asyncio.CancelledError` (aio deadline / client cancel): recorded as `DeadlineExceeded` (no time remaining) or `Canceled`.
@@ -509,6 +511,8 @@ Streaming arities: exception sanitizing only (no context, span or metrics, OQ-11
 | Unclassified exception after the response started | connection dropped; recorded as aborted with the sent status | — |
 | Request cancelled (shutdown, disconnect) | recorded 499 (`client_error`) or the sent status; aborted; never a panic | `Canceled` / `DeadlineExceeded` (aio) |
 | `require_authenticated_user`, no valid `x-user-id` | 401 · `platform/unauthorized` · `UNAUTHORIZED`, detail `Missing or invalid authentication headers.` | — (no gRPC auth interceptor, OQ-12) |
+| `require_authenticated_user`, repeated `x-user-id` / `x-tenant-id` | 401 · `UNAUTHORIZED`, `Ambiguous x-user-id header.` / `Ambiguous x-tenant-id header.` | identity absent (`identity_rejection` set) |
+| `require_authenticated_user`, roles over 4096 bytes / 64 roles | 401 · `UNAUTHORIZED`, `Invalid tenant roles.` | identity absent |
 | Role dependency denies | 403 · `platform/forbidden` · `FORBIDDEN`, detail `Requires role '<r>'` / `Requires any of roles [...]` / `Missing required roles [...]` (OQ-8) | — |
 | `PlatformException(problem_type=T)` | `T.status` · `T` · `code` or `T.code` | — |
 | `RequestValidationError` | 400 · `platform/validation-failed` · `VALIDATION_FAILED` + `validationErrors` | — |
@@ -744,7 +748,8 @@ Diagram: [`grpc-interceptors.mmd`](../architecture/mermaid/grpc-interceptors.mmd
 |---|---|---|
 | no `x-user-id` | 401 problem, detail `Missing or invalid authentication headers.` | `auth: request rejected` (`reason="missing or invalid x-user-id"`) + `http_request` warn |
 | `x-user-id` of 300 bytes / with a control character | 401 (same) | same, `claimed_user_id` sanitized |
-| two `x-user-id` values | **the first is used** (no rejection, OQ-2) | — |
+| two `x-user-id` (or `x-tenant-id`) values | 401 problem, detail `Ambiguous x-user-id header.` (`Ambiguous x-tenant-id header.`); the identity is absent on anonymous routes too | `auth: request rejected` (`reason="ambiguous x-user-id header"`) |
+| roles header of 5000 bytes, or 65 distinct roles | 401 problem, detail `Invalid tenant roles.` | `auth: request rejected` (`reason="invalid tenant roles"`) |
 | gRPC, any identity | no rejection at the library (OQ-12); handlers check `get_request_context().user` | `grpc_request` |
 
 ### 8.4 Authorization decision
@@ -924,7 +929,7 @@ Verified: 2,000 requests at concurrency 50 against uvicorn (normal, streaming, f
 |---|---|---|
 | SEC-1 | Identity headers are trusted, not verified. The gateway must authenticate, strip client-supplied identity headers and **replace** them | same as gincommon |
 | SEC-2 | The service must be unreachable around the gateway (mesh mTLS / NetworkPolicy) | same |
-| SEC-3 | Repeated identity is rejected, never first-value-wins | **not met**: the first value is used (OQ-2) |
+| SEC-3 | Repeated identity is rejected, never first-value-wins | met (OQ-2 resolved): ambiguous → identity absent, 401 on authenticated routes; HTTP and gRPC |
 | SEC-4 | Identity is forwarded downstream only to trusted internal services, via explicit helpers | **not met**: `create_platform_http_client` forwards identity to any host (OQ-6) |
 | SEC-5 | Unverified identity never appears in verified log fields | met (`claimed_*` on HTTP; gRPC logs verified identity only) |
 | SEC-6 | gRPC health exemption by exact match | n/a: no gRPC auth interceptor (OQ-12) |
@@ -935,15 +940,16 @@ Verified: 2,000 requests at concurrency 50 against uvicorn (normal, streaming, f
 ### 10.2 Network expectations (consumer responsibility)
 
 - `/metrics` is served without authentication whenever metrics are enabled. Restrict it by NetworkPolicy, an auth proxy or a dedicated port.
-- `client_ip` honours `X-Forwarded-For` / `X-Real-IP` from **any** client (OQ-4): behind a proxy that does not overwrite them, the value is client-controlled. It is never a metric label and is used only in logs.
+- `client_ip` is the socket peer unless `trusted_proxies` (`TRUSTED_PROXIES`) lists the proxy in front of the service: set it to the proxy / load-balancer CIDRs, or the logged and traced client IP is the proxy's. It is never a metric label.
 - OTLP uses TLS unless the environment is `dev` / `local` or `OTEL_EXPORTER_OTLP_INSECURE=true`.
 
 ### 10.3 Input validation
 
 | Input | Validation | On failure |
 |---|---|---|
-| `x-user-id`, `x-tenant-id` (HTTP and gRPC) | trimmed non-empty; ≤ 256 bytes; no ASCII controls, DEL, U+2028, U+2029 (first value only, OQ-2) | absent (401 on authenticated routes) |
-| `x-tenant-roles` (HTTP and gRPC) | split on `,`; tokens `[a-zA-Z0-9_-]+`, ≤ 64 bytes; deduplicated (no total caps, OQ-3) | token dropped |
+| `x-user-id`, `x-tenant-id` (HTTP and gRPC) | exactly one value; trimmed non-empty; ≤ 256 bytes; no ASCII controls, DEL, U+2028, U+2029 | invalid: absent; repeated: whole identity absent (401 on authenticated routes) |
+| `x-tenant-roles` (HTTP and gRPC) | repeated values joined; ≤ 4096 bytes; split on `,`; tokens `[a-zA-Z0-9_-]+`, ≤ 64 bytes (invalid dropped); deduplicated; ≤ 64 roles | invalid token dropped; over the caps: whole identity absent (401) |
+| `X-Forwarded-For` / `X-Real-IP` | believed only from a `trusted_proxies` peer; hops must be IPs | the socket peer |
 | `x-request-id` (HTTP and gRPC) | `[a-zA-Z0-9._-]+`, ≤ 128 bytes | new UUID |
 | `x-correlation-id` (HTTP and gRPC) | same as `x-request-id` | the request id |
 | `traceparent` | W3C parse | ignored (new root span) |
@@ -1027,6 +1033,7 @@ See §6.3 and §7.2. Sampling: `ParentBased(root)`, root always-on (ratio ≥ 1)
 | `OTEL_SERVICE_NAME` → `APP_NAME` | — | `init_tracing_from_env` only; unset → provisional `unknown_service` |
 | `ENABLE_TRACING` / `ENABLE_METRICS` | `true` | `PlatformSettings` switches |
 | `REQUEST_TIMEOUT_SECONDS` | `30.0` | `TimeoutMiddleware` |
+| `TRUSTED_PROXIES` | `""` | comma-separated IPs / CIDRs whose forwarding headers are believed for the client IP; invalid → `ValueError` at startup |
 | `PROBLEM_TYPE_BASE` | `https://errors.company.com` | problem `type` base |
 
 Example service / local stack only: `APP_PORT` (8080), the stack ports in `.env-example`, `PROMETHEUS_SCRAPE_TARGET`. `make show-config` prints the resolved settings and tracing configuration.
@@ -1039,6 +1046,7 @@ Example service / local stack only: `APP_PORT` (8080), the stack ports in `.env-
 | `environment` | `""` | registry vocabulary (with metrics) |
 | `log_level` | `""` (environment default) | §11.4 |
 | `request_timeout_seconds` | `30.0` | `TimeoutMiddleware` |
+| `trusted_proxies` | `""` (the socket peer) | IPs / CIDRs, comma-separated |
 | `enable_tracing` / `enable_metrics` | `True` | stack composition |
 | `otlp_endpoint` | `None` | §12.1 |
 | `problem_type_base` | `""` (→ default base) | must be the same for every service of an organisation |
@@ -1156,10 +1164,10 @@ Two-stage `Dockerfile`, both bases digest-pinned (`ghcr.io/astral-sh/uv:0.13.1`,
 | # | Open question / decision | Owner | Status |
 |---|---|---|---|
 | OQ-1 | **Ratify the 16 `proposed` `platform_*` entries** (gincommon OQ-1; shared registry) | Observability governance | Open |
-| OQ-2 | **Repeated identity headers: first value wins.** gincommon rejects them (SEC-3, 401 `Ambiguous x-user-id header.`); here a client-appended second `x-user-id` is ignored and the first used. Verified 2026-10-16 | Library maintainers | **Open — security parity gap** |
-| OQ-3 | **No caps on `x-tenant-roles`.** gincommon caps the header at 4096 bytes and 64 roles (401 `Invalid tenant roles.`); here 500 roles in 2.4 KB were all kept. Verified 2026-10-16 | Library maintainers | **Open — parity gap** |
-| OQ-4 | **`client_ip` trusts `X-Forwarded-For` / `X-Real-IP` from any client** (no trusted-proxy list, unlike Gin's `SetTrustedProxies`). Logged only, never a label | Library maintainers | Open |
-| OQ-5 | **No protected stack.** gincommon's `ProtectedMiddlewares` rejects anonymous requests; here authentication is opt-in per route (`Depends(require_authenticated_user)`), and a route without it is anonymous (SECURITY.md) | Platform team | Accepted (documented) — revisit with OQ-2/3 |
+| OQ-2 | **Repeated identity headers: first value wins.** gincommon rejects them (SEC-3, 401 `Ambiguous x-user-id header.`); here a client-appended second `x-user-id` was ignored and the first used (gRPC: the last) | Library maintainers | **Resolved** 2026-10-16 — ambiguous on both transports: identity absent, `identity_rejection`, gincommon's 401 detail and audit reason |
+| OQ-3 | **No caps on `x-tenant-roles`.** gincommon caps the header at 4096 bytes and 64 roles (401 `Invalid tenant roles.`); here 500 roles in 2.4 KB were all kept | Library maintainers | **Resolved** 2026-10-16 — `parse_roles_strict` with gincommon's caps; repeated headers joined; over the caps the identity is absent (401 `Invalid tenant roles.`) |
+| OQ-4 | **`client_ip` trusts `X-Forwarded-For` / `X-Real-IP` from any client** (no trusted-proxy list, unlike Gin's `SetTrustedProxies`) | Library maintainers | **Resolved** 2026-10-16 — `trusted_proxies` / `TRUSTED_PROXIES` with Gin's algorithm; default: the socket peer (a behaviour change for services behind a proxy: set it) |
+| OQ-5 | **No protected stack.** gincommon's `ProtectedMiddlewares` rejects anonymous requests; here authentication is opt-in per route (`Depends(require_authenticated_user)`), and a route without it is anonymous (SECURITY.md). `require_authenticated_user` checks the user only; gincommon's `RequireAuth` also requires `x-tenant-id` | Platform team | Accepted (documented) |
 | OQ-6 | **Outbound HTTP always forwards identity**, to any host. gincommon split `PropagateHeaders` (trace + request id) from opt-in `PropagateIdentityHeaders` (SEC-4) | Library maintainers | Open |
 | OQ-7 | **gRPC client interceptor**: appends (not sets) metadata, so a caller's value is duplicated; forwards no roles; injects no `traceparent` (needs `instrument_grpc_client()`); unary-unary only | Library maintainers | Open |
 | OQ-8 | **RBAC 403 detail names the missing role(s)** (`Requires role 'admin'`); gincommon uses the fixed sentence `The identity is not allowed to perform this operation.` | Library maintainers | Open |
@@ -1326,7 +1334,7 @@ Runbooks: [`docs/observability/runbooks.md`](../observability/runbooks.md).
 
 ### 21.1 Hot path
 
-Per HTTP request the library adds: one route match (resolved once per request and kept in the ASGI scope; the route table is iterated lazily and stops at the first match), header validation of a bounded set of values (identity ≤ 256 bytes, ids ≤ 128, roles tokens ≤ 64 bytes — roles total uncapped, OQ-3), one span, one `http_request` entry and the `platform_http_*` observations. All platform middleware is pure ASGI (no `BaseHTTPMiddleware` task / memory-stream per layer); five layers wrap `send` to observe the response status.
+Per HTTP request the library adds: one route match (resolved once per request and kept in the ASGI scope; the route table is iterated lazily and stops at the first match), header validation of a bounded set of values (identity ≤ 256 bytes, ids ≤ 128, roles header ≤ 4096 bytes / 64 roles), one span, one `http_request` entry and the `platform_http_*` observations. All platform middleware is pure ASGI (no `BaseHTTPMiddleware` task / memory-stream per layer); five layers wrap `send` to observe the response status.
 
 Measured on the example app against uvicorn (2026-10-16): 2,000 requests at concurrency 50, mixing normal, streaming, failing and timed-out requests, completed in 4.0 s with 0 context mismatches.
 
@@ -1354,5 +1362,6 @@ Four automated review rounds against the branch, each followed by fixes, a regre
 | 2 | `grpc.aio` re-aborted after a handler's own abort (`UsageError` logs); sync handlers on aio sent no stream messages; Mount route labels wrong without metrics; NaN sampling ratio crashed startup; `..._created` metrics dropped; unbounded sampler table; post-start failures logged as 200 with an empty `traceId` | `test_handler_abort_is_not_aborted_again`, `test_sync_handlers_still_run_in_the_thread_pool`, `test_mounted_route_label_without_metrics`, `test_nan_sample_ratio_falls_back`, `test_metric_named_created_is_not_dropped`, `test_sampler_table_is_bounded` |
 | 3 | A stream failing midway reached the client as a complete 200 (`BaseHTTPMiddleware`; middleware rewritten as pure ASGI); `grpc.aio` deadlines / cancels recorded as `OK`; `finish()` could leave context bound; blocking shutdown flush; `setup_tracing` ignored a service provider; `record_span_error` exported messages; logging cost | truncation verified against uvicorn; `test_deadline_and_cancel_are_not_ok`, `test_failing_metric_still_resets_context_and_ends_span`, `test_init_and_setup_tracing_keep_a_consumer_provider`, `test_cached_loggers_follow_reconfiguration` |
 | — | `x-correlation-id` echoed / logged / propagated unvalidated; gRPC `x-request-id` unvalidated | `test_invalid_correlation_id_falls_back_to_request_id`, `test_context_from_metadata_validates_ids` |
+| LLD | Security parity gaps found writing this LLD (OQ-2 … OQ-4): first-value-wins identity, uncapped roles, spoofable client IP | `test_repeated_identity_header_is_ambiguous`, `test_roles_over_the_caps_reject_the_identity`, `test_rejected_identity_is_a_401_with_gincommons_detail`, `test_client_ip_walks_x_forwarded_for_from_a_trusted_proxy`, `test_client_ip_ignores_forwarding_headers_from_an_untrusted_peer` |
 | 4 | gRPC accepted identities HTTP rejects (security); cancellations recorded as 500 panics; inbound baggage dropped on gRPC; timeout swallowed the server's cancellation; `LOG_LEVEL=critical` rejected; eager route-table wrapping | `test_context_from_metadata_validates_identity_like_http`, `test_cancelled_request_is_aborted_not_a_panic`, `test_inbound_baggage_reaches_the_handler`, `test_outer_cancellation_during_unwind_propagates` |
 | CI | Example image 181 MB against gincommon's 150 MB budget (calibrated on a compressed local size): plain uvicorn, trimmed stdlib, 170 MB Python budget (OQ-13) | CI `Smoke tests` (159 MB) |
