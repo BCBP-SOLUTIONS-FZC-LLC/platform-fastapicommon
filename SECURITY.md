@@ -4,8 +4,8 @@
 
 | Version | Supported |
 |---------|-----------|
-| `0.3.x` (current) | Yes — security fixes released as patch versions |
-| `< 0.3.0` | No — upgrade to `0.3.x` (README *Upgrading to 0.3.0*) |
+| `0.4.x` (current) | Yes — security fixes released as patch versions |
+| `< 0.4.0` | No — upgrade to `0.4.x` (additive over `0.3.x`; from `< 0.3.0`, README *Upgrading to 0.3.0*) |
 
 While the package is `0.y.z`, only the latest MINOR line receives fixes. Once `1.0.0` ships, this follows platform-gincommon's policy: when a new major line ships, the previous major receives security fixes only for six months after the new major's release.
 

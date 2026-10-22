@@ -7,7 +7,9 @@ pre-1.0 caveat on what SemVer guarantees currently apply.
 
 ## [Unreleased]
 
-> **Versioning:** additive (planned **0.4.0**, a MINOR). It ports platform-gincommon `v2.1.0`'s RFC 9457 extension members. Nothing changes for problems without extensions: their JSON is byte-for-byte identical to `0.3.0`'s.
+## [0.4.0] - 2026-10-22
+
+> **Versioning:** this release is **0.4.0**, an additive MINOR. It ports platform-gincommon `v2.1.0`'s RFC 9457 extension members. Nothing changes for problems without extensions: their JSON is byte-for-byte identical to `0.3.0`'s.
 
 ### Security
 
@@ -744,7 +746,8 @@ First release of `fastapicommon`.
   shared GitHub-hosted runner IP). All 5 places it's used across `ci.yml`/`release.yml`
   now retry once with the same action before failing the job.
 
-[Unreleased]: https://github.com/BCBP-SOLUTIONS-FZC-LLC/platform-fastapicommon/compare/v0.3.0...HEAD
+[Unreleased]: https://github.com/BCBP-SOLUTIONS-FZC-LLC/platform-fastapicommon/compare/v0.4.0...HEAD
+[0.4.0]: https://github.com/BCBP-SOLUTIONS-FZC-LLC/platform-fastapicommon/compare/v0.3.0...v0.4.0
 [0.3.0]: https://github.com/BCBP-SOLUTIONS-FZC-LLC/platform-fastapicommon/compare/v0.2.0...v0.3.0
 [0.2.0]: https://github.com/BCBP-SOLUTIONS-FZC-LLC/platform-fastapicommon/compare/v0.1.1...v0.2.0
 [0.1.1]: https://github.com/BCBP-SOLUTIONS-FZC-LLC/platform-fastapicommon/compare/v0.1.0...v0.1.1

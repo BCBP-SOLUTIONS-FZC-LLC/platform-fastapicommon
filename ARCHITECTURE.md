@@ -970,7 +970,7 @@ Two-stage `Dockerfile`, both bases digest-pinned (`ghcr.io/astral-sh/uv:0.13.1`,
 
 ### Versioning
 
-SemVer over each subpackage's `__all__` ([VERSIONING.md](VERSIONING.md)); while `0.y.z`, a MINOR may break. A release needs `pyproject.toml`'s version equal to the tag (`release_guard.py`), a dated `## [X.Y.Z]` CHANGELOG section, and a tag reachable from `origin/main`; `api-compat` fails a release that may not break when the public API breaks. The platform-gincommon `v2.0.0` alignment shipped as **`0.3.0`** (breaking, as a pre-1.0 MINOR).
+SemVer over each subpackage's `__all__` ([VERSIONING.md](VERSIONING.md)); while `0.y.z`, a MINOR may break. A release needs `pyproject.toml`'s version equal to the tag (`release_guard.py`), a dated `## [X.Y.Z]` CHANGELOG section, and a tag reachable from `origin/main`; `api-compat` fails a release that may not break when the public API breaks. The platform-gincommon `v2.0.0` alignment shipped as **`0.3.0`** (breaking, as a pre-1.0 MINOR); the `v2.1.0` alignment (RFC 9457 extension members) as **`0.4.0`** (additive).
 
 ---
 
@@ -988,7 +988,7 @@ The CI gate is **≥ 90%** coverage (`coverage-gate.sh`, unit + integration); th
 
 ## Consumer conformance checklist
 
-Before a service ships on `0.3.x`, verify:
+Before a service ships on `0.4.x`, verify:
 
 **Identity and configuration**
 - [ ] `OBSERVABILITY_DOMAIN` is a registry domain; `APP_ENV` is one of `local|dev|test|staging|prod`.
