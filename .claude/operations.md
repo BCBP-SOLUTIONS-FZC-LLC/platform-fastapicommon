@@ -40,7 +40,7 @@ Ported from platform-gincommon; job logic in `.github/scripts/*` (shellcheck-cle
 
 ## 4. Release State and Process
 
-- Tags: `v0.1.0`, `v0.1.1`, `v0.2.0` (these predate signing and `SHA256SUMS`), **`v0.3.0`** (current, 2026-10-17; the first signed release). New work goes under `[Unreleased]`.
+- Tags: `v0.1.0`, `v0.1.1`, `v0.2.0` (these predate signing and `SHA256SUMS`), `v0.3.0` (2026-10-17; the first signed release), **`v0.4.0`** (current, 2026-10-22). New work goes under `[Unreleased]`.
 - To release: bump `pyproject.toml` `version`, `src/fastapicommon/__init__.py` `__version__` **and** `tests/unit/test_package.py` (`release_guard.py` checks only `pyproject.toml`); rename `[Unreleased]` to `## [X.Y.Z] - YYYY-MM-DD` and update the compare links; `make ci` + `make release-guard TAG=vX.Y.Z`; merge to `main`; push an annotated tag. `release.yml`: verify → the CI gates + blocking `api-compat` → dist once (reproducible, `SHA256SUMS`) → image push (fingerprint-matched, signed, SBOM, provenance) → PyPI (Trusted Publishing) → GitHub Release. Verification commands: `VERSIONING.md` § Verifying a release.
 
 ## 5. Troubleshooting

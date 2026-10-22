@@ -7,8 +7,8 @@
 | Document type | Low-Level Design (LLD) |
 | Component | `platform-fastapicommon` (shared FastAPI HTTP + gRPC transport and observability library; the Python port of `platform-gincommon`) |
 | Python package | `platform-fastapicommon` (import name `fastapicommon`), `requires-python >= 3.11`; CI tests 3.11, 3.12, 3.13 and 3.14, plus every runtime dependency at its floor |
-| Status | **`0.3.0` released 2026-10-17** (breaking; PR #25, #35): logs, metrics and traces aligned with platform-gincommon `v2.0.0`; CI/CD port; four production-readiness review rounds; OQ-2 … OQ-4 resolved; 100% line and branch coverage; repository docs aligned with platform-gincommon's |
-| Previous release | `0.2.0` (2026-07-27) |
+| Status | **`0.4.0` released 2026-10-22** (additive; PR #37): RFC 9457 extension members, aligned with platform-gincommon `v2.1.0`. `0.3.0` (2026-10-17, breaking; PR #25, #35) aligned logs, metrics and traces with platform-gincommon `v2.0.0`; CI/CD port; four production-readiness review rounds; OQ-2 … OQ-4 resolved; 100% line and branch coverage; repository docs aligned with platform-gincommon's |
+| Previous release | `0.3.0` (2026-10-17) |
 | Governing standard | Enterprise Platform Observability Standard ([`docs/observability/README.md`](../observability/README.md)); the registry is gincommon's, vendored byte for byte |
 | Reference design | [`platform-gincommon` LLD](../../../../platform-gincommon/docs/lld/platform-gincommon-lld.md) — this library implements the same contracts in Python; where they differ, §16 records why |
 | Sibling designs | `platform-gincommon` (Go original, registry owner), `platform-pgcommon-py` (Python DB library: same RFC 9457 trace-id rules), `platform-eventcommon` (Python messaging), `platform-interop-tests` (cross-language checks) |
@@ -19,6 +19,7 @@
 
 | Rev | Date | Change |
 |---|---|---|
+| 1.5 | 2026-10-22 | **`0.4.0` released** (additive, PR #37): RFC 9457 extension members, aligned with platform-gincommon `v2.1.0`. Version bumped, CHANGELOG `[0.4.0]` dated; status and supported-release tables updated. |
 | 1.4 | 2026-10-17 | **`0.3.0` released.** Version bumped, CHANGELOG `[0.3.0]` dated, OQ-14 resolved; status and supported-release tables updated. |
 | 1.3 | 2026-10-17 | **Dependencies to latest.** Every locked package upgraded (FastAPI 0.143.3, Starlette 1.8.0, OpenTelemetry 1.45.1, grpcio 1.84.0, ruff 0.17.1, black 26.10.1, …), GitHub Actions (`setup-uv` v10.3.0, `upload-artifact` v7.0.2, `download-artifact` v8.0.2, `codeql-action` v4.38.3), pre-commit hooks, promtool image v3.15.0, local Tempo 3.1.0. FastAPI 0.143's native OpenTelemetry duplicated the server span: `create_platform_app` turns it off (`FASTAPI_NATIVE_TELEMETRY_OFF`, B-2). §3.1, §5.3, §5.4.1, §14.5 (T-17) updated. |
 | 1.2 | 2026-10-16 | **Tests and documentation.** 423 tests (388 unit, 29 integration, 6 e2e), **100%** line and branch coverage: `TracingMiddleware` unit tests (client address without `ContextMiddleware`, span status per response class, an escaped exception as a `panic` span), non-IP and IPv6 proxy peers, a handler failing while cancelled after a timeout, `grpc.aio` bidirectional streams / unknown methods / `settings`, a context that cannot abort. The dead `PlatformMetrics.observe_http_response_size` path is removed; the `X-Forwarded-For` walk has no unreachable branch (same behaviour). README, ARCHITECTURE, CHANGELOG, CONTRIBUTING, SECURITY and VERSIONING follow platform-gincommon's structure; `.claude/` added. §1, §3, §5.4.2, §14, Appendix updated. |
@@ -29,6 +30,7 @@ Library history this LLD covers (CHANGELOG):
 
 | Version | Date | Summary |
 |---|---|---|
+| `0.4.0` | 2026-10-22 | gincommon `v2.1.0` alignment: RFC 9457 extension members |
 | `0.3.0` | 2026-10-17 | gincommon `v2.0.0` alignment: Zap log contract, library-owned spans, `OTEL_*` configuration, vendored registry + `metricslint` port, `platform_unclassified_errors_total`, `grpc.aio` interceptor, pure-ASGI middleware, CI/CD port, validated identity and correlation ids on gRPC and HTTP |
 | (#20–#24, on `main`) | 2026-10-16 | Enterprise Platform Observability Standard (`platform_*` only), RFC 9457 Problem Details, unclassified exceptions logged as types only, gRPC exception sanitizing |
 | `0.2.0` | 2026-07-27 | — (see CHANGELOG) |
@@ -1289,7 +1291,7 @@ Run by CI's `interop` job; its `error_shape` check requires the Go and Python 40
 | 7 | Clients sending `x-correlation-id` outside `[A-Za-z0-9._-]` (≤ 128 bytes) get the request id back | — |
 | 8 | Add `fastapicommon.metrics.compliance.validate` to the service's tests; run `fastapicommon-metricslint refs` over dashboards | CI green |
 
-HTTP latency now includes the body and cancelled requests count as 499 / `client_error`: streaming endpoints show higher latency. The pre-standard metric names were removed in #20 (no compatibility period); the legacy → `platform_*` mapping is [`docs/observability/migration.md`](../observability/migration.md). Full list: CHANGELOG `[Unreleased]`, [`docs/MigrationGuide.md`](../MigrationGuide.md).
+HTTP latency now includes the body and cancelled requests count as 499 / `client_error`: streaming endpoints show higher latency. The pre-standard metric names were removed in #20 (no compatibility period); the legacy → `platform_*` mapping is [`docs/observability/migration.md`](../observability/migration.md). Full list: CHANGELOG `[0.3.0]`, [`docs/MigrationGuide.md`](../MigrationGuide.md).
 
 ### 19.2 Rollback
 
@@ -1364,7 +1366,7 @@ Measured (2026-10-16, after the third review round; before → after): info entr
 
 ## Appendix — Production-readiness Fix Log (2026-10-16)
 
-Four automated review rounds against the branch, each followed by fixes, a regression test per bug, and a green `make ci`, lowest-deps and Python 3.11 run, Docker smoke and e2e; then CI on PR #25. 41 findings fixed or explicitly decided (CHANGELOG `[Unreleased]`, "Fixed — production-readiness review").
+Four automated review rounds against the branch, each followed by fixes, a regression test per bug, and a green `make ci`, lowest-deps and Python 3.11 run, Docker smoke and e2e; then CI on PR #25. 41 findings fixed or explicitly decided (CHANGELOG `[0.3.0]`, "Fixed — production-readiness review").
 
 | Round | Blocking / high findings fixed | Representative tests |
 |---|---|---|

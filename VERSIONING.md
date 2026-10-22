@@ -4,7 +4,7 @@ This repository is a **Python package** (`platform-fastapicommon` on PyPI, impor
 
 ## Semantic versioning (SemVer)
 
-We use [SemVer 2.0.0](https://semver.org/): `MAJOR.MINOR.PATCH` (e.g. `v0.3.0`).
+We use [SemVer 2.0.0](https://semver.org/): `MAJOR.MINOR.PATCH` (e.g. `v0.4.0`).
 
 | Bump | When you change | Examples |
 |------|------------------|----------|
@@ -38,9 +38,10 @@ Import **`fastapicommon.<subpackage>`** only. Python cannot enforce this the way
 
 | Version | Status | PyPI | Supported until |
 |---------|--------|------|-----------------|
-| `0.3.x` | **Current** (from `v0.3.0`, 2026-10-17) | `platform-fastapicommon==0.3.0` | Active |
-| `0.2.x` | Superseded | `==0.2.0` | No further releases; upgrade to `0.3.x` |
-| `0.1.x` | Superseded | `==0.1.1` | No further releases; upgrade to `0.3.x` |
+| `0.4.x` | **Current** (from `v0.4.0`, 2026-10-22) | `platform-fastapicommon==0.4.0` | Active |
+| `0.3.x` | Superseded | `==0.3.0` | No further releases; upgrade to `0.4.x` (additive) |
+| `0.2.x` | Superseded | `==0.2.0` | No further releases; upgrade to `0.4.x` |
+| `0.1.x` | Superseded | `==0.1.1` | No further releases; upgrade to `0.4.x` |
 
 Releases up to `v0.2.0` predate release signing and `SHA256SUMS`. When `1.0.0` ships, a new MAJOR line gives the previous major **security fixes only** for a period the platform team defines (typically 6 months).
 
@@ -49,16 +50,16 @@ Releases up to `v0.2.0` predate release signing and `SHA256SUMS`. When `1.0.0` s
 Pin in your service's `pyproject.toml` / requirements:
 
 ```bash
-pip install "platform-fastapicommon==0.3.0"          # or "platform-fastapicommon[grpc]==0.3.0"
-uv add "platform-fastapicommon[grpc]==0.3.0"
+pip install "platform-fastapicommon==0.4.0"          # or "platform-fastapicommon[grpc]==0.4.0"
+uv add "platform-fastapicommon[grpc]==0.4.0"
 ```
 
 | Pin style | Use when |
 |-----------|----------|
-| `==0.3.0` | Production; exact reproducibility (recommended while `0.y.z`) |
-| `~=0.3.0` | Production; accept PATCH updates on `0.3.x` |
-| `>=0.3,<0.4` | The same, written as a range |
-| unpinned / `>=0.3` | Experiments only; never in production, especially pre-1.0 |
+| `==0.4.0` | Production; exact reproducibility (recommended while `0.y.z`) |
+| `~=0.4.0` | Production; accept PATCH updates on `0.4.x` |
+| `>=0.4,<0.5` | The same, written as a range |
+| unpinned / `>=0.4` | Experiments only; never in production, especially pre-1.0 |
 
 pip resolves versions from **[PyPI](https://pypi.org/project/platform-fastapicommon/)**. The distribution is `platform-fastapicommon`; the import is `fastapicommon` (`fastapicommon` alone was rejected by PyPI as too similar to an unrelated package).
 
@@ -155,6 +156,7 @@ The files on PyPI are byte-identical to the release's wheel and sdist (`SHA256SU
 |------------------------|----------------------------|--------------|--------------|
 | `0.1.x`–`0.2.x` | `>=3.11` | 3.11, 3.12, 3.13, 3.14 | platform-gincommon `v1.x` wire contract |
 | `0.3.x` | `>=3.11` | 3.11, 3.12, 3.13, 3.14, plus every dependency at its floor (`validate-test.yml`) | platform-gincommon `v2.0.0` (registry, RFC 9457, logs, traces) |
+| `0.4.x` | `>=3.11` | 3.11, 3.12, 3.13, 3.14, plus every dependency at its floor (`validate-test.yml`) | platform-gincommon `v2.1.0` (adds RFC 9457 extension members) |
 
 Consumer services must run a Python version this package's `requires-python` allows. Raising the floor changes `requires-python` and the CI matrix together, and is a MAJOR-level change after `1.0.0`.
 
