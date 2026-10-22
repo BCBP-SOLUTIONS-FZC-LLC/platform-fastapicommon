@@ -12,6 +12,7 @@ pre-1.0 caveat on what SemVer guarantees currently apply.
 ### Security
 
 - **Locked `certifi` 2026.7.22 → 2026.10.19 and `virtualenv` 21.14.8 → 21.14.12**, fixing PYSEC-2026-4320 and CVE-2026-113722, which failed `make vulncheck` (CI's *Vulnerability check (pip-audit)*) on `main` as well, so every PR was blocked. `uv.lock` only; no `pyproject.toml` floor changes.
+- **Runtime image: `ca-certificates` 20250419 → 20250419+deb13u1** (DSA-6572-1), pinned in the Dockerfile next to the `liblzma5` fix until the base digest is refreshed past it. The pinned `python:3.14-slim` base failed CI's *Trivy CVE scan* on it, on `main` as well.
 
 ### Added
 
