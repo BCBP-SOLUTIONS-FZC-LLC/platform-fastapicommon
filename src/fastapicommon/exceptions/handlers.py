@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 import contextlib
-from collections.abc import Iterable
+from collections.abc import Iterable, Mapping
 from dataclasses import dataclass
 from typing import Any
 
@@ -32,6 +32,7 @@ from fastapicommon.problem import (
     resolve_trace_id,
     type_for_status,
 )
+from fastapicommon.problem.core import _is_standard_member
 from fastapicommon.problem.validation import validation_problem_parts
 
 _problem_log = get_logger("fastapicommon.problem")
@@ -71,16 +72,26 @@ def problem_response(
     detail: str | None = None,
     error_code: str | None = None,
     validation_errors: Iterable[FieldError] = (),
+    extensions: Mapping[str, Any] | None = None,
 ) -> JSONResponse:
     """Render ``t`` as an ``application/problem+json`` response for ``request`` and log it once
     at WARN as ``problem response`` (the same fields as gincommon and pgcommon-py).
 
     ``traceId`` follows gincommon's order (traceparent → sanitized x-request-id → span →
     generated); ``instance`` is the path without the query string; ``tenantId`` is set only
-    for an authenticated identity and never on a 401.
+    for an authenticated identity and never on a 401. ``extensions`` (RFC 9457 §3.2) follow
+    the standard members, sorted by name (see ``build_problem``). If an extension value cannot
+    be serialised as JSON, the problem is sent without extensions and a warn-level
+    ``problem extensions dropped`` entry is logged (never the values), as in gincommon's
+    ``WriteProblem``.
     """
     return _problem(
-        request, t, detail=detail, error_code=error_code, validation_errors=validation_errors
+        request,
+        t,
+        detail=detail,
+        error_code=error_code,
+        validation_errors=validation_errors,
+        extensions=extensions,
     )[0]
 
 
@@ -91,6 +102,7 @@ def _problem(
     detail: str | None = None,
     error_code: str | None = None,
     validation_errors: Iterable[FieldError] = (),
+    extensions: Mapping[str, Any] | None = None,
 ) -> tuple[JSONResponse, dict[str, Any]]:
     """:func:`problem_response` and the problem body it rendered."""
     s = _settings(request)
@@ -108,6 +120,7 @@ def _problem(
         trace_id=trace_id,
         tenant_id=tenant_id,
         validation_errors=validation_errors,
+        extensions=extensions,
     )
     fields: dict[str, object] = {
         "traceId": body["traceId"],
@@ -117,12 +130,27 @@ def _problem(
     }
     if s.service:
         fields["service"] = s.service
+    try:
+        response = _problem_json(body)
+    except Exception:
+        # Only an extension value can fail to serialise (a set, a NaN, an object): send the
+        # problem without its extensions rather than no problem. Cannot fail again: the
+        # standard members are strings, ints and lists of strings.
+        body = {k: v for k, v in body.items() if _is_standard_member(k)}
+        response = _problem_json(body)
+        with contextlib.suppress(Exception):  # never the values or the error's text
+            _problem_log.warning("problem extensions dropped", **fields)
     if tenant_id:
         fields["tenantId"] = tenant_id
     with contextlib.suppress(Exception):  # a failing logger must not break the response
         _problem_log.warning("problem response", **fields)
-    response = JSONResponse(status_code=body["status"], content=body, media_type=PROBLEM_MEDIA_TYPE)
     return response, body
+
+
+def _problem_json(body: dict[str, Any]) -> JSONResponse:
+    """The ``application/problem+json`` response; raises if ``body`` is not JSON-serialisable
+    (``JSONResponse`` renders on construction, with ``allow_nan=False``)."""
+    return JSONResponse(status_code=body["status"], content=body, media_type=PROBLEM_MEDIA_TYPE)
 
 
 async def platform_exception_handler(request: Request, exc: Exception) -> JSONResponse:
@@ -133,6 +161,7 @@ async def platform_exception_handler(request: Request, exc: Exception) -> JSONRe
         detail=exc.message,
         error_code=exc.code,
         validation_errors=exc.validation_errors,
+        extensions=exc.extensions,
     )
 
 

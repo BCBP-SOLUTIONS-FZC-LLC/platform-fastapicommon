@@ -4,7 +4,7 @@ The platform's shared **FastAPI and gRPC middleware library** for Python service
 
 **Repository:** [github.com/BCBP-SOLUTIONS-FZC-LLC/platform-fastapicommon](https://github.com/BCBP-SOLUTIONS-FZC-LLC/platform-fastapicommon)
 **Package:** `pip install platform-fastapicommon` (import `fastapicommon`) · Python ≥ 3.11 (tested on 3.11, 3.13, 3.14) · **never deployed** — consumers import the package; `examples/` is a reference service whose image exists only for CI smoke tests
-**Design:** a framework-free core (`context`, `auth.validation`, `config`, `problem`) under FastAPI / gRPC / OpenTelemetry adapters and one composition function, `create_platform_app()` ([ARCHITECTURE.md](ARCHITECTURE.md), [LLD](docs/lld/platform-fastapicommon-lld.md)). The observability contract is [`docs/observability/`](docs/observability/README.md) with the generated [metric inventory](docs/observability/metric-registry.md); the registry is **gincommon's** (`src/fastapicommon/metrics/registry.json`, parity-checked in CI). Every HTTP error is an [RFC 9457](docs/problem-details.md) problem (`application/problem+json`) identical to gincommon `v2.0.0`'s.
+**Design:** a framework-free core (`context`, `auth.validation`, `config`, `problem`) under FastAPI / gRPC / OpenTelemetry adapters and one composition function, `create_platform_app()` ([ARCHITECTURE.md](ARCHITECTURE.md), [LLD](docs/lld/platform-fastapicommon-lld.md)). The observability contract is [`docs/observability/`](docs/observability/README.md) with the generated [metric inventory](docs/observability/metric-registry.md); the registry is **gincommon's** (`src/fastapicommon/metrics/registry.json`, parity-checked in CI). Every HTTP error is an [RFC 9457](docs/problem-details.md) problem (`application/problem+json`) identical to gincommon `v2.1.0`'s, including RFC 9457 §3.2 extension members.
 
 ---
 
@@ -72,8 +72,9 @@ Fourteen subpackages and one CLI. Source of truth: the docstrings (`make docs-se
 | Errors to raise | `PlatformException` (`BusinessException`), `ValidationException`, `UnauthorizedException`, `ForbiddenException`, `NotFoundException`, `ConflictException`, `BusinessRuleViolationException`, `RateLimitException`, `UnsupportedOperationException`, `ServiceUnavailableException` | What handlers raise; rendered as problems |
 | Domain types | `problem_type(domain, name, title, status, code)`, `ProblemType`, the 15 `TYPE_*` platform types, `type_for_status`, `type_uri` | `{base}/{domain}/{name}` URIs — same registry as gincommon's |
 | Rendering | `register_exception_handlers`, `problem_response`, `UnhandledErrorMiddleware`, `build_problem`, `Problem`, `FieldError` | Every error is `application/problem+json`; a 5xx never carries detail |
+| Extension members | `PlatformException.with_extension(name, value)` / `with_extensions(mapping)` (or `extensions=`), `problem_response(..., extensions=)`, `build_problem(..., extensions=)`, `valid_extension_name` | RFC 9457 §3.2 members such as `record_version`, after the standard ones, sorted by name; a standard-member name is dropped; an `internal-error` sends none |
 | Correlation | `resolve_trace_id`, `trace_id_from_traceparent`, `sanitized_request_id`, `new_trace_id` | `traceparent` → `x-request-id` → span → generated (platform-pgcommon-py's order) |
-| Clients | `problem_from_response(resp)`, `parse_problem(body)`, `is_problem_content_type` | Parse problems; branch on `status` / `type` / `errorCode`, never on text |
+| Clients | `problem_from_response(resp)`, `parse_problem(body)`, `is_problem_content_type`, `Problem.extensions`, `Problem.extension(name, typ)` | Parse problems (unrecognised members kept as extensions); branch on `status` / `type` / `errorCode`, never on text |
 
 ### `fastapicommon.grpc` — gRPC services (`grpc` extra)
 

@@ -296,7 +296,7 @@ Limits (`fastapicommon.auth.validation`): `MAX_HEADER_VALUE_LEN = 256`, `MAX_ROL
 
 ### 4.3 Error envelope
 
-Every library-produced and handled HTTP error is an RFC 9457 problem served as `application/problem+json` (`PROBLEM_MEDIA_TYPE`), byte-compatible with gincommon `v2.0.0`:
+Every library-produced and handled HTTP error is an RFC 9457 problem served as `application/problem+json` (`PROBLEM_MEDIA_TYPE`), byte-compatible with gincommon `v2.1.0`:
 
 ```json
 {
@@ -312,7 +312,7 @@ Every library-produced and handled HTTP error is an RFC 9457 problem served as `
 }
 ```
 
-`type` is `{base}/{domain}/{name}` (`PlatformSettings.problem_type_base`, default `https://errors.company.com`). `traceId` follows gincommon's order: `traceparent` → sanitized `x-request-id` (`[A-Za-z0-9._:-]{1,128}`) → the span's trace id → generated. `instance` is the path without the query string. `tenantId` is set only for an authenticated identity and never on a 401. A 5xx never carries `detail` or `validationErrors`. `validationErrors` (`[{field, message}]`) never echoes the rejected value. Full contract: [`docs/problem-details.md`](../problem-details.md).
+`type` is `{base}/{domain}/{name}` (`PlatformSettings.problem_type_base`, default `https://errors.company.com`). `traceId` follows gincommon's order: `traceparent` → sanitized `x-request-id` (`[A-Za-z0-9._:-]{1,128}`) → the span's trace id → generated. `instance` is the path without the query string. `tenantId` is set only for an authenticated identity and never on a 401. A 5xx never carries `detail` or `validationErrors`. `validationErrors` (`[{field, message}]`) never echoes the rejected value. RFC 9457 §3.2 extension members (`PlatformException.with_extension`) follow the standard members, sorted by name; a name that is not `valid_extension_name` (letter + `[A-Za-z0-9_]`, 3+ characters, not a standard member in any case) is dropped, an `internal-error` drops them all, and a value that is not JSON-serialisable drops them all with a warn `problem extensions dropped`. Full contract: [`docs/problem-details.md`](../problem-details.md).
 
 ### 4.4 Registry document (`src/fastapicommon/metrics/registry.json`)
 
@@ -400,16 +400,16 @@ Key vocabularies (same as gincommon): `domain` ∈ `iam`, `workflow`, `billing`,
 
 | # | Signature | Behaviour |
 |---|---|---|
-| E-1 | `PlatformException(message=None, *, problem_type=None, code=None, validation_errors=())` (alias `BusinessException`) | rendered as `problem_type`; `message` is the `detail` (a sentence the service wrote); `code` the `errorCode`. A subclass setting `status_code` / `code` / `error_code` class attributes raises `TypeError` at definition |
+| E-1 | `PlatformException(message=None, *, problem_type=None, code=None, validation_errors=(), extensions=None)` (alias `BusinessException`) · `.with_extension(name, value)` · `.with_extensions(mapping)` | rendered as `problem_type`; `message` is the `detail` (a sentence the service wrote); `code` the `errorCode`; `extensions` the RFC 9457 §3.2 extension members (gincommon `Error.WithExtension(s)`). A subclass setting `status_code` / `code` / `error_code` class attributes raises `TypeError` at definition |
 | E-2 | `ValidationException` 400 · `UnauthorizedException` 401 · `ForbiddenException` 403 · `ResourceNotFoundException` (`NotFoundException`) 404 · `ConflictException` 409 · `BusinessRuleViolationException` 422 · `RateLimitException` 429 · `UnsupportedOperationException` 501 · `ServiceUnavailableException` 503 | one subclass per platform type |
 | E-3 | `register_exception_handlers(app, *, type_base="", service="")` | handlers for `PlatformException`, `RequestValidationError`, Starlette `HTTPException`, `NotImplementedError`, `Exception` |
-| E-4 | `problem_response(request, t, *, detail=None, error_code=None, validation_errors=())` · `ProblemSettings` | render a problem + warn `problem response` |
+| E-4 | `problem_response(request, t, *, detail=None, error_code=None, validation_errors=(), extensions=None)` · `ProblemSettings` | render a problem + warn `problem response`; an unserialisable extension value: sent without extensions + warn `problem extensions dropped` |
 | E-5 | `UnhandledErrorMiddleware(app)` | §5.4.3 |
 | P-1 | `Problem`, `FieldError`, `ProblemType` · `problem_type(domain, name, title, status, code)` | domain types (kebab slugs, `platform` reserved, 4xx/5xx, UPPER_SNAKE code) |
 | P-2 | `TYPE_*` (15 platform types, §17.1) · `PLATFORM_TYPES` · `type_for_status(status)` · `type_uri(...)` | registry of record: gincommon's `docs/problem-details/registry.md` (drift-tested) |
-| P-3 | `build_problem(t, *, base, detail, error_code, instance, trace_id, tenant_id, validation_errors)` | 5xx never carries detail / validation errors |
+| P-3 | `build_problem(t, *, base, detail, error_code, instance, trace_id, tenant_id, validation_errors, timestamp, extensions)` · `valid_extension_name(name)` | internal-error never carries detail / validation errors / extensions; extensions after the standard members, sorted, invalid names dropped |
 | P-4 | `resolve_trace_id(traceparent, request_id, span_trace_id)` · `trace_id_from_traceparent` · `sanitized_request_id` · `new_trace_id` · `utc_timestamp` | gincommon / pgcommon-py order and vectors |
-| P-5 | `parse_problem(body)` · `problem_from_response(response)` · `is_problem_content_type(ct)` | client-side decoding |
+| P-5 | `parse_problem(body)` · `problem_from_response(response)` · `is_problem_content_type(ct)` · `Problem.extensions` · `Problem.extension(name, typ, default=None)` | client-side decoding; unrecognised members kept in `extensions`, decoded strictly into `typ` |
 
 #### `fastapicommon.logging`
 
@@ -667,7 +667,8 @@ Zap layout (§11.4). Every entry written during a request also carries `request_
 | `grpc_request` | info OK · warn client codes · error otherwise | gRPC interceptors | `method` (bounded), `grpc_code` (Go names), `duration_ms`, `request_id`, `user_id` / `tenant_id` (verified only) |
 | `auth: request rejected` | warn | `require_authenticated_user` | `reason`, `method`, `route`, `status`, `client_ip`, `trace_id`, `request_id`, `claimed_user_id`, `claimed_tenant_id` |
 | `authz: access denied` | warn | role dependencies | `tenant_id`, `user_id`, `roles`, `action` (`require_role:<r>`, ...), `resource` (route template) |
-| `problem response` | warn | every problem (`problem_response`) | `traceId`, `type`, `status`, `errorCode`, `service`, `tenantId` (verified only). Never detail, instance or identity |
+| `problem response` | warn | every problem (`problem_response`) | `traceId`, `type`, `status`, `errorCode`, `service`, `tenantId` (verified only). Never detail, instance, extensions or identity |
+| `problem extensions dropped` | warn | a problem whose extension values could not be serialised (sent without them) | `traceId`, `type`, `status`, `errorCode`, `service`. Never the values or the error text |
 | `unclassified error` | error (diagnostics; alert on the metric) | HTTP: `UnhandledErrorMiddleware` / handler; gRPC: the interceptors | `classified=false`, `traceId` (HTTP), `trace_id`, `request_id`, `service`; HTTP `method`, `route`, `operation` (endpoint `module.qualname`), `status`, `errorCode`; gRPC `grpc_method`, `grpc_code=Internal`; `error_type`, `error_chain` (≤ 8 types along `__cause__` / `__context__` / groups), `stack` (≤ 30 `file:line in function`). **Never the exception message** |
 | `rate limited` | warn, ≤ 1 per route per second | `PrometheusMiddleware` | `route`, `method`, `status`, `suppressed` |
 | `metrics handler error` | error | `/metrics` | `error` |

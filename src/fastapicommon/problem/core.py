@@ -1,6 +1,6 @@
 """RFC 9457 Problem Details: the platform's single HTTP error contract.
 
-The Python port of platform-gincommon's ``pkg/problem`` (v2.0.0). The type registry, titles,
+The Python port of platform-gincommon's ``pkg/problem`` (v2.1.0). The type registry, titles,
 error codes, trace-id resolution and validation messages are the same as Go's, so a Go and a
 Python service answer the same request with the same problem. Framework-free on purpose: the
 FastAPI wiring lives in ``fastapicommon.exceptions``.
@@ -8,13 +8,17 @@ FastAPI wiring lives in ``fastapicommon.exceptions``.
 
 from __future__ import annotations
 
+import builtins
+import json
 import re
 import secrets
 from collections.abc import Iterable, Mapping
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from datetime import UTC, datetime
 from http import HTTPStatus
-from typing import Any
+from typing import Any, TypeVar
+
+_T = TypeVar("_T")
 
 PROBLEM_MEDIA_TYPE = "application/problem+json"
 DEFAULT_PROBLEM_TYPE_BASE = "https://errors.company.com"
@@ -160,6 +164,60 @@ class FieldError:
     message: str
 
 
+# --- extension members (RFC 9457 §3.2; gincommon problem/extensions.go) ---
+
+#: RFC 9457 §3.2's recommendation for extension member names: a letter, then letters, digits
+#: or ``_``, at least three characters in all.
+_EXTENSION_NAME_RE = re.compile(r"[A-Za-z][A-Za-z0-9_]{2,}")
+
+#: The JSON names of the problem's own members (RFC 9457's and the platform's), exactly
+#: gincommon's ``standardMembers``. An extension never replaces one of them.
+_STANDARD_MEMBERS: tuple[str, ...] = (
+    "type",
+    "title",
+    "status",
+    "detail",
+    "instance",
+    "traceId",
+    "errorCode",
+    "tenantId",
+    "timestamp",
+    "validationErrors",
+)
+_STANDARD_MEMBERS_FOLDED = frozenset(m.casefold() for m in _STANDARD_MEMBERS)
+
+
+def _is_standard_member(name: str) -> bool:
+    """Whether ``name`` is a problem member, ignoring case (gincommon: ``strings.EqualFold``,
+    because Go's encoding/json matches struct members case-insensitively, so ``"Status"``
+    would overwrite ``status`` in a Go client)."""
+    return name.casefold() in _STANDARD_MEMBERS_FOLDED
+
+
+def valid_extension_name(name: str) -> bool:
+    """Whether ``name`` may be sent as an extension member (Go: ``problem.ValidExtensionName``):
+    it follows RFC 9457 §3.2 (a letter, then letters, digits or ``_``, at least three
+    characters) and is not a standard or platform member in any letter case (``status``,
+    ``TraceID``, ...). Any other name is dropped when the problem is built, so an extension can
+    never overwrite a standard member."""
+    return (
+        isinstance(name, str)
+        and _EXTENSION_NAME_RE.fullmatch(name) is not None
+        and not _is_standard_member(name)
+    )
+
+
+def _valid_extensions(extensions: Mapping[str, Any] | None) -> dict[str, Any]:
+    """``extensions`` without the names :func:`valid_extension_name` rejects, sorted by name
+    (code-point order, which for the ASCII names allowed is gincommon's byte order). A shallow
+    copy."""
+    if not extensions:
+        return {}
+    return {
+        name: extensions[name] for name in sorted(n for n in extensions if valid_extension_name(n))
+    }
+
+
 # --- trace correlation (identical to gincommon problem.ResolveTraceID / pgcommon-py) ---
 
 _TRACEPARENT_RE = re.compile(
@@ -224,9 +282,18 @@ def build_problem(
     tenant_id: str | None = None,
     validation_errors: Iterable[FieldError] = (),
     timestamp: datetime | None = None,
+    extensions: Mapping[str, Any] | None = None,
 ) -> dict[str, Any]:
     """The problem body (Go: ``Builder.Build``). Empty optional members are omitted; an
-    internal-error never carries a detail or validationErrors."""
+    internal-error never carries a detail, validationErrors or extension members, whatever was
+    passed, so an exception message cannot leak through it.
+
+    ``extensions`` are RFC 9457 §3.2 extension members (Go: ``Builder.Extension`` /
+    ``Extensions``), added after the standard members, sorted by name. A name that is not a
+    :func:`valid_extension_name` (a standard or platform member in any letter case, or not a
+    letter + ``[A-Za-z0-9_]``, 3+ characters) is dropped, so a standard member always wins.
+    The values are client-visible JSON: never error text, SQL, secrets, tokens or tenant data.
+    Without extensions the body is exactly what it was before extensions existed."""
     if not t.status:
         t = TYPE_INTERNAL_ERROR
     body: dict[str, Any] = {
@@ -248,12 +315,19 @@ def build_problem(
     fields = [{"field": f.field, "message": f.message} for f in validation_errors]
     if fields and not internal:
         body["validationErrors"] = fields
+    if not internal:
+        body.update(_valid_extensions(extensions))
     return body
 
 
 @dataclass(frozen=True, slots=True)
 class Problem:
-    """A parsed problem (for clients). Branch on status, type and error_code, never on text."""
+    """A parsed problem (for clients). Branch on status, type and error_code, never on text.
+
+    ``extensions`` holds every top-level member that is not a standard or platform member
+    (RFC 9457 §3.2), whatever its name, so a client can read a server's extension members
+    (e.g. ``record_version`` on a conflict); read one as a typed value with
+    :meth:`extension`. It is empty when the body has none, and is not part of the hash."""
 
     type: str
     title: str
@@ -265,6 +339,32 @@ class Problem:
     tenant_id: str | None = None
     timestamp: str | None = None
     validation_errors: tuple[FieldError, ...] = ()
+    extensions: Mapping[str, Any] = field(default_factory=dict, hash=False)
+
+    def extension(self, name: str, typ: builtins.type[_T], default: _T | None = None) -> _T | None:
+        """The extension member ``name`` decoded as ``typ`` (Go: ``Problem.Extension``), or
+        ``default`` when the problem does not have it or it is JSON ``null`` (as
+        ``json.Unmarshal`` leaves its destination unchanged on ``null``; check
+        ``name in p.extensions`` to tell the two apart)::
+
+            version = problem.extension("record_version", int)
+            workflows = problem.extension("active_workflows", list[Workflow])
+
+        The value is decoded as JSON into ``typ`` with pydantic in strict mode (any type a
+        ``TypeAdapter`` accepts: ``int``, ``str``, models, dataclasses, ``TypedDict``, generic
+        containers), so ``"7"`` is not an ``int``, as Go's ``json.Unmarshal`` would not take
+        it. Raises ``ValueError`` when the member is present but is not a ``typ``.
+        """
+        value = self.extensions.get(name)
+        if value is None:
+            return default
+        from pydantic import TypeAdapter  # imported here: only clients that read one pay
+
+        try:
+            raw = json.dumps(value, allow_nan=False)
+            return TypeAdapter(typ).validate_json(raw, strict=True)
+        except (TypeError, ValueError) as exc:  # pydantic's ValidationError is a ValueError
+            raise ValueError(f"problem: extension {name!r}: {exc}") from exc
 
 
 def is_problem_content_type(value: str | None) -> bool:
@@ -272,8 +372,11 @@ def is_problem_content_type(value: str | None) -> bool:
 
 
 def parse_problem(body: Mapping[str, Any], status: int | None = None) -> Problem:
-    """Parse a decoded problem body; ``status`` fills a missing ``status`` member. Unknown
-    members are ignored so newer extensions do not break older clients."""
+    """Parse a decoded problem body; ``status`` fills a missing ``status`` member. Members it
+    does not recognise are kept in ``Problem.extensions`` (Go: ``Decode`` / ``FromResponse``),
+    so a client can read a server's extension members (:meth:`Problem.extension`), and a newer
+    server's extensions do not break older clients. A standard member in another letter case
+    (``"Status"``) is neither read nor kept."""
     fields = tuple(
         FieldError(str(f.get("field", "")), str(f.get("message", "")))
         for f in body.get("validationErrors") or ()
@@ -290,6 +393,7 @@ def parse_problem(body: Mapping[str, Any], status: int | None = None) -> Problem
         tenant_id=body.get("tenantId"),
         timestamp=body.get("timestamp"),
         validation_errors=fields,
+        extensions={k: v for k, v in body.items() if not _is_standard_member(k)},
     )
 
 

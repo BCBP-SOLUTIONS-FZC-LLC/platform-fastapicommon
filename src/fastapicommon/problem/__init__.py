@@ -38,6 +38,7 @@ from fastapicommon.problem.core import (
     type_for_status,
     type_uri,
     utc_timestamp,
+    valid_extension_name,
 )
 
 __all__ = [
@@ -78,4 +79,5 @@ __all__ = [
     "type_for_status",
     "type_uri",
     "utc_timestamp",
+    "valid_extension_name",
 ]
