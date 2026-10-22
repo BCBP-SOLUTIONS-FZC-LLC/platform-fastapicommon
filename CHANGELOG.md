@@ -7,6 +7,22 @@ pre-1.0 caveat on what SemVer guarantees currently apply.
 
 ## [Unreleased]
 
+> **Versioning:** additive (planned **0.4.0**, a MINOR). It ports platform-gincommon `v2.1.0`'s RFC 9457 extension members. Nothing changes for problems without extensions: their JSON is byte-for-byte identical to `0.3.0`'s.
+
+### Security
+
+- **Locked `certifi` 2026.7.22 → 2026.10.19 and `virtualenv` 21.14.8 → 21.14.12**, fixing PYSEC-2026-4320 and CVE-2026-113722, which failed `make vulncheck` (CI's *Vulnerability check (pip-audit)*) on `main` as well, so every PR was blocked. `uv.lock` only; no `pyproject.toml` floor changes.
+- **Runtime image: `ca-certificates` 20250419 → 20250419+deb13u1** (DSA-6572-1), pinned in the Dockerfile next to the `liblzma5` fix until the base digest is refreshed past it. The pinned `python:3.14-slim` base failed CI's *Trivy CVE scan* on it, on `main` as well.
+
+### Added
+
+- **RFC 9457 §3.2 extension members** on problems, the port of platform-gincommon `v2.1.0` ([gincommon #47](https://github.com/BCBP-SOLUTIONS-FZC-LLC/platform-gincommon/pull/47)). Services no longer need to hand-build a `JSONResponse` to add members such as `record_version`, which bypassed `problem_response`'s `traceId`, `instance`, verified `tenantId` and logging.
+  - `PlatformException(..., extensions=...)`, `PlatformException.with_extension(name, value)` and `with_extensions(mapping)` (both return the exception, so `raise ConflictException(...).with_extension("record_version", 7)` works); `platform_exception_handler` carries them through with `traceId`, `instance`, verified `tenantId` and logging unchanged. `problem_response(..., extensions=)` and `build_problem(..., extensions=)` take them directly.
+  - Extensions are serialised as top-level members after the standard ones, sorted by name. `fastapicommon.problem.valid_extension_name(name)`: RFC 9457's letter + `[A-Za-z0-9_]`, 3+ characters, and not a standard or platform member in any letter case (gincommon's reserved list). Other names are **dropped**, so an extension can never overwrite `status`, `traceId`, `tenantId` or any other standard member.
+  - An `internal-error` drops every extension, as it drops its detail.
+  - An extension value that cannot be serialised as JSON (a `set`, `NaN`, an arbitrary object) drops all the extensions, the problem is still sent, and a warn-level `problem extensions dropped` entry is logged with gincommon's fields (`traceId`, `type`, `status`, `errorCode`, `service`), never the values.
+  - `parse_problem` / `problem_from_response` keep every unrecognised top-level member in the new `Problem.extensions` (it used to ignore them); `Problem.extension(name, typ, default=None)` decodes one strictly into a typed value with pydantic (gincommon's `Problem.Extension`). `Problem.extensions` is excluded from the hash, so a `Problem` stays hashable.
+
 ## [0.3.0] - 2026-10-17
 
 > **Versioning:** this release is **0.3.0**, a MINOR that breaks, as SemVer allows while the

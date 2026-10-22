@@ -44,8 +44,10 @@ ARG SOURCE_DATE_EPOCH
 # (`make pin-base-images`; Trivy's gate flags any fixable one). apt's lists, logs and caches
 # are removed so they do not vary the image between builds.
 # DSA-6549-1 (xz-utils): liblzma5 5.8.1-1+deb13u1 -> 5.8.1-1+deb13u2.
+# DSA-6572-1 (ca-certificates): ca-certificates 20250419 -> 20250419+deb13u1.
 RUN apt-get update \
     && apt-get install --yes --no-install-recommends liblzma5=5.8.1-1+deb13u2 \
+        ca-certificates=20250419+deb13u1 \
     && rm -rf /var/lib/apt/lists/* /var/cache/apt/* /var/log/apt /var/log/dpkg.log \
         /var/cache/ldconfig/aux-cache
 

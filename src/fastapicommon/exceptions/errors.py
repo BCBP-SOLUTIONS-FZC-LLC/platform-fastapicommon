@@ -1,6 +1,7 @@
 from __future__ import annotations
 
-from collections.abc import Iterable
+from collections.abc import Iterable, Mapping
+from typing import Any, Self
 
 from fastapicommon.problem import (
     TYPE_BUSINESS_RULE_VIOLATION,
@@ -27,7 +28,9 @@ class PlatformException(Exception):
 
         raise PlatformException("Tender 123 was not found.", problem_type=TENDER_NOT_FOUND)
 
-    A 5xx internal-error never sends its detail.
+    ``extensions`` are RFC 9457 §3.2 extension members sent at the top level of the problem,
+    after the standard members (see :meth:`with_extension`). A 5xx internal-error never sends
+    its detail or its extensions.
     """
 
     problem_type: ProblemType = TYPE_INTERNAL_ERROR
@@ -54,13 +57,44 @@ class PlatformException(Exception):
         problem_type: ProblemType | None = None,
         code: str | None = None,
         validation_errors: Iterable[FieldError] = (),
+        extensions: Mapping[str, Any] | None = None,
     ) -> None:
         if problem_type is not None:
             self.problem_type = problem_type
         self.message = message if message is not None else self.default_message
         self.code = code or self.problem_type.code
         self.validation_errors = tuple(validation_errors)
+        self.extensions: dict[str, Any] = dict(extensions) if extensions else {}
         super().__init__(self.message or self.problem_type.title)
+
+    def with_extension(self, name: str, value: Any) -> Self:
+        """Set the extension member ``name`` to ``value`` and return the exception (Go:
+        ``Error.WithExtension``), e.g. the version a client needs to retry an optimistic-lock
+        conflict::
+
+            raise ConflictException("The tenant was modified concurrently.").with_extension(
+                "record_version", 7
+            )
+
+        The member is sent at the top level of the problem body, after the standard members.
+        A name that is not a ``valid_extension_name`` (a standard or platform member such as
+        ``status`` or ``traceId`` in any letter case, or not a letter followed by letters,
+        digits or ``_``, 3+ characters) is dropped when the problem is built, so it can never
+        replace a standard member. ``value`` is serialised as JSON (``dict``, ``list``,
+        ``tuple``, ``str``, ``int``, ``float``, ``bool``, ``None``; convert a model with
+        ``model_dump(mode="json")``) and is client-visible: never put error text, SQL, secrets,
+        tokens or tenant data in it. An internal-error drops every extension, as it drops its
+        detail.
+        """
+        self.extensions[name] = value
+        return self
+
+    def with_extensions(self, extensions: Mapping[str, Any]) -> Self:
+        """Set every entry of ``extensions`` as an extension member (see
+        :meth:`with_extension`) and return the exception (Go: ``Error.WithExtensions``); later
+        values replace earlier ones of the same name."""
+        self.extensions.update(extensions)
+        return self
 
     @property
     def status_code(self) -> int:

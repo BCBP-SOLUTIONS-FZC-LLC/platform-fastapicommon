@@ -2,7 +2,7 @@ flowchart TD
     A(["Exception while handling a request"]) --> B{"Type (FastAPI exception handlers,<br/>registered by register_exception_handlers)"}
 
     B -->|"PlatformException subclass"| C["platform_exception_handler"]
-    C --> D["problem_response(exc.problem_type, detail=exc.message, error_code=exc.code)"]
+    C --> D["problem_response(exc.problem_type, detail=exc.message, error_code=exc.code, extensions=exc.extensions)"]
 
     B -->|"RequestValidationError"| E["request_validation_exception_handler"]
     E --> F["400 validation-failed + validationErrors<br/>(field paths; the rejected value is never echoed)"]

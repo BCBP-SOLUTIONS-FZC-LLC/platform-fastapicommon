@@ -37,6 +37,30 @@ raise ConflictException("The tender is being edited.", code="TENDER_LOCKED")
 - `tenantId` is set only when the request carries an authenticated identity (`x-user-id`), and never on a 401.
 - `traceId` is the first usable value of: a valid `traceparent`'s trace-id, a sanitized `x-request-id`, the active span's trace id, or a new 32-hex id.
 
+## Extension members
+
+A problem type may carry its own [RFC 9457 §3.2](https://www.rfc-editor.org/rfc/rfc9457#section-3.2) extension members, such as the version a client needs to retry an optimistic-lock conflict (gincommon `v2.1.0`'s `Error.WithExtension`):
+
+```python
+raise ConflictException("The tenant was modified concurrently.").with_extension("record_version", 7)
+raise BusinessRuleViolationException("The user is a delegate on active workflows.").with_extensions(
+    {"active_workflows": ["wf-1", "wf-2"]}
+)
+raise ConflictException("Locked.", extensions={"record_version": 7})       # the same, as a keyword
+return problem_response(request, TYPE_CONFLICT, detail="...", extensions={"record_version": 7})
+```
+
+```json
+{"type": "https://errors.company.com/platform/conflict", "title": "Conflict", "status": 409, "...": "...", "record_version": 7}
+```
+
+- They are sent at the top level, **after** the standard members, **sorted by name** (code-point order: upper case first), so the body is deterministic and identical to gincommon's. A problem without extensions is byte-for-byte what it was before.
+- **A standard member always wins.** A name must be `valid_extension_name(name)`: RFC 9457's letter followed by letters, digits or `_`, at least 3 characters, and not a standard or platform member (`type`, `title`, `status`, `detail`, `instance`, `traceId`, `errorCode`, `tenantId`, `timestamp`, `validationErrors`) in any letter case. Any other name is dropped, so an extension can never replace `status`, `traceId` or `tenantId`.
+- An `internal-error` drops every extension, as it drops its detail. Other 5xx types keep theirs.
+- Values are client-visible JSON (`dict`, `list`, `tuple`, `str`, `int`, `float`, `bool`, `None`): never error text, SQL, secrets, tokens or tenant data. Convert a model with `model_dump(mode="json")` first. If a value cannot be serialised (a `set`, `NaN`, an arbitrary object), the problem is still sent, **without** its extensions, and a warn `problem extensions dropped` entry is logged with `traceId`, `type`, `status`, `errorCode` and `service`, never the values.
+- Extensions are not logged in `problem response`.
+- Document a type's extension members in your service's OpenAPI by extending gincommon's `ProblemDetails` schema with `allOf`; clients ignore members they do not know.
+
 ## Validation errors
 
 `RequestValidationError` is mapped to the same field paths and messages gincommon derives from validator tags:
@@ -91,9 +115,11 @@ from fastapicommon.problem import problem_from_response
 problem = problem_from_response(resp)  # None unless application/problem+json
 if problem is not None and problem.error_code == "TENDER_NOT_FOUND":
     ...
+if problem is not None and problem.status == 409:
+    version = problem.extension("record_version", int)  # None when absent (or null)
 ```
 
-Branch on `status`, `type` and `error_code`, never on the text of `title` or `detail`.
+Branch on `status`, `type` and `error_code`, never on the text of `title` or `detail`. Every top-level member the parser does not recognise is kept in `problem.extensions`, whatever its name (a third-party server's `balance` or `x-vendor` too); a standard member in another letter case (`"Status"`) is neither read nor kept. `problem.extension(name, typ, default=None)` decodes one strictly with pydantic (`int`, models, dataclasses, `list[...]`, ...) and raises `ValueError` when it is present but not a `typ` (`"7"` is not an `int`, as in Go).
 
 ## Migrating from 0.2.x
 
