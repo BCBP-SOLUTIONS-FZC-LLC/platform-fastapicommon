@@ -4,7 +4,7 @@ This repository is a **Python package** (`platform-fastapicommon` on PyPI, impor
 
 ## Semantic versioning (SemVer)
 
-We use [SemVer 2.0.0](https://semver.org/): `MAJOR.MINOR.PATCH` (e.g. `v0.4.0`).
+We use [SemVer 2.0.0](https://semver.org/): `MAJOR.MINOR.PATCH` (e.g. `v0.4.1`).
 
 | Bump | When you change | Examples |
 |------|------------------|----------|
@@ -38,7 +38,7 @@ Import **`fastapicommon.<subpackage>`** only. Python cannot enforce this the way
 
 | Version | Status | PyPI | Supported until |
 |---------|--------|------|-----------------|
-| `0.4.x` | **Current** (from `v0.4.0`, 2026-10-22) | `platform-fastapicommon==0.4.0` | Active |
+| `0.4.x` | **Current** (from `v0.4.0`, 2026-10-22; latest `v0.4.1`, 2026-10-27) | `platform-fastapicommon==0.4.1` | Active |
 | `0.3.x` | Superseded | `==0.3.0` | No further releases; upgrade to `0.4.x` (additive) |
 | `0.2.x` | Superseded | `==0.2.0` | No further releases; upgrade to `0.4.x` |
 | `0.1.x` | Superseded | `==0.1.1` | No further releases; upgrade to `0.4.x` |
@@ -50,14 +50,14 @@ Releases up to `v0.2.0` predate release signing and `SHA256SUMS`. When `1.0.0` s
 Pin in your service's `pyproject.toml` / requirements:
 
 ```bash
-pip install "platform-fastapicommon==0.4.0"          # or "platform-fastapicommon[grpc]==0.4.0"
-uv add "platform-fastapicommon[grpc]==0.4.0"
+pip install "platform-fastapicommon==0.4.1"          # or "platform-fastapicommon[grpc]==0.4.1"
+uv add "platform-fastapicommon[grpc]==0.4.1"
 ```
 
 | Pin style | Use when |
 |-----------|----------|
-| `==0.4.0` | Production; exact reproducibility (recommended while `0.y.z`) |
-| `~=0.4.0` | Production; accept PATCH updates on `0.4.x` |
+| `==0.4.1` | Production; exact reproducibility (recommended while `0.y.z`) |
+| `~=0.4.1` | Production; accept PATCH updates on `0.4.x` |
 | `>=0.4,<0.5` | The same, written as a range |
 | unpinned / `>=0.4` | Experiments only; never in production, especially pre-1.0 |
 
