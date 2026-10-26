@@ -75,6 +75,11 @@ if [ "$rc" -gt 1 ] || { [ "$rc" -eq 1 ] && [ ! -s "$tmp/breaking.txt" ]; } \
   echo "::error title=API compatibility::griffe check failed (exit ${rc}) — see the output above"
   exit 1
 fi
+# `__version__` changes value on every release by design; griffe reports that as a
+# breaking attribute change, which would fail every PATCH release.
+grep -vE '^[^[:space:]:]+:[0-9]+: __version__: Attribute value was changed' "$tmp/breaking.txt" \
+  > "$tmp/filtered.txt" || true
+mv "$tmp/filtered.txt" "$tmp/breaking.txt"
 if [ -s "$tmp/other.txt" ]; then
   echo "::group::griffe log"
   cat "$tmp/other.txt"
