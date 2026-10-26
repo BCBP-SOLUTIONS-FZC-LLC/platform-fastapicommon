@@ -121,7 +121,7 @@ jobs:
           token: ${{ secrets.CI_REPO_READ_TOKEN || github.token }}
 
       - name: Install uv
-        uses: astral-sh/setup-uv@1c37ad07a6a961277cf70c0d37d6f313000f5884 # v10.3.0
+        uses: astral-sh/setup-uv@18d369b23da25a81e9458561248e1aafff6a70fa # v10.3.1
         with:
           # The uv the Dockerfile pins, so CI and the image resolve and build alike.
           version: '0.13.1'
@@ -190,7 +190,7 @@ jobs:
           token: ${{ secrets.CI_REPO_READ_TOKEN || github.token }}
 
       - name: Install uv
-        uses: astral-sh/setup-uv@1c37ad07a6a961277cf70c0d37d6f313000f5884 # v10.3.0
+        uses: astral-sh/setup-uv@18d369b23da25a81e9458561248e1aafff6a70fa # v10.3.1
         with:
           # The uv the Dockerfile pins, so CI and the image resolve and build alike.
           version: '0.13.1'
@@ -348,7 +348,7 @@ jobs:
           cache-dir: /tmp/trivy-cache
 
       - name: Upload SARIF to GitHub Security tab
-        uses: github/codeql-action/upload-sarif@24c54180a607b1449ed407dd24f251e4e9147c8d # v4.38.3
+        uses: github/codeql-action/upload-sarif@9b3254085494b55a0f7c4c2b3d2d52cc712ce370 # v4.39.1
         continue-on-error: true
         with:
           sarif_file: trivy-results.sarif
@@ -423,7 +423,7 @@ jobs:
         run: bash .github/scripts/smoke-tests.sh
 
       - name: Install uv
-        uses: astral-sh/setup-uv@1c37ad07a6a961277cf70c0d37d6f313000f5884 # v10.3.0
+        uses: astral-sh/setup-uv@18d369b23da25a81e9458561248e1aafff6a70fa # v10.3.1
         with:
           # The uv the Dockerfile pins, so CI and the image resolve and build alike.
           version: '0.13.1'
@@ -467,7 +467,7 @@ jobs:
           token: ${{ secrets.CI_REPO_READ_TOKEN || github.token }}
 
       - name: Install uv
-        uses: astral-sh/setup-uv@1c37ad07a6a961277cf70c0d37d6f313000f5884 # v10.3.0
+        uses: astral-sh/setup-uv@18d369b23da25a81e9458561248e1aafff6a70fa # v10.3.1
         with:
           # The uv the Dockerfile pins, so CI and the image resolve and build alike.
           version: '0.13.1'
@@ -685,7 +685,7 @@ jobs:
         run: bash .github/scripts/release-checksums.sh
 
       - name: Publish to PyPI
-        uses: pypa/gh-action-pypi-publish@dc37677b2e1c63e2034f94d8a5b11f265b73ba33 # v1.14.2 (release/v1)
+        uses: pypa/gh-action-pypi-publish@7245906fb61fa33a13554f9d5fb856fe61758086 # v1.14.2 (release/v1)
         with:
           packages-dir: dist/
 

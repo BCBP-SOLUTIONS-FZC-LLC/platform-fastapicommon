@@ -7,6 +7,14 @@ pre-1.0 caveat on what SemVer guarantees currently apply.
 
 ## [Unreleased]
 
+### Security
+
+- **Locked `filelock` 4.2.0 → 4.2.4 and `setuptools` 84.0.0 → 84.2.1**, fixing CVE-2026-112906, -112907, -112913, -112914, -112937, -112940 and GHSA-xmj3-9gf7-h52w, which failed `make vulncheck` (CI's *Vulnerability check (pip-audit)*). `uv.lock` only; both are development or build tools, not runtime dependencies.
+
+### Changed
+
+- **Dependencies:** locked `fastapi` 0.143.3 → 0.156.4, `starlette` 1.8.0 → 1.9.0, `pydantic-settings` 2.16.0 → 2.16.1 and (dev) `griffe` 2.3.2 → 2.4.0; example image `astral-sh/uv` 0.13.1 → 0.13.5; CI actions `astral-sh/setup-uv` 10.3.0 → 10.3.1, `pypa/gh-action-pypi-publish` 1.14.2 → 1.14.3 and `github/codeql-action/upload-sarif` 4.38.3 → 4.39.1. `uv.lock`, `Dockerfile` and workflows only; no `pyproject.toml` floor changes (consolidates Dependabot #39 – #46).
+
 ## [0.4.0] - 2026-10-22
 
 > **Versioning:** this release is **0.4.0**, an additive MINOR. It ports platform-gincommon `v2.1.0`'s RFC 9457 extension members. Nothing changes for problems without extensions: their JSON is byte-for-byte identical to `0.3.0`'s.
