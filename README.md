@@ -221,8 +221,8 @@ Computed from the imports; the full graph is in [ARCHITECTURE.md](ARCHITECTURE.m
 ### 1. Prerequisites
 
 ```bash
-pip install "platform-fastapicommon==0.4.0"          # or [grpc] for the gRPC interceptors
-# uv: uv add "platform-fastapicommon[grpc]==0.4.0"
+pip install "platform-fastapicommon==0.4.1"          # or [grpc] for the gRPC interceptors
+# uv: uv add "platform-fastapicommon[grpc]==0.4.1"
 ```
 
 Python 3.11+. Pin an exact version — never unpinned in production, especially while `0.y.z` ([VERSIONING.md](VERSIONING.md#consume-a-release)). The PyPI distribution name is `platform-fastapicommon`; the import name is `fastapicommon` (`fastapicommon` alone was rejected by PyPI as too similar to an unrelated package). Requests must arrive through the trusted API gateway, which authenticates the caller and injects `x-user-id` / `x-tenant-id` / `x-tenant-roles`; the service must not be reachable around the gateway.
@@ -722,7 +722,8 @@ SemVer over each subpackage's `__all__` ([VERSIONING.md](VERSIONING.md)); while 
 
 | Version | Status | `pip install` | Notes |
 |---|---|---|---|
-| **v0.4.0** | Current (2026-10-22) | `platform-fastapicommon==0.4.0` | platform-gincommon `v2.1.0` alignment: RFC 9457 extension members; additive — from `0.3.x` only the pin changes |
+| **v0.4.1** | Current (2026-10-27) | `platform-fastapicommon==0.4.1` | Dependency and security patch (FastAPI 0.156.4, Starlette 1.9.0, pydantic-settings 2.16.1); no API change |
+| v0.4.0 | Superseded | `==0.4.0` | platform-gincommon `v2.1.0` alignment: RFC 9457 extension members; additive — from `0.3.x` only the pin changes |
 | v0.3.0 | Superseded | `==0.3.0` | platform-gincommon `v2.0.0` alignment; breaking — follow [Upgrading to 0.3.0](#10-upgrading-to-030). First signed release (`SHA256SUMS`, Cosign) |
 | v0.2.0 | Superseded | `==0.2.0` | Predates release signing and `SHA256SUMS` |
 | v0.1.0 – v0.1.1 | Superseded | `==0.1.1` | No further releases |

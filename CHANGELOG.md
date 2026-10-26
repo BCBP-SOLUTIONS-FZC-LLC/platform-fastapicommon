@@ -7,6 +7,10 @@ pre-1.0 caveat on what SemVer guarantees currently apply.
 
 ## [Unreleased]
 
+## [0.4.1] - 2026-10-27
+
+> **Versioning:** this release is **0.4.1**, a PATCH: dependency updates and security fixes only. No public API or behaviour change.
+
 ### Security
 
 - **Locked `filelock` 4.2.0 → 4.2.4 and `setuptools` 84.0.0 → 84.2.1**, fixing CVE-2026-112906, -112907, -112913, -112914, -112937, -112940 and GHSA-xmj3-9gf7-h52w, which failed `make vulncheck` (CI's *Vulnerability check (pip-audit)*). `uv.lock` only; both are development or build tools, not runtime dependencies.
@@ -754,7 +758,8 @@ First release of `fastapicommon`.
   shared GitHub-hosted runner IP). All 5 places it's used across `ci.yml`/`release.yml`
   now retry once with the same action before failing the job.
 
-[Unreleased]: https://github.com/BCBP-SOLUTIONS-FZC-LLC/platform-fastapicommon/compare/v0.4.0...HEAD
+[Unreleased]: https://github.com/BCBP-SOLUTIONS-FZC-LLC/platform-fastapicommon/compare/v0.4.1...HEAD
+[0.4.1]: https://github.com/BCBP-SOLUTIONS-FZC-LLC/platform-fastapicommon/compare/v0.4.0...v0.4.1
 [0.4.0]: https://github.com/BCBP-SOLUTIONS-FZC-LLC/platform-fastapicommon/compare/v0.3.0...v0.4.0
 [0.3.0]: https://github.com/BCBP-SOLUTIONS-FZC-LLC/platform-fastapicommon/compare/v0.2.0...v0.3.0
 [0.2.0]: https://github.com/BCBP-SOLUTIONS-FZC-LLC/platform-fastapicommon/compare/v0.1.1...v0.2.0
