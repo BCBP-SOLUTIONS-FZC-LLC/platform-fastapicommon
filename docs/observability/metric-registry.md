@@ -139,7 +139,7 @@ Every metric carries the centrally injected const labels `domain`, `service`, `e
 | Label | Allowed values | Max distinct values | Cardinality | Meaning |
 |---|---|---|---|---|
 | `dependency` | pattern `^[a-z0-9][a-z0-9._-]{0,63}$` | 50 | bounded by configured dependencies | Downstream dependency (database, broker, HTTP API) by logical name. |
-| `domain` | `iam`, `workflow`, `billing`, `tender_management`, `notifications`, `documents` | - | fixed | Business domain that owns the emitting service. Injected centrally from Config.Domain / OBSERVABILITY_DOMAIN. |
+| `domain` | `iam`, `workflow`, `billing`, `tender_management`, `notifications`, `documents`, `bff`, `portal` | - | fixed | Business domain that owns the emitting service. Injected centrally from Config.Domain / OBSERVABILITY_DOMAIN. |
 | `environment` | `local`, `dev`, `test`, `staging`, `prod` | - | fixed | Deployment environment. Injected centrally from Config.Environment, else APP_ENV, else ENVIRONMENT (trimmed, lowercased; no aliases, so production is rejected: use prod). Same precedence in every platform library. |
 | `error_class` | `success`, `client_error`, `server_error` | - | fixed | Outcome class matching status_class. |
 | `event_type` | pattern `^.{1,128}$` | 203 | bounded by the event catalogue and the per-process event_type limit | Event envelope type (<domain>.<entity>.<past-tense-verb>[.v<N>]). Bounded by the emitter: unknown when empty, __oversized__ over 128 bytes, __other__ once the process limit of distinct values (platform-events default 200) is reached. |

@@ -7,6 +7,10 @@ pre-1.0 caveat on what SemVer guarantees currently apply.
 
 ## [Unreleased]
 
+### Changed
+
+- **Registry: `bff` and `portal` added to the approved `domain` label vocabulary** (`src/fastapicommon/metrics/registry.json`, re-vendored byte for byte from platform-gincommon v2.3.0). `bff` is for Backend-for-Frontend services (gincommon #49); `portal` is the page domain of a web shell that fronts several business domains (the frontend SDK's design, §D1). Services can set `OBSERVABILITY_DOMAIN=bff` or `portal` without a startup `ValueError`. `docs/observability/metric-registry.md` regenerated via `make metrics-inventory`; CI's gincommon parity check now compares with `GINCOMMON_REF: v2.3.0`.
+
 ## [0.4.1] - 2026-10-27
 
 > **Versioning:** this release is **0.4.1**, a PATCH: dependency updates and security fixes only. No public API or behaviour change.

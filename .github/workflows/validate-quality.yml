@@ -48,7 +48,7 @@ env:
   FORCE_JAVASCRIPT_ACTIONS_TO_NODE24: 'true'
   # The platform-gincommon release whose Platform Observability Registry and reference
   # Prometheus rules are vendored here byte for byte (the gincommon parity step below).
-  GINCOMMON_REF: v2.0.0
+  GINCOMMON_REF: v2.3.0
 
 jobs:
   quality:

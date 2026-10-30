@@ -333,7 +333,7 @@ Vendored byte for byte from `platform-gincommon/internal/obsregistry/registry.js
 | `labels` | 26 label definitions |
 | `metrics` | 115 entries: 6 `approved`, 52 `proposed`, 57 `removed` (legacy). Tiers: 50 platform, 8 domain, 57 legacy. Owners of live entries: platform-events 23, platform-gincommon 17, platform-pgcommon 10, 8 ownerless (domain tier) |
 
-Key vocabularies (same as gincommon): `domain` ∈ `iam`, `workflow`, `billing`, `tender_management`, `notifications`, `documents`; `environment` ∈ `local`, `dev`, `test`, `staging`, `prod` (no aliases — `production` and `development` are rejected); `service` `^[a-z][a-z0-9_-]{0,62}$`; `route` Gin syntax (`/items/:item_id`, `*rest`) or `unknown`; `grpc_method` `/<pkg.Service>/<Method>` or `unknown`; `transport` ∈ `http`, `grpc`.
+Key vocabularies (same as gincommon): `domain` ∈ `iam`, `workflow`, `billing`, `tender_management`, `notifications`, `documents`, `bff`, `portal`; `environment` ∈ `local`, `dev`, `test`, `staging`, `prod` (no aliases — `production` and `development` are rejected); `service` `^[a-z][a-z0-9_-]{0,62}$`; `route` Gin syntax (`/items/:item_id`, `*rest`) or `unknown`; `grpc_method` `/<pkg.Service>/<Method>` or `unknown`; `transport` ∈ `http`, `grpc`.
 
 `ObservabilityRegistry` parsing is strict (unknown fields, duplicate names, undefined labels or presets are errors); a broken vendored registry fails import and the test suite.
 
