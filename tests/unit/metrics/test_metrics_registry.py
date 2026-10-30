@@ -91,6 +91,23 @@ def test_label_patterns_use_full_match_semantics() -> None:
     assert not service.allows("svc\n")
 
 
+def test_domain_vocabulary_is_pinned() -> None:
+    # Startup rejects any other OBSERVABILITY_DOMAIN, and consumers rely on these values (same pin
+    # as gincommon's TestDomains_Vocabulary), so removing or renaming one is a breaking change.
+    assert default_registry().domains() == (
+        "iam",
+        "workflow",
+        "billing",
+        "tender_management",
+        "notifications",
+        "documents",
+        "bff",
+        "portal",
+    )
+    # The startup check (OBSERVABILITY_DOMAIN) accepts the newest value.
+    default_registry().check_identity("portal", "web-app", "prod")
+
+
 def test_registry_without_identity_vocabularies_accepts_nothing() -> None:
     document = json.loads(registry_bytes())
     del document["labels"]["environment"]
